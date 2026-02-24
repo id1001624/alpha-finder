@@ -312,10 +312,10 @@ class GoogleSheetsUploader:
 
     def upload_daily_report(self, sheet1: pd.DataFrame, sheet2: pd.DataFrame,
                            sheet3: pd.DataFrame, date_str: str = None) -> bool:
-        """上傳每日完整報告（三合一管理模式）"""
+        """上傳每日完整報告（三合一管理模式，date_str 預設為前一日收盤）"""
         try:
             if date_str is None:
-                date_str = datetime.now().strftime("%Y-%m-%d")
+                date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
             print(f"\n[*] 開始上傳每日報告（日期: {date_str}）")
 
@@ -342,11 +342,11 @@ class GoogleSheetsUploader:
         """
         上傳完整 40 檔掃描結果到「全量數據」工作表
         供 Perplexity / ChatGPT 讀取進行 AI 分析
-        每次執行覆蓋上次資料（tab 名稱固定，不按日期）
+        每次執行覆蓋上次資料（tab 名稱固定，不按日期，date_str 預設為前一日收盤）
         """
         try:
             if date_str is None:
-                date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
             print(f"\n[*] 上傳全量數據（{len(df_enriched)} 檔）到「全量數據」分頁...")
 
@@ -377,7 +377,8 @@ class GoogleSheetsUploader:
                     )
 
             # 加入掃描時間 metadata 列
-            meta_row = pd.DataFrame([{'代碼': f'⏱ 掃描時間: {date_str}  |  共 {len(output)} 檔  |  資料來源: Finviz + Yahoo Finance'}])
+            scan_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            meta_row = pd.DataFrame([{'代碼': f'⏱ {date_str} 收盤數據  |  掃描時間: {scan_time}  |  共 {len(output)} 檔  |  資料來源: Finviz + Yahoo Finance'}])
             final_df = pd.concat([meta_row, output], ignore_index=True)
 
             return self.upload_sheet(final_df, '全量數據', clear_first=True)
