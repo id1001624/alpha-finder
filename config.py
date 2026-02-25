@@ -58,6 +58,35 @@ GSHEET_ENABLED = True
 GSHEET_NAME = "Alpha_Sniper_Daily_Report"
 GSHEET_CREDENTIALS_FILE = "credentials.json"
 
+# ============ API金鑰設定 ============
+# Finnhub 免費 API (60 call/min) - 財報日期 + 分析師目標價
+# 註冊: https://finnhub.io/register
+FINNHUB_API_KEY = ""  # 請填入你的 Finnhub API Key
+
+# ============ 強制白名單 ============
+# 無論 Finviz 篩選結果如何，這些股票必定出現在報告中
+FORCE_INCLUDE = [
+    'NVDA', 'AMD', 'TSM', 'AMAT', 'LRCX', 'KLAC', 'MU',  # 半導體
+    'CRWD', 'PANW', 'ZS',                                 # 網路安全
+    'GEV', 'VRT', 'CEG',                                  # 公用事業/能源
+    'ASTS', 'RKLB',                                       # 航太/衛星
+]
+
+# ============ 彩票股設定 (Track F) ============
+LOTTERY_MIN_GAIN = 10.0        # 單日漲幅 >10%
+LOTTERY_MIN_REL_VOL = 3.0      # 量能倍數 >3
+LOTTERY_MAX_MCAP = 50_000_000_000  # 市值 <$50B
+
+# ============ A/B/C 評級設定 ============
+# A 級條件
+GRADE_A_UPSIDE = 30.0          # 上漲空間 >30%
+GRADE_A_ANALYSTS = 15          # 分析師數 >15
+GRADE_A_SECTORS = ['Technology', 'Healthcare', 'Utilities', 'Industrials']
+
+# B 級條件
+GRADE_B_UPSIDE = 15.0          # 上漲空間 >15%
+GRADE_B_7D_GAIN = 8.0          # 7日漲幅 >8%
+
 # ============ 通知設定（選用）============
 NOTIFICATION_ENABLED = False
 NOTIFICATION_EMAIL = "your-email@gmail.com"

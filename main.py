@@ -53,6 +53,7 @@ import time
 import warnings
 from typing import List, Dict, Tuple
 import yfinance as yf
+import requests  # 新增：用於 Finnhub API 調用
 
 # 從 config.py 導入所有配置常數
 from config import (
@@ -64,6 +65,11 @@ from config import (
     RATING_A_REL_VOL, RATING_A_UPSIDE,
     TOP_N_STOCKS,
     GSHEET_ENABLED, GSHEET_NAME, GSHEET_CREDENTIALS_FILE,
+    # 新增配置
+    FINNHUB_API_KEY, FORCE_INCLUDE,
+    LOTTERY_MIN_GAIN, LOTTERY_MIN_REL_VOL, LOTTERY_MAX_MCAP,
+    GRADE_A_UPSIDE, GRADE_A_ANALYSTS, GRADE_A_SECTORS,
+    GRADE_B_UPSIDE, GRADE_B_7D_GAIN,
 )
 
 # Google Sheets 相關套件
@@ -92,6 +98,98 @@ def retry_on_failure(func, max_retries=3, delay=2.0, backoff=2.0):
             wait = delay * (backoff ** attempt)
             print(f"    [重試] 第 {attempt+1} 次失敗: {e}，等待 {wait:.1f}s...")
             time.sleep(wait)
+
+
+# ============ Finnhub API 函數 ============
+
+def get_finnhub_earnings(ticker: str) -> Dict:
+    """
+    從 Finnhub 取得未來財報日期
+    返回: {'date': 'YYYY-MM-DD', 'time': 'BMO/AMC', 'eps_estimate': float}
+    """
+    if not FINNHUB_API_KEY:
+        return {}
+    
+    try:
+        from_date = datetime.now().strftime("%Y-%m-%d")
+        to_date = (datetime.now() + timedelta(days=EARNINGS_DAYS_AHEAD*2)).strftime("%Y-%m-%d")
+        
+        url = "https://finnhub.io/api/v1/calendar/earnings"
+        params = {
+            'symbol': ticker,
+            'from': from_date,
+            'to': to_date,
+            'token': FINNHUB_API_KEY
+        }
+        
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'earningsCalendar' in data and len(data['earningsCalendar']) > 0:
+                first = data['earningsCalendar'][0]
+                return {
+                    'date': first.get('date', ''),
+                    'time': first.get('hour', ''),
+                    'eps_estimate': first.get('epsEstimate', None)
+                }
+        return {}
+    except Exception as e:
+        return {}
+
+
+def get_finnhub_price_target(ticker: str) -> Dict:
+    """
+    從 Finnhub 取得分析師目標價
+    返回: {'target_price': float, 'num_analysts': int}
+    """
+    if not FINNHUB_API_KEY:
+        return {}
+    
+    try:
+        url = "https://finnhub.io/api/v1/stock/price-target"
+        params = {
+            'symbol': ticker,
+            'token': FINNHUB_API_KEY
+        }
+        
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                'target_price': data.get('targetMean', None),
+                'num_analysts': data.get('numberOfAnalysts', 0)
+            }
+        return {}
+    except Exception as e:
+        return {}
+
+
+def assign_grade(row: pd.Series) -> str:
+    """
+    為股票分配 A/B/C 評級
+    A 級：目標價上漲空間 >30% AND 分析師數 >15 AND 優先產業
+    B 級：目標價上漲空間 >15% OR 7日漲幅 >8%
+    C 級：其他
+    """
+    try:
+        upside = row.get('Upside_Pct', 0)
+        analysts = row.get('Num_Analysts', 0)
+        sector = row.get('Sector', '')
+        chg_7d = row.get('7D_Change', 0)  # 需要添加7日漲幅數據
+        
+        # A 級條件
+        if (upside > GRADE_A_UPSIDE and 
+            analysts > GRADE_A_ANALYSTS and 
+            sector in GRADE_A_SECTORS):
+            return 'A'
+        
+        # B 級條件
+        if upside > GRADE_B_UPSIDE or chg_7d > GRADE_B_7D_GAIN:
+            return 'B'
+        
+        return 'C'
+    except:
+        return 'C'
 
 
 # 優先產業關鍵字
@@ -608,6 +706,80 @@ def create_demo_data() -> pd.DataFrame:
     return pd.DataFrame(demo_stocks)
 
 
+def ensure_whitelist_stocks(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    確保白名單股票（FORCE_INCLUDE）必定出現在結果中
+    若 Finviz 結果中缺少白名單股票，用 yfinance 補抓基本資料
+    """
+    existing_tickers = set(df['Ticker'].values)
+    missing = [t for t in FORCE_INCLUDE if t not in existing_tickers]
+    
+    if not missing:
+        print(f"  [OK] 白名單股票全部存在 ({len(FORCE_INCLUDE)} 檔)")
+        return df
+    
+    print(f"  [!] 發現 {len(missing)} 檔白名單股票缺失: {', '.join(missing)}")
+    print(f"  [*] 正在補抓白名單股票...")
+    
+    补抓_data = []
+    for ticker in missing:
+        try:
+            print(f"    補抓 {ticker}...", end=' ')
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # 獲取基本資料（模仿 Finviz 格式）
+            price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+            market_cap_raw = info.get('marketCap', 0)
+            
+            # 格式化市值
+            if market_cap_raw >= 1e12:
+                market_cap_str = f"{market_cap_raw/1e12:.2f}T"
+            elif market_cap_raw >= 1e9:
+                market_cap_str = f"{market_cap_raw/1e9:.2f}B"
+            elif market_cap_raw >= 1e6:
+                market_cap_raw = f"{market_cap_raw/1e6:.2f}M"
+            else:
+                market_cap_str = "N/A"
+            
+            # 獲取量能數據（如果可用）
+            hist = stock.history(period="5d")
+            if len(hist) >= 2:
+                latest_vol = hist['Volume'].iloc[-1]
+                avg_vol = hist['Volume'].iloc[:-1].mean()
+                rel_volume = latest_vol / avg_vol if avg_vol > 0 else 1.0
+                daily_change = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100) if len(hist) >= 2 else 0
+            else:
+                rel_volume = 1.0
+                daily_change = 0
+            
+            补抓_data.append({
+                'Ticker': ticker,
+                'Company': info.get('longName', ticker),
+                'Sector': info.get('sector', 'Technology'),
+                'Industry': info.get('industry', ''),
+                'Market_Cap_Raw': market_cap_raw,
+                'Market_Cap': market_cap_str,
+                'Price': price,
+                'Volume': info.get('volume', 0),
+                'Rel_Volume': rel_volume,
+                'Daily_Change': daily_change,
+                'Perf_Week': 0,  # 暫時填 0
+                '_signal_score': rel_volume * 3 + daily_change * 2,  # 用於排序
+            })
+            print("[OK]")
+            time.sleep(API_DELAY)
+        except Exception as e:
+            print(f"[X] 失敗: {e}")
+    
+    if 补抓_data:
+        补抓_df = pd.DataFrame(补抓_data)
+        df = pd.concat([df, 补抓_df], ignore_index=True)
+        print(f"  [OK] 成功補抓 {len(补抓_data)} 檔白名單股票\n")
+    
+    return df
+
+
 def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
     """使用 Yahoo Finance 補充詳細資料（財報日期、目標價、新聞）"""
     max_stocks = MAX_STOCKS_TO_PROCESS
@@ -626,8 +798,11 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                 ticker = yf.Ticker(ticker_symbol)
                 info = ticker.info
 
-                # 財報日期
+                # 財報日期 - 優先從 yfinance 取得
                 earnings_date = None
+                earnings_time = None
+                eps_estimate = info.get('forwardEps', None)
+                
                 try:
                     calendar = ticker.calendar
                     if calendar is not None and 'Earnings Date' in calendar:
@@ -636,15 +811,32 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                             earnings_date = dates[0]
                 except Exception:
                     pass
+                
+                # 如果 yfinance 找不到財報日期，嘗試 Finnhub
+                if not earnings_date and FINNHUB_API_KEY:
+                    finnhub_earn = get_finnhub_earnings(ticker_symbol)
+                    if finnhub_earn:
+                        earnings_date = finnhub_earn.get('date')
+                        earnings_time = finnhub_earn.get('time', '')  # BMO/AMC
+                        if not eps_estimate and finnhub_earn.get('eps_estimate'):
+                            eps_estimate = finnhub_earn.get('eps_estimate')
 
-                # 分析師目標價
+                # 分析師目標價 - 優先從 yfinance 取得
                 target_price = info.get('targetMeanPrice', None)
+                num_analysts = info.get('numberOfAnalystOpinions', 0)
+                
+                # 如果 yfinance 找不到目標價，嘗試 Finnhub
+                if (not target_price or num_analysts == 0) and FINNHUB_API_KEY:
+                    finnhub_target = get_finnhub_price_target(ticker_symbol)
+                    if finnhub_target:
+                        if not target_price:
+                            target_price = finnhub_target.get('target_price')
+                        if num_analysts == 0:
+                            num_analysts = finnhub_target.get('num_analysts', 0)
+                
+                # 計算上漲空間
                 current_price = row['Price']
                 upside_pct = ((target_price - current_price) / current_price * 100) if target_price and current_price > 0 else 0
-
-                # EPS 預估 & 分析師數
-                eps_estimate = info.get('forwardEps', None)
-                num_analysts = info.get('numberOfAnalystOpinions', 0)
 
                 # 最新新聞標題
                 news_headline = ""
@@ -657,6 +849,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
 
                 return {
                     'Earnings_Date': earnings_date,
+                    'Earnings_Time': earnings_time,  # 新增：BMO/AMC
                     'Target_Price': target_price,
                     'Upside_Pct': upside_pct,
                     'EPS_Estimate': eps_estimate,
@@ -674,6 +867,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
             enriched_data.append({
                 **row.to_dict(),
                 'Earnings_Date': None,
+                'Earnings_Time': None,
                 'Target_Price': None,
                 'Upside_Pct': 0,
                 'EPS_Estimate': None,
@@ -945,6 +1139,9 @@ def main():
         if len(df_finviz) == 0:
             print("[X] 錯誤：未從 Finviz 取得任何數據")
             sys.exit(1)
+
+        # 步驟 1.5:  確保白名單股票（NVDA 等）必定出現
+        df_finviz = ensure_whitelist_stocks(df_finviz)
 
         # 步驟 2: 補充 Yahoo Finance 資料
         df_enriched = enrich_with_yfinance(df_finviz)
