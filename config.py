@@ -17,11 +17,13 @@ SELECTED_INDICES = [
 
 # ============ Finviz 設定 ============
 # 最多爬取幾頁（每頁 20 筆）
-MAX_PAGES = 3
+# 提高至 5 頁以覆蓋龍頭股（NVDA、TSLA 等大盤股容易排名靠後）
+MAX_PAGES = 5
 
 # ============ Yahoo Finance 設定 ============
 # 最多處理幾檔股票（避免 API 限制）
-MAX_STOCKS_TO_PROCESS = 40
+# 提高至 60 以涵蓋更多龍頭股票
+MAX_STOCKS_TO_PROCESS = 60
 
 # API 請求延遲（秒）
 API_DELAY = 0.5
