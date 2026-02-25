@@ -1,15 +1,15 @@
 # 🎯 Alpha Finder 每日情報掃描腳本 v2.0
 
-基於 Finviz + Yahoo Finance 的美股掃描系統，自動生成每日精選報告並上傳 Google Sheets，供 AI 分析使用。
+基於 Finviz + Yahoo Finance + Finnhub 的美股掃描系統，自動生成每日精選報告並上傳 Google Sheets，供 AI 分析使用。
 
 ---
 
 ## 📋 功能特色
 
-✅ **完全免費** - 使用 Finviz + Yahoo Finance 免費 API  
+✅ **完全免費** - 使用 Finviz + Yahoo Finance + Finnhub 免費 API  
 ✅ **三大掃描** - 起飛清單、財報預熱、預測情報  
 ✅ **自動評級** - AI/半導體/資料中心等優先產業 A 級評級  
-✅ **全量數據** - 40 檔完整數據上傳 Google Sheets，供 AI 分析  
+✅ **全量數據** - 依設定上傳完整數據（預設 120 檔），供 AI 分析  
 ✅ **Windows 排程** - 每日自動執行，結果就在 Google Sheets
 
 ---
@@ -22,17 +22,27 @@
 pip install -r requirements.txt
 ```
 
-### 2️⃣ 執行掃描
+### 2️⃣ 設定 Finnhub API（選用）
+
+PowerShell：
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("FINNHUB_API_KEY", "YOUR_API_KEY", "User")
+```
+
+重新開啟 VS Code 或 PowerShell 後生效。
+
+### 3️⃣ 執行掃描
 
 ```bash
 python main.py
 ```
 
-### 3️⃣ 查看結果
+### 4️⃣ 查看結果
 
 執行完成後，到 Google Sheets 查看：
 
-- **`全量數據`** tab - 40 檔完整數據，供 AI 分析
+- **`全量數據`** tab - 依設定輸出完整數據，供 AI 分析
 - **`YYYY-MM-DD`** tab - 當日三合一精選報告（起飛 Top 3 + 財報 Top 3 + 預測 Top 3）
 
 ---
@@ -94,16 +104,17 @@ python main.py
 
 ```python
 # 爬取頁數（每頁 20 筆）
-MAX_PAGES = 3
+MAX_PAGES = 5
 
 # 最多處理幾檔股票
-MAX_STOCKS_TO_PROCESS = 40
+MAX_STOCKS_TO_PROCESS = 120
 
 # 篩選條件
 LAUNCH_MIN_GAIN = 3.0          # 起飛清單最低漲幅 %
 LAUNCH_MIN_REL_VOL = 1.8       # 最低量能倍數
 EARNINGS_DAYS_AHEAD = 7        # 財報預熱天數
 ANALYST_MIN_UPSIDE = 30.0      # 預測情報最低上漲空間 %
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")  # Finnhub API Key
 ```
 
 ---
@@ -118,6 +129,7 @@ ANALYST_MIN_UPSIDE = 30.0      # 預測情報最低上漲空間 %
 | `gspread` | Google Sheets 集成 |
 | `oauth2client` | Google 服務帳號認證 |
 | `lxml` | XML 解析 |
+| `requests` | Finnhub API 呼叫 |
 
 ---
 

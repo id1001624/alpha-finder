@@ -60,13 +60,13 @@ from config import (
     SELECTED_EXCHANGES, SELECTED_INDICES,
     MAX_STOCKS_TO_PROCESS, API_DELAY,
     LAUNCH_MIN_GAIN, LAUNCH_MIN_REL_VOL, LAUNCH_MIN_PRICE, LAUNCH_MIN_MCAP,
-    EARNINGS_DAYS_AHEAD, EARNINGS_MIN_MCAP,
+    EARNINGS_DAYS_AHEAD, EARNINGS_MIN_MCAP, EARNINGS_MIN_VOLUME, MAX_EARNINGS_MERGE,
     ANALYST_MIN_UPSIDE, ANALYST_MIN_COUNT,
     RATING_A_REL_VOL, RATING_A_UPSIDE,
     TOP_N_STOCKS,
     GSHEET_ENABLED, GSHEET_NAME, GSHEET_CREDENTIALS_FILE,
     # 新增配置
-    FINNHUB_API_KEY, FORCE_INCLUDE,
+    FINNHUB_API_KEY,
     LOTTERY_MIN_GAIN, LOTTERY_MIN_REL_VOL, LOTTERY_MAX_MCAP,
     GRADE_A_UPSIDE, GRADE_A_ANALYSTS, GRADE_A_SECTORS,
     GRADE_B_UPSIDE, GRADE_B_7D_GAIN,
@@ -127,9 +127,16 @@ def get_finnhub_earnings(ticker: str) -> Dict:
             data = response.json()
             if 'earningsCalendar' in data and len(data['earningsCalendar']) > 0:
                 first = data['earningsCalendar'][0]
+                raw_hour = str(first.get('hour', '')).lower()
+                if raw_hour == 'bmo':
+                    timing = 'BMO盤前'
+                elif raw_hour == 'amc':
+                    timing = 'AMC盤後'
+                else:
+                    timing = ''
                 return {
                     'date': first.get('date', ''),
-                    'time': first.get('hour', ''),
+                    'time': timing,
                     'eps_estimate': first.get('epsEstimate', None)
                 }
         return {}
@@ -461,6 +468,8 @@ class GoogleSheetsUploader:
                 'Upside_Pct':    '上漲空間%',
                 'Num_Analysts':  '分析師數',
                 'Earnings_Date': '財報日期',
+                'Earnings_Time': '財報時段',
+                'EPS_Estimate':  '預估EPS',
                 'News_Headline': '新聞標題',
             }
             available_cols = [c for c in col_map if c in df_enriched.columns]
@@ -534,12 +543,12 @@ def scrape_finviz_screener() -> pd.DataFrame:
             filters.extend(SELECTED_INDICES)
             print(f"  [*] 指數條件: {SELECTED_INDICES}")
 
-        # 基本篩選條件
+        # 基本篩選條件（放寬限制，只保留美股 + 有成交量）
         filters.extend([
-            'cap_midover',       # 市值 > 300M
-            'sh_price_o5',       # 股價 > $5
+            'geo_usa',           # 僅美股
+            'sh_avgvol_o500',    # 平均成交量 > 500K
         ])
-        print(f"  [*] 基本條件: 市值 > 300M, 股價 > $5")
+        print("  [*] 基本條件: 美股 + 平均量 > 500K")
 
         # ===== 取得 Performance 表 =====
         print(f"  [*] 正在執行篩選器 (Performance 表)...")
@@ -565,7 +574,7 @@ def scrape_finviz_screener() -> pd.DataFrame:
 
         if len(df_perf) == 0 and len(df_overview) == 0:
             print("  [!] 篩選條件返回 0 筆，嘗試寬鬆篩選...")
-            screener_overview = Screener(filters=['cap_midover'], table='Overview')
+            screener_overview = Screener(filters=['geo_usa', 'sh_avgvol_o500'], table='Overview')
             try:
                 df_overview = screener_overview.to_dataframe()
             except (AttributeError, Exception):
@@ -705,78 +714,141 @@ def create_demo_data() -> pd.DataFrame:
 
     return pd.DataFrame(demo_stocks)
 
+def fetch_upcoming_earnings_tickers() -> List[str]:
+    """
+    使用 Finnhub 取得未來 EARNINGS_DAYS_AHEAD 天內的財報股票清單
+    """
+    if not FINNHUB_API_KEY:
+        return []
 
-def ensure_whitelist_stocks(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        from_date = datetime.now().strftime("%Y-%m-%d")
+        to_date = (datetime.now() + timedelta(days=EARNINGS_DAYS_AHEAD)).strftime("%Y-%m-%d")
+        url = "https://finnhub.io/api/v1/calendar/earnings"
+        params = {
+            'from': from_date,
+            'to': to_date,
+            'token': FINNHUB_API_KEY,
+        }
+        response = requests.get(url, params=params, timeout=8)
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        tickers = []
+        for item in data.get('earningsCalendar', []):
+            symbol = item.get('symbol')
+            if symbol:
+                tickers.append(symbol)
+
+        return sorted(set(tickers))
+    except Exception:
+        return []
+
+
+def append_stock_from_yfinance(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """
-    確保白名單股票（FORCE_INCLUDE）必定出現在結果中
-    若 Finviz 結果中缺少白名單股票，用 yfinance 補抓基本資料
+    用 yfinance 補抓單一股票（用於財報清單補充）
     """
-    existing_tickers = set(df['Ticker'].values)
-    missing = [t for t in FORCE_INCLUDE if t not in existing_tickers]
-    
-    if not missing:
-        print(f"  [OK] 白名單股票全部存在 ({len(FORCE_INCLUDE)} 檔)")
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+        market_cap_raw = info.get('marketCap', 0)
+
+        if market_cap_raw >= 1e12:
+            market_cap_str = f"{market_cap_raw/1e12:.2f}T"
+        elif market_cap_raw >= 1e9:
+            market_cap_str = f"{market_cap_raw/1e9:.2f}B"
+        elif market_cap_raw >= 1e6:
+            market_cap_str = f"{market_cap_raw/1e6:.2f}M"
+        else:
+            market_cap_str = "N/A"
+
+        hist = stock.history(period="7d")
+        if len(hist) >= 2:
+            latest_vol = hist['Volume'].iloc[-1]
+            avg_vol = hist['Volume'].iloc[:-1].mean()
+            rel_volume = latest_vol / avg_vol if avg_vol > 0 else 1.0
+            daily_change = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100)
+            perf_week = ((hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0] * 100)
+        else:
+            rel_volume = 1.0
+            daily_change = 0
+            perf_week = 0
+
+        row = {
+            'Ticker': ticker,
+            'Company': info.get('longName', ticker),
+            'Sector': info.get('sector', ''),
+            'Industry': info.get('industry', ''),
+            'Market_Cap_Raw': market_cap_raw,
+            'Market_Cap': market_cap_str,
+            'Price': price,
+            'Volume': info.get('volume', 0),
+            'Rel_Volume': rel_volume,
+            'Daily_Change': daily_change,
+            'Perf_Week': perf_week,
+            '_signal_score': rel_volume * 3 + daily_change * 2,
+        }
+
+        return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    except Exception:
         return df
-    
-    print(f"  [!] 發現 {len(missing)} 檔白名單股票缺失: {', '.join(missing)}")
-    print(f"  [*] 正在補抓白名單股票...")
-    
-    补抓_data = []
-    for ticker in missing:
+
+
+def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    把未來 EARNINGS_DAYS_AHEAD 天內有財報的股票合併進主清單
+    【硬裁剪】只補抓符合市值 + 量能條件的股票，最多 MAX_EARNINGS_MERGE 檔
+    """
+    tickers = fetch_upcoming_earnings_tickers()
+    if not tickers:
+        print("  [!] Finnhub 未返回即將財報清單，跳過合併")
+        return df
+
+    existing = set(df['Ticker'].values)
+    missing = [t for t in tickers if t not in existing]
+
+    if not missing:
+        print(f"  [OK] 即將財報清單已全包含 ({len(tickers)} 檔)")
+        return df
+
+    print(f"  [*] Finnhub 財報清單: {len(tickers)} 檔，其中 {len(missing)} 檔不在 Finviz 結果")
+    print(f"  [*] 開始篩選符合條件的財報股（市值 >{EARNINGS_MIN_MCAP/1e9:.1f}B, 量能 >{EARNINGS_MIN_VOLUME/1e3:.0f}k）...")
+
+    # 快速篩選：只保留符合市值+量能條件的 ticker
+    qualified = []
+    for ticker in missing[:MAX_EARNINGS_MERGE * 2]:  # 預查 2 倍數量（預期過濾率 ~50%）
         try:
-            print(f"    補抓 {ticker}...", end=' ')
             stock = yf.Ticker(ticker)
             info = stock.info
+            mcap = info.get('marketCap', 0)
+            avg_vol = info.get('averageVolume', 0)
             
-            # 獲取基本資料（模仿 Finviz 格式）
-            price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-            market_cap_raw = info.get('marketCap', 0)
-            
-            # 格式化市值
-            if market_cap_raw >= 1e12:
-                market_cap_str = f"{market_cap_raw/1e12:.2f}T"
-            elif market_cap_raw >= 1e9:
-                market_cap_str = f"{market_cap_raw/1e9:.2f}B"
-            elif market_cap_raw >= 1e6:
-                market_cap_raw = f"{market_cap_raw/1e6:.2f}M"
-            else:
-                market_cap_str = "N/A"
-            
-            # 獲取量能數據（如果可用）
-            hist = stock.history(period="5d")
-            if len(hist) >= 2:
-                latest_vol = hist['Volume'].iloc[-1]
-                avg_vol = hist['Volume'].iloc[:-1].mean()
-                rel_volume = latest_vol / avg_vol if avg_vol > 0 else 1.0
-                daily_change = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100) if len(hist) >= 2 else 0
-            else:
-                rel_volume = 1.0
-                daily_change = 0
-            
-            补抓_data.append({
-                'Ticker': ticker,
-                'Company': info.get('longName', ticker),
-                'Sector': info.get('sector', 'Technology'),
-                'Industry': info.get('industry', ''),
-                'Market_Cap_Raw': market_cap_raw,
-                'Market_Cap': market_cap_str,
-                'Price': price,
-                'Volume': info.get('volume', 0),
-                'Rel_Volume': rel_volume,
-                'Daily_Change': daily_change,
-                'Perf_Week': 0,  # 暫時填 0
-                '_signal_score': rel_volume * 3 + daily_change * 2,  # 用於排序
-            })
-            print("[OK]")
-            time.sleep(API_DELAY)
-        except Exception as e:
-            print(f"[X] 失敗: {e}")
+            if mcap >= EARNINGS_MIN_MCAP and avg_vol >= EARNINGS_MIN_VOLUME:
+                qualified.append(ticker)
+                if len(qualified) >= MAX_EARNINGS_MERGE:
+                    break
+        except Exception:
+            continue
+        time.sleep(0.1)  # 避免過快查詢
+
+    if not qualified:
+        print(f"  [!] 無符合條件的財報股，跳過合併")
+        return df
+
+    print(f"  [✓] 篩選出 {len(qualified)} 檔符合條件的財報股，開始補抓...")
     
-    if 补抓_data:
-        补抓_df = pd.DataFrame(补抓_data)
-        df = pd.concat([df, 补抓_df], ignore_index=True)
-        print(f"  [OK] 成功補抓 {len(补抓_data)} 檔白名單股票\n")
-    
+    for ticker in qualified:
+        print(f"    補抓 {ticker}...", end=' ')
+        before = len(df)
+        df = append_stock_from_yfinance(df, ticker)
+        after = len(df)
+        print("[OK]" if after > before else "[跳過]")
+        time.sleep(API_DELAY)
+
     return df
 
 
@@ -800,7 +872,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
 
                 # 財報日期 - 優先從 yfinance 取得
                 earnings_date = None
-                earnings_time = None
+                earnings_time = '無財報'
                 eps_estimate = info.get('forwardEps', None)
                 
                 try:
@@ -817,7 +889,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                     finnhub_earn = get_finnhub_earnings(ticker_symbol)
                     if finnhub_earn:
                         earnings_date = finnhub_earn.get('date')
-                        earnings_time = finnhub_earn.get('time', '')  # BMO/AMC
+                        earnings_time = finnhub_earn.get('time') or '無財報'
                         if not eps_estimate and finnhub_earn.get('eps_estimate'):
                             eps_estimate = finnhub_earn.get('eps_estimate')
 
@@ -1012,6 +1084,7 @@ def filter_sheet2_earnings(df: pd.DataFrame) -> pd.DataFrame:
     cols_map = {
         'Ticker': '股票代碼',
         'Earnings_Date': '財報日期',
+        'Earnings_Time': '財報時段',
         'EPS_Estimate': '預估EPS',
         'Market_Cap': '市值',
         'Priority_Sector': '產業',
@@ -1140,11 +1213,20 @@ def main():
             print("[X] 錯誤：未從 Finviz 取得任何數據")
             sys.exit(1)
 
-        # 步驟 1.5:  確保白名單股票（NVDA 等）必定出現
-        df_finviz = ensure_whitelist_stocks(df_finviz)
+        # 步驟 1.5: 合併未來 7 天財報股（Finnhub）
+        df_finviz = merge_upcoming_earnings(df_finviz)
 
         # 步驟 2: 補充 Yahoo Finance 資料
         df_enriched = enrich_with_yfinance(df_finviz)
+
+        # 步驟 2.2: 分析師覆蓋二次過濾（剔除分析師數 < 10 或目標價缺失）
+        before_count = len(df_enriched)
+        df_enriched = df_enriched[
+            (df_enriched['Num_Analysts'] >= 10) &
+            (df_enriched['Target_Price'].notna())
+        ].copy()
+        after_count = len(df_enriched)
+        print(f"[步驟 2.2] 分析師覆蓋過濾: {before_count} -> {after_count} 檔")
 
         # 步驟 2.5: 查詢分析師目標價變動（用於 Sheet 3 強化）
         tickers_for_analyst = df_enriched['Ticker'].tolist()

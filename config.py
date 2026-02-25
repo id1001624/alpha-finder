@@ -1,4 +1,5 @@
 # Alpha Finder 配置文件
+import os
 
 # ============ 市場和指數配置 ============
 # 🎯 根據投資策略選擇要監控的市場/指數
@@ -8,10 +9,10 @@
 SELECTED_EXCHANGES = []  # 留空表示使用所有市場
 
 SELECTED_INDICES = [
-    'idx_sp500',           # ✅ S&P 500 - 美股大盤 500 強 (推薦)
-    # 'idx_ndx',           # Nasdaq 100 - 科技股為主
+    'idx_sp500',           # ✅ S&P 500 - 美股大盤 500 強
+    'idx_ndx',             # ✅ Nasdaq 100 - 科技股為主
+    'idx_russell2000',     # ✅ Russell 2000 - 小型股
     # 'idx_philly_smh',    # Philadelphia Semiconductor - 半導體
-    # 'idx_russell2000',   # Russell 2000 - 小型股
     # 'idx_dji',           # Dow Jones - 道瓊指數
 ]
 
@@ -22,8 +23,8 @@ MAX_PAGES = 5
 
 # ============ Yahoo Finance 設定 ============
 # 最多處理幾檔股票（避免 API 限制）
-# 提高至 60 以涵蓋更多龍頭股票
-MAX_STOCKS_TO_PROCESS = 60
+# 提高至 120 以涵蓋全市場強勢股
+MAX_STOCKS_TO_PROCESS = 120
 
 # API 請求延遲（秒）
 API_DELAY = 0.5
@@ -38,6 +39,8 @@ LAUNCH_MIN_MCAP = 100_000_000  # 最低市值（美元）
 # 財報預熱
 EARNINGS_DAYS_AHEAD = 7              # 未來幾天內的財報
 EARNINGS_MIN_MCAP = 1_000_000_000    # 最低市值（美元）
+EARNINGS_MIN_VOLUME = 500_000        # 最低平均成交量（Finnhub 補強用）
+MAX_EARNINGS_MERGE = 80              # Finnhub 財報補抓最大數量（防止爆量）
 
 # 預測情報
 ANALYST_MIN_UPSIDE = 30.0      # 最低上漲空間 %
@@ -61,16 +64,8 @@ GSHEET_CREDENTIALS_FILE = "credentials.json"
 # ============ API金鑰設定 ============
 # Finnhub 免費 API (60 call/min) - 財報日期 + 分析師目標價
 # 註冊: https://finnhub.io/register
-FINNHUB_API_KEY = ""  # 請填入你的 Finnhub API Key
-
-# ============ 強制白名單 ============
-# 無論 Finviz 篩選結果如何，這些股票必定出現在報告中
-FORCE_INCLUDE = [
-    'NVDA', 'AMD', 'TSM', 'AMAT', 'LRCX', 'KLAC', 'MU',  # 半導體
-    'CRWD', 'PANW', 'ZS',                                 # 網路安全
-    'GEV', 'VRT', 'CEG',                                  # 公用事業/能源
-    'ASTS', 'RKLB',                                       # 航太/衛星
-]
+# 使用環境變數：FINNHUB_API_KEY
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 
 # ============ 彩票股設定 (Track F) ============
 LOTTERY_MIN_GAIN = 10.0        # 單日漲幅 >10%
