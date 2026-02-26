@@ -41,6 +41,7 @@ EARNINGS_DAYS_AHEAD = 7              # 未來幾天內的財報
 EARNINGS_MIN_MCAP = 1_000_000_000    # 最低市值（美元）
 EARNINGS_MIN_VOLUME = 500_000        # 最低平均成交量（Finnhub 補強用）
 MAX_EARNINGS_MERGE = 80              # Finnhub 財報補抓最大數量（防止爆量）
+EARNINGS_RESERVED_SLOTS = 40         # 財報股保留名額（不受信號排名截斷）
 
 # 預測情報
 ANALYST_MIN_UPSIDE = 30.0      # 最低上漲空間 %

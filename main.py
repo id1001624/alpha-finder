@@ -60,7 +60,7 @@ from config import (
     SELECTED_EXCHANGES, SELECTED_INDICES,
     MAX_STOCKS_TO_PROCESS, API_DELAY,
     LAUNCH_MIN_GAIN, LAUNCH_MIN_REL_VOL, LAUNCH_MIN_PRICE, LAUNCH_MIN_MCAP,
-    EARNINGS_DAYS_AHEAD, EARNINGS_MIN_MCAP, EARNINGS_MIN_VOLUME, MAX_EARNINGS_MERGE,
+    EARNINGS_DAYS_AHEAD, EARNINGS_MIN_MCAP, EARNINGS_MIN_VOLUME, MAX_EARNINGS_MERGE, EARNINGS_RESERVED_SLOTS,
     ANALYST_MIN_UPSIDE, ANALYST_MIN_COUNT,
     RATING_A_REL_VOL, RATING_A_UPSIDE,
     TOP_N_STOCKS,
@@ -802,13 +802,25 @@ def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
     """
     把未來 EARNINGS_DAYS_AHEAD 天內有財報的股票合併進主清單
     【硬裁剪】只補抓符合市值 + 量能條件的股票，最多 MAX_EARNINGS_MERGE 檔
+    【關鍵】標記所有財報股（含已在 Finviz 結果中的），保證後續優先處理
     """
     tickers = fetch_upcoming_earnings_tickers()
     if not tickers:
         print("  [!] Finnhub 未返回即將財報清單，跳過合併")
         return df
 
+    # 初始化標記欄位
+    if '_has_upcoming_earnings' not in df.columns:
+        df['_has_upcoming_earnings'] = False
+
+    # 標記已存在於 Finviz 結果中的財報股（避免被信號排名截斷）
     existing = set(df['Ticker'].values)
+    earnings_set = set(tickers)
+    already_in = earnings_set & existing
+    if already_in:
+        df.loc[df['Ticker'].isin(already_in), '_has_upcoming_earnings'] = True
+        print(f"  [OK] 標記 {len(already_in)} 檔已在 Finviz 結果中的財報股")
+
     missing = [t for t in tickers if t not in existing]
 
     if not missing:
@@ -839,31 +851,54 @@ def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
         print(f"  [!] 無符合條件的財報股，跳過合併")
         return df
 
-    print(f"  [✓] 篩選出 {len(qualified)} 檔符合條件的財報股，開始補抓...")
+    print(f"  [OK] 篩選出 {len(qualified)} 檔符合條件的財報股，開始補抓...")
     
     for ticker in qualified:
         print(f"    補抓 {ticker}...", end=' ')
         before = len(df)
         df = append_stock_from_yfinance(df, ticker)
         after = len(df)
-        print("[OK]" if after > before else "[跳過]")
+        if after > before:
+            df.loc[df['Ticker'] == ticker, '_has_upcoming_earnings'] = True
+            print("[OK]")
+        else:
+            print("[跳過]")
         time.sleep(API_DELAY)
 
     return df
 
 
 def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
-    """使用 Yahoo Finance 補充詳細資料（財報日期、目標價、新聞）"""
+    """使用 Yahoo Finance 補充詳細資料（財報日期、目標價、新聞）
+    
+    【優先處理邏輯】:
+    1. 財報股保留名額：EARNINGS_RESERVED_SLOTS 檔（不受信號排名截斷）
+    2. 剩餘名額：按信號強度排序填充
+    3. 合併後去重，確保不重複查詢
+    """
     max_stocks = MAX_STOCKS_TO_PROCESS
-    print(f"[步驟 2/4] 使用 Yahoo Finance 補充資料（信號最強的 {max_stocks} 檔）...")
-    print(f"  [*] 注意：503 檔股票已按漲幅+量能排序，只查詢最強的前 {max_stocks} 檔")
+    print(f"[步驟 2/4] 使用 Yahoo Finance 補充資料（最多 {max_stocks} 檔）...")
+
+    # 分離財報股與一般股（財報股優先，不被信號排名截斷）
+    has_earnings_col = '_has_upcoming_earnings' in df.columns
+    if has_earnings_col:
+        earnings_df = df[df['_has_upcoming_earnings'] == True]
+        non_earnings_df = df[df['_has_upcoming_earnings'] != True]
+        earnings_subset = earnings_df.head(EARNINGS_RESERVED_SLOTS)
+        remaining_slots = max(0, max_stocks - len(earnings_subset))
+        signal_subset = non_earnings_df.head(remaining_slots)
+        df_subset = pd.concat([earnings_subset, signal_subset]).drop_duplicates('Ticker')
+        print(f"  [*] 財報股保留: {len(earnings_subset)} 檔 + 信號排名: {len(signal_subset)} 檔 = 共 {len(df_subset)} 檔")
+    else:
+        df_subset = df.head(max_stocks)
+        print(f"  [*] 按信號強度排序，查詢前 {len(df_subset)} 檔")
 
     enriched_data = []
-    df_subset = df.head(max_stocks)
 
-    for idx, row in df_subset.iterrows():
+    for count, (idx, row) in enumerate(df_subset.iterrows(), 1):
         ticker_symbol = row['Ticker']
-        print(f"  ({idx+1}/{len(df_subset)}) 查詢 {ticker_symbol}...", end=' ')
+        earnings_tag = " [財報]" if has_earnings_col and row.get('_has_upcoming_earnings', False) else ""
+        print(f"  ({count}/{len(df_subset)}) 查詢 {ticker_symbol}{earnings_tag}...", end=' ')
 
         try:
             def _fetch():
@@ -1219,14 +1254,15 @@ def main():
         # 步驟 2: 補充 Yahoo Finance 資料
         df_enriched = enrich_with_yfinance(df_finviz)
 
-        # 步驟 2.2: 分析師覆蓋二次過濾（剔除分析師數 < 10 或目標價缺失）
+        # 步驟 2.2: 移除無效資料（但不再用分析師數硬截斷）
         before_count = len(df_enriched)
+        # 只移除完全沒有價格的無效資料，分析師過濾下放到 Sheet 3（預測情報）
         df_enriched = df_enriched[
-            (df_enriched['Num_Analysts'] >= 10) &
-            (df_enriched['Target_Price'].notna())
+            df_enriched['Price'].notna() &
+            (df_enriched['Price'] > 0)
         ].copy()
         after_count = len(df_enriched)
-        print(f"[步驟 2.2] 分析師覆蓋過濾: {before_count} -> {after_count} 檔")
+        print(f"[步驟 2.2] 基礎資料驗證: {before_count} -> {after_count} 檔（全量保留）")
 
         # 步驟 2.5: 查詢分析師目標價變動（用於 Sheet 3 強化）
         tickers_for_analyst = df_enriched['Ticker'].tolist()
