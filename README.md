@@ -38,12 +38,90 @@ PowerShell：
 python main.py
 ```
 
+### 3.5️⃣ 啟動 TradingView Webhook Server（可選，但 Track F 需要）
+
+先設定環境變數（PowerShell）：
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("TV_WEBHOOK_SECRET", "YOUR_SECRET", "User")
+[System.Environment]::SetEnvironmentVariable("SIGNAL_STORE_PATH", "signals.db", "User")
+```
+
+啟動 server：
+
+```bash
+python server.py
+```
+
+或：
+
+```bash
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
 ### 4️⃣ 查看結果
 
 執行完成後，到 Google Sheets 查看：
 
 - **`全量數據`** tab - 依設定輸出完整數據，供 AI 分析
 - **`YYYY-MM-DD`** tab - 當日三合一精選報告（起飛 Top 3 + 財報 Top 3 + 預測 Top 3）
+
+---
+
+## 📡 TradingView Webhook 設定
+
+### Endpoint 與驗證
+
+- Endpoint：`POST /tv/webhook`
+- 本機 URL：`http://127.0.0.1:8000/tv/webhook`
+- 公網 URL（部署後）：`https://<your-domain>/tv/webhook`
+- 驗證方式：
+	- `X-Webhook-Token: <TV_WEBHOOK_SECRET>`（簡單）或
+	- `X-TV-Signature: <hmac_sha256(raw_body)>`
+
+### TradingView Alert Message（請填 JSON）
+
+> TradingView Webhook body 直接等於 Alert Message；請務必填 JSON 字串。
+
+```json
+{
+	"schema_version": 1,
+	"source": "tradingview",
+	"symbol": "AAPL",
+	"exchange": "NASDAQ",
+	"timeframe": "1D",
+	"ts": "2026-02-26T14:30:00Z",
+	"close": 188.2,
+	"vwap": 187.9,
+	"sqz_on": true,
+	"sqzmom_value": 0.31,
+	"sqzmom_color": "green",
+	"event": "entry"
+}
+```
+
+### 訊號資料落地位置
+
+- SQLite 檔案：`SIGNAL_STORE_PATH`（預設 `signals.db`）
+- 主要資料表：`signals`
+- 若允許純文字 webhook（`ALLOW_PLAIN_TEXT_WEBHOOK=true`）且非 JSON，會記錄到 `raw_webhook_logs`
+
+### 如何檢查最新訊號是否進來
+
+```bash
+python -c "from signal_store import get_latest_signals; from datetime import datetime, timezone; print(get_latest_signals('signals.db', asof=datetime.now(timezone.utc), max_age_minutes=240))"
+```
+
+---
+
+## 🌐 公開 HTTPS 部署（Cloudflare Tunnel 範例）
+
+1. 本機先啟動：`uvicorn server:app --host 0.0.0.0 --port 8000`
+2. 安裝並登入 `cloudflared`
+3. 建立 tunnel 指向本機 8000：`cloudflared tunnel --url http://localhost:8000`
+4. 取得 `https://xxxx.trycloudflare.com/tv/webhook`，填到 TradingView Webhook URL
+
+> TradingView 僅接受 80/443 且要求快速回應；本專案 webhook 會先驗證+落地後立即回 200。
 
 ---
 
@@ -115,6 +193,12 @@ LAUNCH_MIN_REL_VOL = 1.8       # 最低量能倍數
 EARNINGS_DAYS_AHEAD = 7        # 財報預熱天數
 ANALYST_MIN_UPSIDE = 30.0      # 預測情報最低上漲空間 %
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")  # Finnhub API Key
+
+# TradingView 訊號整合
+USE_TRADINGVIEW_SIGNALS = True
+TV_WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
+SIGNAL_STORE_PATH = os.getenv("SIGNAL_STORE_PATH", "signals.db")
+SIGNAL_MAX_AGE_MINUTES = 240
 ```
 
 ---

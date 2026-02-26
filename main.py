@@ -51,7 +51,7 @@ _fix_ssl_cert_path()
 import pandas as pd
 import time
 import warnings
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import yfinance as yf
 import requests  # 新增：用於 Finnhub API 調用
 
@@ -70,7 +70,10 @@ from config import (
     LOTTERY_MIN_GAIN, LOTTERY_MIN_REL_VOL, LOTTERY_MAX_MCAP,
     GRADE_A_UPSIDE, GRADE_A_ANALYSTS, GRADE_A_SECTORS,
     GRADE_B_UPSIDE, GRADE_B_7D_GAIN,
+    USE_TRADINGVIEW_SIGNALS, SIGNAL_STORE_PATH, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY,
 )
+
+from signal_store import get_latest_signals
 
 # Google Sheets 相關套件
 try:
@@ -416,7 +419,8 @@ class GoogleSheetsUploader:
             return False
 
     def upload_daily_report(self, sheet1: pd.DataFrame, sheet2: pd.DataFrame,
-                           sheet3: pd.DataFrame, date_str: str = None) -> bool:
+                           sheet3: pd.DataFrame, sheet4: pd.DataFrame = None,
+                           date_str: str = None) -> bool:
         """上傳每日完整報告（三合一管理模式，date_str 預設為前一日收盤）"""
         try:
             if date_str is None:
@@ -428,14 +432,15 @@ class GoogleSheetsUploader:
             sheet1_top = sheet1.head(top_n).copy() if len(sheet1) > 0 else pd.DataFrame()
             sheet2_top = sheet2.head(top_n).copy() if len(sheet2) > 0 else pd.DataFrame()
             sheet3_top = sheet3.head(top_n).copy() if len(sheet3) > 0 else pd.DataFrame()
+            sheet4_top = sheet4.head(top_n).copy() if sheet4 is not None and len(sheet4) > 0 else pd.DataFrame()
 
-            combined_df = self._build_combined_report(sheet1_top, sheet2_top, sheet3_top)
+            combined_df = self._build_combined_report(sheet1_top, sheet2_top, sheet3_top, sheet4_top)
             success = self.upload_sheet(combined_df, date_str, clear_first=True)
 
             if success:
                 print(f"[OK] 每日報告上傳成功")
-                s1, s2, s3 = len(sheet1_top), len(sheet2_top), len(sheet3_top)
-                print(f"  資料: 起飛清單({s1}) + 財報預熱({s2}) + 預測情報({s3})")
+                s1, s2, s3, s4 = len(sheet1_top), len(sheet2_top), len(sheet3_top), len(sheet4_top)
+                print(f"  資料: 起飛清單({s1}) + 財報預熱({s2}) + 預測情報({s3}) + Track F({s4})")
 
             return success
 
@@ -471,6 +476,11 @@ class GoogleSheetsUploader:
                 'Earnings_Time': '財報時段',
                 'EPS_Estimate':  '預估EPS',
                 'News_Headline': '新聞標題',
+                'TV_VWAP':       'vwap',
+                'TV_SQZ_On':     'sqz_on',
+                'TV_SQZMOM_Color': 'sqzmom_color',
+                'TV_SQZMOM_Value': 'sqzmom_value',
+                'TV_Signal_Age_Min': 'signal_age',
             }
             available_cols = [c for c in col_map if c in df_enriched.columns]
             output = df_enriched[available_cols].copy()
@@ -495,7 +505,7 @@ class GoogleSheetsUploader:
             return False
 
     def _build_combined_report(self, sheet1: pd.DataFrame, sheet2: pd.DataFrame,
-                               sheet3: pd.DataFrame) -> pd.DataFrame:
+                               sheet3: pd.DataFrame, sheet4: pd.DataFrame = None) -> pd.DataFrame:
         """組建綜合報告 DataFrame"""
         frames = []
 
@@ -512,6 +522,11 @@ class GoogleSheetsUploader:
         if len(sheet3) > 0:
             frames.append(pd.DataFrame([{'========': '=== 預測情報 Top 3 ==='}]))
             frames.append(sheet3)
+
+        if sheet4 is not None and len(sheet4) > 0:
+            frames.append(pd.DataFrame([{}]))
+            frames.append(pd.DataFrame([{'========': '=== Track F 彩票 Top 3 ==='}]))
+            frames.append(sheet4)
 
         if frames:
             return pd.concat(frames, ignore_index=True)
@@ -1045,6 +1060,104 @@ def fetch_analyst_target_changes(tickers: List[str]) -> Dict[str, dict]:
     return results
 
 
+def _to_utc_datetime(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=datetime.now().astimezone().tzinfo).astimezone()
+        return value.astimezone()
+    if isinstance(value, str):
+        clean = value.strip()
+        if not clean:
+            return None
+        if clean.isdigit():
+            sec = int(clean)
+            if len(clean) >= 13:
+                sec = sec / 1000
+            return datetime.fromtimestamp(sec).astimezone()
+        try:
+            dt = datetime.fromisoformat(clean.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=datetime.now().astimezone().tzinfo).astimezone()
+            return dt.astimezone()
+        except ValueError:
+            return None
+    return None
+
+
+def load_latest_signal_map(asof: Optional[datetime] = None) -> Dict[str, object]:
+    if not USE_TRADINGVIEW_SIGNALS:
+        return {}
+    try:
+        signals = get_latest_signals(
+            SIGNAL_STORE_PATH,
+            asof=asof,
+            max_age_minutes=SIGNAL_MAX_AGE_MINUTES,
+            require_same_day=SIGNAL_REQUIRE_SAME_DAY,
+        )
+        print(f"[步驟 2.6] TradingView 有效訊號數: {len(signals)}")
+        return signals
+    except Exception as e:
+        print(f"[步驟 2.6] TradingView 訊號載入失敗，改以無訊號模式執行: {e}")
+        return {}
+
+
+def merge_signals_into_candidates(df: pd.DataFrame, signal_map: Dict[str, object], asof: Optional[datetime] = None) -> pd.DataFrame:
+    result = df.copy()
+    now = asof or datetime.now().astimezone()
+
+    result['TV_VWAP'] = None
+    result['TV_SQZ_On'] = None
+    result['TV_SQZMOM_Color'] = None
+    result['TV_SQZMOM_Value'] = None
+    result['TV_Signal_Age_Min'] = None
+    result['TV_Signal_TS'] = None
+    result['TV_Signal_Received_At'] = None
+    result['TV_Signal_Fresh'] = False
+
+    if not signal_map:
+        return result
+
+    ticker_col = result['Ticker'].astype(str).str.upper()
+    for idx, ticker in ticker_col.items():
+        event = signal_map.get(ticker)
+        if not event:
+            continue
+
+        recv_dt = _to_utc_datetime(event.received_at)
+        age_min = None
+        if recv_dt:
+            age_min = (now - recv_dt).total_seconds() / 60.0
+
+        result.at[idx, 'TV_VWAP'] = event.vwap
+        result.at[idx, 'TV_SQZ_On'] = event.sqz_on
+        result.at[idx, 'TV_SQZMOM_Color'] = event.sqzmom_color
+        result.at[idx, 'TV_SQZMOM_Value'] = event.sqzmom_value
+        result.at[idx, 'TV_Signal_Age_Min'] = age_min
+        result.at[idx, 'TV_Signal_TS'] = event.ts
+        result.at[idx, 'TV_Signal_Received_At'] = event.received_at
+        result.at[idx, 'TV_Signal_Fresh'] = True if (age_min is not None and age_min <= SIGNAL_MAX_AGE_MINUTES) else False
+
+    return result
+
+
+def _signal_ready_for_track_f(row: pd.Series) -> bool:
+    required = ['TV_VWAP', 'TV_SQZ_On', 'TV_SQZMOM_Color', 'TV_SQZMOM_Value', 'TV_Signal_Age_Min']
+    for key in required:
+        if pd.isna(row.get(key)):
+            return False
+    return bool(row.get('TV_Signal_Fresh', False))
+
+
+def _finalize_signal_columns(output: pd.DataFrame) -> pd.DataFrame:
+    signal_cols = ['vwap', 'sqz_on', 'sqzmom_color', 'sqzmom_value', 'signal_age']
+    for col in signal_cols:
+        if col in output.columns:
+            output[col] = output[col].apply(lambda x: 'NA' if pd.isna(x) else x)
+    return output
+
+
 # ============ 篩選函數 ============
 
 def filter_sheet1_launch(df: pd.DataFrame) -> pd.DataFrame:
@@ -1090,10 +1203,16 @@ def filter_sheet1_launch(df: pd.DataFrame) -> pd.DataFrame:
         'Priority_Sector': '產業',
         'Rating': '評級',
         'News_Headline': '新聞原因',
+        'TV_VWAP': 'vwap',
+        'TV_SQZ_On': 'sqz_on',
+        'TV_SQZMOM_Color': 'sqzmom_color',
+        'TV_SQZMOM_Value': 'sqzmom_value',
+        'TV_Signal_Age_Min': 'signal_age',
     }
     available = {k: v for k, v in cols_map.items() if k in filtered.columns}
     output = filtered[list(available.keys())].head(TOP_N_STOCKS).copy()
     output.columns = list(available.values())
+    output = _finalize_signal_columns(output)
 
     print(f"  [OK] 篩選出 {len(output)} 檔起飛股票\n")
     return output
@@ -1137,10 +1256,16 @@ def filter_sheet2_earnings(df: pd.DataFrame) -> pd.DataFrame:
         'Market_Cap': '市值',
         'Priority_Sector': '產業',
         'Rating': '評級',
+        'TV_VWAP': 'vwap',
+        'TV_SQZ_On': 'sqz_on',
+        'TV_SQZMOM_Color': 'sqzmom_color',
+        'TV_SQZMOM_Value': 'sqzmom_value',
+        'TV_Signal_Age_Min': 'signal_age',
     }
     available = {k: v for k, v in cols_map.items() if k in filtered.columns}
     output = filtered[list(available.keys())].head(TOP_N_STOCKS).copy()
     output.columns = list(available.values())
+    output = _finalize_signal_columns(output)
 
     print(f"  [OK] 篩選出 {len(output)} 檔財報預熱股票\n")
     return output
@@ -1194,17 +1319,73 @@ def filter_sheet3_analyst(df: pd.DataFrame, target_changes: Dict = None) -> pd.D
         '目標價調整': '目標價調整',
         'Priority_Sector': '產業',
         'Rating': '評級',
+        'TV_VWAP': 'vwap',
+        'TV_SQZ_On': 'sqz_on',
+        'TV_SQZMOM_Color': 'sqzmom_color',
+        'TV_SQZMOM_Value': 'sqzmom_value',
+        'TV_Signal_Age_Min': 'signal_age',
     }
     available = {k: v for k, v in cols_map.items() if k in filtered.columns}
     output = filtered[list(available.keys())].head(TOP_N_STOCKS).copy()
     output.columns = list(available.values())
+    output = _finalize_signal_columns(output)
 
     print(f"  [OK] 篩選出 {len(output)} 檔預測標的\n")
     return output
 
 
+def filter_track_f_lottery(df: pd.DataFrame, signals_available: bool) -> pd.DataFrame:
+    """
+    Track F - 彩票（硬規則）
+    1) 若沒有可用 TradingView 訊號，強制回傳空清單
+    2) 需同時符合既有彩票條件 + 訊號欄位齊全且不 stale
+    """
+    print("[步驟 3/4] 篩選 Track F（彩票）...")
 
-def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet3: pd.DataFrame):
+    if not signals_available:
+        print("  [!] 無可用 TradingView 訊號，Track F 強制為空\n")
+        return pd.DataFrame()
+
+    filtered = df[
+        (df['Daily_Change'] > LOTTERY_MIN_GAIN) &
+        (df['Rel_Volume'] > LOTTERY_MIN_REL_VOL) &
+        (df['Market_Cap_Raw'] < LOTTERY_MAX_MCAP)
+    ].copy()
+
+    if len(filtered) == 0:
+        print("  [!] 無符合基本彩票條件的股票\n")
+        return pd.DataFrame()
+
+    filtered = filtered[filtered.apply(_signal_ready_for_track_f, axis=1)].copy()
+    if len(filtered) == 0:
+        print("  [!] 有彩票候選，但訊號不完整或過期，Track F 為空\n")
+        return pd.DataFrame()
+
+    filtered = filtered.sort_values(['Daily_Change', 'Rel_Volume'], ascending=[False, False])
+
+    cols_map = {
+        'Ticker': '股票代碼',
+        'Daily_Change': '今日漲幅%',
+        'Rel_Volume': '量能倍數',
+        'Market_Cap': '市值',
+        'Price': '股價',
+        'TV_VWAP': 'vwap',
+        'TV_SQZ_On': 'sqz_on',
+        'TV_SQZMOM_Color': 'sqzmom_color',
+        'TV_SQZMOM_Value': 'sqzmom_value',
+        'TV_Signal_Age_Min': 'signal_age',
+    }
+    available = {k: v for k, v in cols_map.items() if k in filtered.columns}
+    output = filtered[list(available.keys())].head(TOP_N_STOCKS).copy()
+    output.columns = list(available.values())
+    output = _finalize_signal_columns(output)
+
+    print(f"  [OK] 篩選出 {len(output)} 檔 Track F 彩票股\n")
+    return output
+
+
+
+def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet3: pd.DataFrame, sheet4: pd.DataFrame):
     """顯示掃描結果摘要"""
     print("\n" + "=" * 70)
     print("  Alpha Finder 每日掃描結果摘要".center(60))
@@ -1242,6 +1423,18 @@ def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet3: pd.DataF
     else:
         print("  無符合條件的股票")
 
+    print(f"\n>> Track F 彩票 Top {TOP_N_STOCKS}")
+    if len(sheet4) > 0:
+        for i, (_, row) in enumerate(sheet4.iterrows(), 1):
+            print(
+                f"  {i}. {row[col_ticker]} - 漲幅 {row.get('今日漲幅%', 0):.1f}% | 量能 {row.get('量能倍數', 0):.1f}x"
+                f" | vwap {row.get('vwap', 'NA')} | sqz_on {row.get('sqz_on', 'NA')}"
+                f" | sqzmom {row.get('sqzmom_color', 'NA')}/{row.get('sqzmom_value', 'NA')}"
+                f" | age {row.get('signal_age', 'NA')}"
+            )
+    else:
+        print("  無符合條件的股票（需有效 TradingView 訊號）")
+
     print("\n" + "=" * 70)
     print("  掃描完成！請查看 CSV 檔案瞭解詳細資訊".center(60))
     print("=" * 70 + "\n")
@@ -1277,6 +1470,11 @@ def main():
         after_count = len(df_enriched)
         print(f"[步驟 2.2] 基礎資料驗證: {before_count} -> {after_count} 檔（全量保留）")
 
+        # 步驟 2.6: 載入 TradingView 訊號並合併
+        signal_map = load_latest_signal_map(asof=datetime.now().astimezone())
+        signals_available = len(signal_map) > 0
+        df_enriched = merge_signals_into_candidates(df_enriched, signal_map, asof=datetime.now().astimezone())
+
         # 步驟 2.5: 查詢分析師目標價變動（用於 Sheet 3 強化）
         tickers_for_analyst = df_enriched['Ticker'].tolist()
         target_changes = fetch_analyst_target_changes(tickers_for_analyst)
@@ -1285,9 +1483,10 @@ def main():
         sheet1 = filter_sheet1_launch(df_enriched)
         sheet2 = filter_sheet2_earnings(df_enriched)
         sheet3 = filter_sheet3_analyst(df_enriched, target_changes=target_changes)
+        sheet4 = filter_track_f_lottery(df_enriched, signals_available=signals_available)
 
         # 顯示摘要（terminal 確認用）
-        display_summary(sheet1, sheet2, sheet3)
+        display_summary(sheet1, sheet2, sheet3, sheet4)
 
         # 步驟 4: 上傳到 Google Sheets
         if GSHEET_AVAILABLE and GSHEET_ENABLED:
@@ -1302,7 +1501,7 @@ def main():
                     # 上傳全量數據（AI 分析用）
                     uploader.upload_full_data(df_enriched)
                     # 上傳每日精選報告（Top 3 三合一）
-                    uploader.upload_daily_report(sheet1, sheet2, sheet3)
+                    uploader.upload_daily_report(sheet1, sheet2, sheet3, sheet4)
                 else:
                     print("[!] 跳過 Google Sheets 上傳")
             else:

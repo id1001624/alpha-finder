@@ -88,3 +88,13 @@ NOTIFICATION_ENABLED = False
 NOTIFICATION_EMAIL = "your-email@gmail.com"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
+
+# ============ TradingView Webhook 訊號設定 ============
+USE_TRADINGVIEW_SIGNALS = True
+TV_WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
+SIGNAL_STORE_PATH = os.getenv("SIGNAL_STORE_PATH", "signals.db")
+SIGNAL_MAX_AGE_MINUTES = int(os.getenv("SIGNAL_MAX_AGE_MINUTES", "240"))
+SIGNAL_REQUIRE_SAME_DAY = os.getenv("SIGNAL_REQUIRE_SAME_DAY", "true").lower() == "true"
+ALLOW_PLAIN_TEXT_WEBHOOK = os.getenv("ALLOW_PLAIN_TEXT_WEBHOOK", "false").lower() == "true"
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8000"))
