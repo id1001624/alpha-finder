@@ -736,9 +736,12 @@ def fetch_upcoming_earnings_tickers() -> List[str]:
 
         data = response.json()
         tickers = []
+        today_str = from_date
         for item in data.get('earningsCalendar', []):
             symbol = item.get('symbol')
-            if symbol:
+            report_date = item.get('date', '')
+            # 只納入「今天及以後」的財報，排除過期資料
+            if symbol and report_date >= today_str:
                 tickers.append(symbol)
 
         return sorted(set(tickers))
@@ -927,6 +930,16 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                         earnings_time = finnhub_earn.get('time') or '無財報'
                         if not eps_estimate and finnhub_earn.get('eps_estimate'):
                             eps_estimate = finnhub_earn.get('eps_estimate')
+
+                # 只保留未來的財報日期（過去的財報日期清除，避免誤導）
+                if earnings_date:
+                    try:
+                        ed = pd.to_datetime(earnings_date)
+                        if ed.date() < datetime.now().date():
+                            earnings_date = None
+                            earnings_time = '無財報'
+                    except Exception:
+                        pass
 
                 # 分析師目標價 - 優先從 yfinance 取得
                 target_price = info.get('targetMeanPrice', None)
