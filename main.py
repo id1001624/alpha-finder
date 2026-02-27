@@ -71,6 +71,9 @@ from config import (
     GRADE_A_UPSIDE, GRADE_A_ANALYSTS, GRADE_A_SECTORS,
     GRADE_B_UPSIDE, GRADE_B_7D_GAIN,
     USE_TRADINGVIEW_SIGNALS, SIGNAL_STORE_PATH, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY,
+    MARKET_FILTER_ENABLED, MARKET_FILTER_SYMBOL, MARKET_FILTER_MA_WINDOW, MARKET_FILTER_LOOKBACK_DAYS,
+    MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN, MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL,
+    MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP, MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE,
 )
 
 from signal_store import get_latest_signals
@@ -86,6 +89,59 @@ except ImportError:
     print("    請執行: pip install gspread oauth2client")
 
 warnings.filterwarnings('ignore')
+
+
+# ============ 動態門檻（可由大盤濾網覆寫） ============
+EFFECTIVE_LAUNCH_MIN_GAIN = LAUNCH_MIN_GAIN
+EFFECTIVE_LAUNCH_MIN_REL_VOL = LAUNCH_MIN_REL_VOL
+EFFECTIVE_EARNINGS_MIN_MCAP = EARNINGS_MIN_MCAP
+EFFECTIVE_ANALYST_MIN_UPSIDE = ANALYST_MIN_UPSIDE
+
+
+def apply_market_regime_filter() -> None:
+    """MVP 大盤環境濾網：若 SPY 跌破 MA20，提升部分選股門檻。"""
+    global EFFECTIVE_LAUNCH_MIN_GAIN, EFFECTIVE_LAUNCH_MIN_REL_VOL
+    global EFFECTIVE_EARNINGS_MIN_MCAP, EFFECTIVE_ANALYST_MIN_UPSIDE
+
+    EFFECTIVE_LAUNCH_MIN_GAIN = LAUNCH_MIN_GAIN
+    EFFECTIVE_LAUNCH_MIN_REL_VOL = LAUNCH_MIN_REL_VOL
+    EFFECTIVE_EARNINGS_MIN_MCAP = EARNINGS_MIN_MCAP
+    EFFECTIVE_ANALYST_MIN_UPSIDE = ANALYST_MIN_UPSIDE
+
+    if not MARKET_FILTER_ENABLED:
+        print("[步驟 0/4] 大盤濾網：停用（使用原始門檻）")
+        return
+
+    try:
+        lookback_days = max(MARKET_FILTER_LOOKBACK_DAYS, MARKET_FILTER_MA_WINDOW + 5)
+        hist = yf.Ticker(MARKET_FILTER_SYMBOL).history(period=f"{lookback_days}d", interval="1d")
+        closes = hist['Close'].dropna() if not hist.empty and 'Close' in hist.columns else pd.Series(dtype=float)
+
+        if len(closes) < MARKET_FILTER_MA_WINDOW:
+            print(f"[步驟 0/4] 大盤濾網：資料不足（{MARKET_FILTER_SYMBOL}），維持原始門檻")
+            return
+
+        last_close = float(closes.iloc[-1])
+        ma_value = float(closes.tail(MARKET_FILTER_MA_WINDOW).mean())
+        is_bear = last_close < ma_value
+
+        if is_bear:
+            EFFECTIVE_LAUNCH_MIN_GAIN = MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN
+            EFFECTIVE_LAUNCH_MIN_REL_VOL = MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL
+            EFFECTIVE_EARNINGS_MIN_MCAP = MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP
+            EFFECTIVE_ANALYST_MIN_UPSIDE = MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE
+            print(
+                f"[步驟 0/4] 大盤濾網：BEAR（{MARKET_FILTER_SYMBOL} {last_close:.2f} < MA{MARKET_FILTER_MA_WINDOW} {ma_value:.2f}），"
+                f"門檻提高：起飛>{EFFECTIVE_LAUNCH_MIN_GAIN}%/{EFFECTIVE_LAUNCH_MIN_REL_VOL}x，"
+                f"財報市值>{EFFECTIVE_EARNINGS_MIN_MCAP/1e9:.1f}B，預測上漲>{EFFECTIVE_ANALYST_MIN_UPSIDE}%"
+            )
+        else:
+            print(
+                f"[步驟 0/4] 大盤濾網：BULL（{MARKET_FILTER_SYMBOL} {last_close:.2f} >= MA{MARKET_FILTER_MA_WINDOW} {ma_value:.2f}），"
+                "使用原始門檻"
+            )
+    except Exception as e:
+        print(f"[步驟 0/4] 大盤濾網判斷失敗，維持原始門檻: {e}")
 
 
 # ============ 工具函數 ============
@@ -434,6 +490,11 @@ class GoogleSheetsUploader:
             sheet3_top = sheet3.head(top_n).copy() if len(sheet3) > 0 else pd.DataFrame()
             sheet4_top = sheet4.head(top_n).copy() if sheet4 is not None and len(sheet4) > 0 else pd.DataFrame()
 
+            sheet1_top = self._hide_empty_signal_columns(sheet1_top, context='起飛清單')
+            sheet2_top = self._hide_empty_signal_columns(sheet2_top, context='財報預熱')
+            sheet3_top = self._hide_empty_signal_columns(sheet3_top, context='預測情報')
+            sheet4_top = self._hide_empty_signal_columns(sheet4_top, context='Track F')
+
             combined_df = self._build_combined_report(sheet1_top, sheet2_top, sheet3_top, sheet4_top)
             success = self.upload_sheet(combined_df, date_str, clear_first=True)
 
@@ -447,6 +508,32 @@ class GoogleSheetsUploader:
         except Exception as e:
             print(f"[X] 上傳每日報告失敗: {e}")
             return False
+
+    def _hide_empty_signal_columns(self, df: pd.DataFrame, context: str = "") -> pd.DataFrame:
+        if df is None or len(df) == 0:
+            return df
+
+        signal_cols = ['vwap', 'sqz_on', 'sqzmom_color', 'sqzmom_value', 'signal_age']
+        present_signal_cols = [c for c in signal_cols if c in df.columns]
+        if not present_signal_cols:
+            return df
+
+        def _has_value(series: pd.Series) -> bool:
+            for v in series:
+                if pd.isna(v):
+                    continue
+                text = str(v).strip().upper()
+                if text not in {'', 'NA', 'NONE', 'NAN'}:
+                    return True
+            return False
+
+        has_any_signal_data = any(_has_value(df[c]) for c in present_signal_cols)
+        if not has_any_signal_data:
+            if context:
+                print(f"  [*] {context} 的 TradingView 訊號欄位皆無資料，已自動隱藏")
+            return df.drop(columns=present_signal_cols)
+
+        return df
 
     def upload_full_data(self, df_enriched: pd.DataFrame, date_str: str = None) -> bool:
         """
@@ -485,6 +572,8 @@ class GoogleSheetsUploader:
             available_cols = [c for c in col_map if c in df_enriched.columns]
             output = df_enriched[available_cols].copy()
             output.columns = [col_map[c] for c in available_cols]
+
+            output = self._hide_empty_signal_columns(output, context='全量輸出')
 
             # 數值格式化
             for col in ['今日漲幅%', '量能倍數', '上漲空間%']:
@@ -846,7 +935,7 @@ def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     print(f"  [*] Finnhub 財報清單: {len(tickers)} 檔，其中 {len(missing)} 檔不在 Finviz 結果")
-    print(f"  [*] 開始篩選符合條件的財報股（市值 >{EARNINGS_MIN_MCAP/1e9:.1f}B, 量能 >{EARNINGS_MIN_VOLUME/1e3:.0f}k）...")
+    print(f"  [*] 開始篩選符合條件的財報股（市值 >{EFFECTIVE_EARNINGS_MIN_MCAP/1e9:.1f}B, 量能 >{EARNINGS_MIN_VOLUME/1e3:.0f}k）...")
 
     # 快速篩選：只保留符合市值+量能條件的 ticker
     qualified = []
@@ -857,7 +946,7 @@ def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
             mcap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume', 0)
             
-            if mcap >= EARNINGS_MIN_MCAP and avg_vol >= EARNINGS_MIN_VOLUME:
+            if mcap >= EFFECTIVE_EARNINGS_MIN_MCAP and avg_vol >= EARNINGS_MIN_VOLUME:
                 qualified.append(ticker)
                 if len(qualified) >= MAX_EARNINGS_MERGE:
                     break
@@ -1171,8 +1260,8 @@ def filter_sheet1_launch(df: pd.DataFrame) -> pd.DataFrame:
     print("[步驟 3/4] 篩選起飛清單...")
 
     filtered = df[
-        (df['Daily_Change'] > LAUNCH_MIN_GAIN) &
-        (df['Rel_Volume'] > LAUNCH_MIN_REL_VOL) &
+        (df['Daily_Change'] > EFFECTIVE_LAUNCH_MIN_GAIN) &
+        (df['Rel_Volume'] > EFFECTIVE_LAUNCH_MIN_REL_VOL) &
         (df['Price'] > LAUNCH_MIN_PRICE) &
         (df['Market_Cap_Raw'] > LAUNCH_MIN_MCAP)
     ].copy()
@@ -1237,7 +1326,7 @@ def filter_sheet2_earnings(df: pd.DataFrame) -> pd.DataFrame:
     filtered = df_with_earnings[
         (df_with_earnings['Days_To_Earnings'] >= 0) &
         (df_with_earnings['Days_To_Earnings'] <= EARNINGS_DAYS_AHEAD) &
-        (df_with_earnings['Market_Cap_Raw'] > EARNINGS_MIN_MCAP)
+        (df_with_earnings['Market_Cap_Raw'] > EFFECTIVE_EARNINGS_MIN_MCAP)
     ].copy()
 
     if len(filtered) == 0:
@@ -1281,7 +1370,7 @@ def filter_sheet3_analyst(df: pd.DataFrame, target_changes: Dict = None) -> pd.D
     print("[步驟 3/4] 篩選預測情報...")
 
     filtered = df[
-        (df['Upside_Pct'] > ANALYST_MIN_UPSIDE) &
+        (df['Upside_Pct'] > EFFECTIVE_ANALYST_MIN_UPSIDE) &
         (df['Num_Analysts'] >= ANALYST_MIN_COUNT) &
         (df['Target_Price'].notna())
     ].copy()
@@ -1446,6 +1535,9 @@ def main():
     """主程序入口"""
     try:
         print_banner()
+
+        # 步驟 0: 大盤環境濾網（MVP，可關閉）
+        apply_market_regime_filter()
 
         # 步驟 1: 爬取 Finviz
         df_finviz = scrape_finviz_screener()

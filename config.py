@@ -57,6 +57,19 @@ RATING_A_UPSIDE = 50.0
 # 每個清單輸出幾檔股票
 TOP_N_STOCKS = 3
 
+# ============ 大盤環境濾網（MVP，可關閉） ============
+# 啟用後：若 SPY 跌破 MA20，將自動提高部分選股門檻
+MARKET_FILTER_ENABLED = os.getenv("MARKET_FILTER_ENABLED", "false").lower() == "true"
+MARKET_FILTER_SYMBOL = os.getenv("MARKET_FILTER_SYMBOL", "SPY").upper()
+MARKET_FILTER_MA_WINDOW = int(os.getenv("MARKET_FILTER_MA_WINDOW", "20"))
+MARKET_FILTER_LOOKBACK_DAYS = int(os.getenv("MARKET_FILTER_LOOKBACK_DAYS", "60"))
+
+# Bear 模式（SPY < MA20）門檻
+MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN = float(os.getenv("MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN", "4.5"))
+MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL = float(os.getenv("MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL", "2.5"))
+MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP = int(os.getenv("MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP", "2000000000"))
+MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE = float(os.getenv("MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE", "40.0"))
+
 # ============ Google Sheets 設定（選用）============
 GSHEET_ENABLED = True
 GSHEET_NAME = "Alpha_Sniper_Daily_Report"
