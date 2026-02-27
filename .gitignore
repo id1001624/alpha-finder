@@ -52,6 +52,8 @@ config_local.py
 # 日誌和運行時檔
 *.log
 run_log.txt
+signals.db
+webhook_raw.jsonl
 
 # 系統檔案
 .DS_Store
