@@ -60,7 +60,9 @@ from config import (
     SELECTED_EXCHANGES, SELECTED_INDICES,
     MAX_STOCKS_TO_PROCESS, API_DELAY,
     LAUNCH_MIN_GAIN, LAUNCH_MIN_REL_VOL, LAUNCH_MIN_PRICE, LAUNCH_MIN_MCAP,
-    EARNINGS_DAYS_AHEAD, EARNINGS_MIN_MCAP, EARNINGS_MIN_VOLUME, MAX_EARNINGS_MERGE, EARNINGS_RESERVED_SLOTS,
+    EARNINGS_MIN_MCAP, EARNINGS_MIN_VOLUME, MAX_EARNINGS_MERGE, EARNINGS_RESERVED_SLOTS,
+    EARNINGS_LOOKAHEAD_DAYS, EARNINGS_LOOKBACK_DAYS, EARNINGS_SNIPER_DAYS,
+    EARNINGS_TIER1_MCAP_MIN, EARNINGS_TIER2_MCAP_MIN,
     ANALYST_MIN_UPSIDE, ANALYST_MIN_COUNT,
     RATING_A_REL_VOL, RATING_A_UPSIDE,
     TOP_N_STOCKS,
@@ -74,6 +76,7 @@ from config import (
     MARKET_FILTER_ENABLED, MARKET_FILTER_SYMBOL, MARKET_FILTER_MA_WINDOW, MARKET_FILTER_LOOKBACK_DAYS,
     MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN, MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL,
     MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP, MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE,
+    DEMO_MODE, TV_LIST_LIMIT,
 )
 
 from signal_store import get_latest_signals
@@ -89,6 +92,21 @@ except ImportError:
     print("    請執行: pip install gspread oauth2client")
 
 warnings.filterwarnings('ignore')
+
+
+def _previous_trading_day_str(base_dt: datetime = None) -> str:
+    """回傳前一個交易日日期字串（Mon->Fri，Sat/Sun->Fri，其餘->前一日）。"""
+    now_dt = base_dt or datetime.now()
+    weekday = now_dt.weekday()
+
+    if weekday == 0:
+        delta_days = 3
+    elif weekday == 6:
+        delta_days = 2
+    else:
+        delta_days = 1
+
+    return (now_dt - timedelta(days=delta_days)).strftime("%Y-%m-%d")
 
 
 # ============ 動態門檻（可由大盤濾網覆寫） ============
@@ -171,7 +189,7 @@ def get_finnhub_earnings(ticker: str) -> Dict:
     
     try:
         from_date = datetime.now().strftime("%Y-%m-%d")
-        to_date = (datetime.now() + timedelta(days=EARNINGS_DAYS_AHEAD*2)).strftime("%Y-%m-%d")
+        to_date = (datetime.now() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS * 2)).strftime("%Y-%m-%d")
         
         url = "https://finnhub.io/api/v1/calendar/earnings"
         params = {
@@ -262,6 +280,7 @@ def assign_grade(row: pd.Series) -> str:
 PRIORITY_KEYWORDS = {
     'AI/半導體': ['ai', 'artificial intelligence', 'chip', 'semiconductor', 'nvidia', 'amd', 'gpu', 'neural', 'machine learning'],
     '資料中心': ['data center', 'datacenter', 'cloud computing', 'server', 'storage'],
+    '光通訊/網通': ['optical', 'fiber', 'transceiver', 'photonic', 'networking', 'communication equipment', '800g', '1.6t'],
     '電力設備': ['power', 'electric', 'utility', 'energy equipment', 'grid', 'battery'],
     '工業': ['industrial', 'machinery', 'manufacturing', 'automation'],
     '醫療服務': ['healthcare', 'medical', 'hospital', 'health service'],
@@ -279,9 +298,15 @@ def print_banner():
     ================================================================
     ||         Alpha Finder 每日情報掃描腳本 v2.0                  ||
     ||         免費版 - Finviz + Yahoo Finance                     ||
+    ||         財報模組: lookahead={}d / lookback={}d / tv_limit={}      ||
     ||         掃描時間: {}                             ||
     ================================================================
-    """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    """.format(
+        EARNINGS_LOOKAHEAD_DAYS,
+        EARNINGS_LOOKBACK_DAYS,
+        TV_LIST_LIMIT,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
     print(banner)
 
 
@@ -346,6 +371,127 @@ def _apply_sector_classification(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: classify_sector(r['Sector'], r['Industry'])[1], axis=1
     )
     return df
+
+
+def _resolve_earnings_fields(earnings_date_value, now_dt: datetime = None) -> Dict[str, object]:
+    now_dt = now_dt or datetime.now()
+    if earnings_date_value is None or earnings_date_value == '':
+        return {
+            'Earnings_Date': None,
+            'Earnings_Status': 'none',
+            'Days_To_Earnings': None,
+        }
+
+    try:
+        parsed = pd.to_datetime(earnings_date_value)
+        if pd.isna(parsed):
+            raise ValueError("invalid earnings date")
+        parsed_ts = pd.Timestamp(parsed)
+        earnings_date = parsed_ts.date()
+        day_diff = (earnings_date - now_dt.date()).days
+        if day_diff > 0:
+            status = 'upcoming'
+        elif day_diff < 0:
+            status = 'past'
+        else:
+            status = 'upcoming'
+        return {
+            'Earnings_Date': parsed_ts.strftime('%Y-%m-%d'),
+            'Earnings_Status': status,
+            'Days_To_Earnings': int(day_diff),
+        }
+    except Exception:
+        return {
+            'Earnings_Date': None,
+            'Earnings_Status': 'none',
+            'Days_To_Earnings': None,
+        }
+
+
+def _compute_theme_score(priority_sector: str) -> int:
+    if priority_sector in PRIORITY_KEYWORDS:
+        return 1
+    return 0
+
+
+def _build_tv_demand_list(df: pd.DataFrame,
+                          sheet1: pd.DataFrame,
+                          lookahead_days: int,
+                          tv_list_limit: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    df2 = df.copy()
+    if 'Days_To_Earnings' not in df2.columns:
+        df2['Days_To_Earnings'] = None
+    if '_signal_score' not in df2.columns:
+        change_score = df2['Daily_Change'].clip(lower=0)
+        vol_score = (df2['Rel_Volume'] - 1).clip(lower=0)
+        df2['_signal_score'] = change_score * 2 + vol_score * 3
+    df2['need_tv'] = False
+    df2['need_tv_reason'] = ''
+
+    if len(df2) == 0 or tv_list_limit <= 0:
+        return df2, pd.DataFrame(columns=['Ticker', 'need_tv_reason'])
+
+    selected_launch = set(sheet1['股票代碼'].astype(str).tolist()) if len(sheet1) > 0 and '股票代碼' in sheet1.columns else set()
+
+    alt_mask = (
+        (df2['Daily_Change'] > LAUNCH_MIN_GAIN) &
+        (df2['Rel_Volume'] > LAUNCH_MIN_REL_VOL) &
+        (~df2['Ticker'].isin(selected_launch))
+    )
+
+    sniper_mask = (
+        df2['Days_To_Earnings'].notna() &
+        (df2['Days_To_Earnings'] >= 0) &
+        (df2['Days_To_Earnings'] <= lookahead_days)
+    )
+
+    candidates = df2[alt_mask | sniper_mask].copy()
+    if len(candidates) == 0:
+        return df2, pd.DataFrame(columns=['Ticker', 'need_tv_reason'])
+
+    def _reason(row: pd.Series) -> str:
+        is_alt = bool(alt_mask.get(row.name, False))
+        is_sniper = bool(sniper_mask.get(row.name, False))
+        parts = []
+        if is_alt:
+            parts.append('替代候選')
+        if is_sniper:
+            dte = row.get('Days_To_Earnings')
+            parts.append(f'財報三日狙擊(D-{int(dte)})' if pd.notna(dte) else '財報三日狙擊')
+        return ' + '.join(parts)
+
+    candidates['need_tv_reason'] = candidates.apply(_reason, axis=1)
+    candidates = candidates.sort_values('_signal_score', ascending=False).head(tv_list_limit)
+
+    df2.loc[candidates.index, 'need_tv'] = True
+    df2.loc[candidates.index, 'need_tv_reason'] = candidates['need_tv_reason']
+
+    tv_list = candidates[['Ticker', 'need_tv_reason']].copy()
+    return df2, tv_list
+
+
+def _enrich_demo_row(row: pd.Series, idx: int) -> Dict[str, object]:
+    today = datetime.now().date()
+    schedule = [-4, -2, 1, 2, 3, 5, 8, 12]
+    day_offset = schedule[idx % len(schedule)]
+    earnings_dt = today + timedelta(days=day_offset)
+    earnings_info = _resolve_earnings_fields(earnings_dt.isoformat())
+
+    target_price = round(float(row.get('Price', 0)) * (1.15 + (idx % 5) * 0.12), 2)
+    current_price = float(row.get('Price', 0) or 0)
+    upside_pct = ((target_price - current_price) / current_price * 100) if current_price > 0 else 0
+
+    return {
+        'Earnings_Date': earnings_info['Earnings_Date'],
+        'Earnings_Status': earnings_info['Earnings_Status'],
+        'Days_To_Earnings': earnings_info['Days_To_Earnings'],
+        'Earnings_Time': 'BMO' if idx % 2 == 0 else 'AMC',
+        'Target_Price': target_price,
+        'Upside_Pct': upside_pct,
+        'EPS_Estimate': round(0.5 + idx * 0.07, 2),
+        'Num_Analysts': 3 + (idx % 7),
+        'News_Headline': f"Demo catalyst for {row.get('Ticker', '')}",
+    }
 
 
 # ============ Google Sheets 上傳模組 ============
@@ -476,11 +622,12 @@ class GoogleSheetsUploader:
 
     def upload_daily_report(self, sheet1: pd.DataFrame, sheet2: pd.DataFrame,
                            sheet3: pd.DataFrame, sheet4: pd.DataFrame = None,
-                           date_str: str = None) -> bool:
+                           date_str: str = None, sheet2b: pd.DataFrame = None,
+                           tv_need_list: pd.DataFrame = None) -> bool:
         """上傳每日完整報告（三合一管理模式，date_str 預設為前一日收盤）"""
         try:
             if date_str is None:
-                date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                date_str = _previous_trading_day_str()
 
             print(f"\n[*] 開始上傳每日報告（日期: {date_str}）")
 
@@ -489,19 +636,29 @@ class GoogleSheetsUploader:
             sheet2_top = sheet2.head(top_n).copy() if len(sheet2) > 0 else pd.DataFrame()
             sheet3_top = sheet3.head(top_n).copy() if len(sheet3) > 0 else pd.DataFrame()
             sheet4_top = sheet4.head(top_n).copy() if sheet4 is not None and len(sheet4) > 0 else pd.DataFrame()
+            sheet2b_top = sheet2b.head(top_n).copy() if sheet2b is not None and len(sheet2b) > 0 else pd.DataFrame()
 
             sheet1_top = self._hide_empty_signal_columns(sheet1_top, context='起飛清單')
             sheet2_top = self._hide_empty_signal_columns(sheet2_top, context='財報預熱')
+            sheet2b_top = self._hide_empty_signal_columns(sheet2b_top, context='財報後延續')
             sheet3_top = self._hide_empty_signal_columns(sheet3_top, context='預測情報')
             sheet4_top = self._hide_empty_signal_columns(sheet4_top, context='Track F')
 
-            combined_df = self._build_combined_report(sheet1_top, sheet2_top, sheet3_top, sheet4_top)
+            combined_df = self._build_combined_report(
+                sheet1_top,
+                sheet2_top,
+                sheet3_top,
+                sheet4_top,
+                sheet2b=sheet2b_top,
+                tv_need_list=tv_need_list,
+            )
             success = self.upload_sheet(combined_df, date_str, clear_first=True)
 
             if success:
                 print(f"[OK] 每日報告上傳成功")
-                s1, s2, s3, s4 = len(sheet1_top), len(sheet2_top), len(sheet3_top), len(sheet4_top)
-                print(f"  資料: 起飛清單({s1}) + 財報預熱({s2}) + 預測情報({s3}) + Track F({s4})")
+                s1, s2, s2b, s3, s4 = len(sheet1_top), len(sheet2_top), len(sheet2b_top), len(sheet3_top), len(sheet4_top)
+                tv_n = len(tv_need_list) if tv_need_list is not None else 0
+                print(f"  資料: 起飛清單({s1}) + 財報預熱({s2}) + 財報後延續({s2b}) + 預測情報({s3}) + Track F({s4}) + TV需求({tv_n})")
 
             return success
 
@@ -543,7 +700,7 @@ class GoogleSheetsUploader:
         """
         try:
             if date_str is None:
-                date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                date_str = _previous_trading_day_str()
 
             print(f"\n[*] 上傳全量數據（{len(df_enriched)} 檔）到「全量數據」分頁...")
 
@@ -560,9 +717,13 @@ class GoogleSheetsUploader:
                 'Upside_Pct':    '上漲空間%',
                 'Num_Analysts':  '分析師數',
                 'Earnings_Date': '財報日期',
+                'Earnings_Status': '財報狀態',
+                'Days_To_Earnings': '距離財報天數',
                 'Earnings_Time': '財報時段',
                 'EPS_Estimate':  '預估EPS',
                 'News_Headline': '新聞標題',
+                'need_tv':       'need_tv',
+                'need_tv_reason': 'need_tv_reason',
                 'TV_VWAP':       'vwap',
                 'TV_SQZ_On':     'sqz_on',
                 'TV_SQZMOM_Color': 'sqzmom_color',
@@ -594,7 +755,9 @@ class GoogleSheetsUploader:
             return False
 
     def _build_combined_report(self, sheet1: pd.DataFrame, sheet2: pd.DataFrame,
-                               sheet3: pd.DataFrame, sheet4: pd.DataFrame = None) -> pd.DataFrame:
+                               sheet3: pd.DataFrame, sheet4: pd.DataFrame = None,
+                               sheet2b: pd.DataFrame = None,
+                               tv_need_list: pd.DataFrame = None) -> pd.DataFrame:
         """組建綜合報告 DataFrame"""
         frames = []
 
@@ -608,6 +771,11 @@ class GoogleSheetsUploader:
             frames.append(sheet2)
             frames.append(pd.DataFrame([{}]))
 
+        if sheet2b is not None and len(sheet2b) > 0:
+            frames.append(pd.DataFrame([{'========': '=== 財報後延續 Top 3 ==='}]))
+            frames.append(sheet2b)
+            frames.append(pd.DataFrame([{}]))
+
         if len(sheet3) > 0:
             frames.append(pd.DataFrame([{'========': '=== 預測情報 Top 3 ==='}]))
             frames.append(sheet3)
@@ -616,6 +784,16 @@ class GoogleSheetsUploader:
             frames.append(pd.DataFrame([{}]))
             frames.append(pd.DataFrame([{'========': '=== Track F 彩票 Top 3 ==='}]))
             frames.append(sheet4)
+
+        if tv_need_list is not None and len(tv_need_list) > 0:
+            frames.append(pd.DataFrame([{}]))
+            frames.append(pd.DataFrame([{'========': '=== TV 指標需求清單 ==='}]))
+            tv_block = tv_need_list.copy()
+            rename_map = {'Ticker': '股票代碼', 'need_tv_reason': '需求原因'}
+            keep_cols = [c for c in ['Ticker', 'need_tv_reason'] if c in tv_block.columns]
+            if keep_cols:
+                tv_block = tv_block[keep_cols].rename(columns=rename_map)
+            frames.append(tv_block)
 
         if frames:
             return pd.concat(frames, ignore_index=True)
@@ -820,14 +998,14 @@ def create_demo_data() -> pd.DataFrame:
 
 def fetch_upcoming_earnings_tickers() -> List[str]:
     """
-    使用 Finnhub 取得未來 EARNINGS_DAYS_AHEAD 天內的財報股票清單
+    使用 Finnhub 取得未來 EARNINGS_LOOKAHEAD_DAYS 天內的財報股票清單
     """
     if not FINNHUB_API_KEY:
         return []
 
     try:
         from_date = datetime.now().strftime("%Y-%m-%d")
-        to_date = (datetime.now() + timedelta(days=EARNINGS_DAYS_AHEAD)).strftime("%Y-%m-%d")
+        to_date = (datetime.now() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d")
         url = "https://finnhub.io/api/v1/calendar/earnings"
         params = {
             'from': from_date,
@@ -907,7 +1085,7 @@ def append_stock_from_yfinance(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
     """
-    把未來 EARNINGS_DAYS_AHEAD 天內有財報的股票合併進主清單
+    把未來 EARNINGS_LOOKAHEAD_DAYS 天內有財報的股票合併進主清單
     【硬裁剪】只補抓符合市值 + 量能條件的股票，最多 MAX_EARNINGS_MERGE 檔
     【關鍵】標記所有財報股（含已在 Finviz 結果中的），保證後續優先處理
     """
@@ -1001,6 +1179,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
         print(f"  [*] 按信號強度排序，查詢前 {len(df_subset)} 檔")
 
     enriched_data = []
+    now_dt = datetime.now()
 
     for count, (idx, row) in enumerate(df_subset.iterrows(), 1):
         ticker_symbol = row['Ticker']
@@ -1008,6 +1187,12 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
         print(f"  ({count}/{len(df_subset)}) 查詢 {ticker_symbol}{earnings_tag}...", end=' ')
 
         try:
+            if DEMO_MODE:
+                result = _enrich_demo_row(row, count - 1)
+                enriched_data.append({**row.to_dict(), **result})
+                print("[DEMO]")
+                continue
+
             def _fetch():
                 ticker = yf.Ticker(ticker_symbol)
                 info = ticker.info
@@ -1035,15 +1220,9 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                         if not eps_estimate and finnhub_earn.get('eps_estimate'):
                             eps_estimate = finnhub_earn.get('eps_estimate')
 
-                # 只保留未來的財報日期（過去的財報日期清除，避免誤導）
-                if earnings_date:
-                    try:
-                        ed = pd.to_datetime(earnings_date)
-                        if ed.date() < datetime.now().date():
-                            earnings_date = None
-                            earnings_time = '無財報'
-                    except Exception:
-                        pass
+                earnings_info = _resolve_earnings_fields(earnings_date, now_dt=now_dt)
+                if earnings_info['Earnings_Status'] == 'none':
+                    earnings_time = '無財報'
 
                 # 分析師目標價 - 優先從 yfinance 取得
                 target_price = info.get('targetMeanPrice', None)
@@ -1072,7 +1251,9 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                     pass
 
                 return {
-                    'Earnings_Date': earnings_date,
+                    'Earnings_Date': earnings_info['Earnings_Date'],
+                    'Earnings_Status': earnings_info['Earnings_Status'],
+                    'Days_To_Earnings': earnings_info['Days_To_Earnings'],
                     'Earnings_Time': earnings_time,  # 新增：BMO/AMC
                     'Target_Price': target_price,
                     'Upside_Pct': upside_pct,
@@ -1091,6 +1272,8 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
             enriched_data.append({
                 **row.to_dict(),
                 'Earnings_Date': None,
+                'Earnings_Status': 'none',
+                'Days_To_Earnings': None,
                 'Earnings_Time': None,
                 'Target_Price': None,
                 'Upside_Pct': 0,
@@ -1307,41 +1490,53 @@ def filter_sheet1_launch(df: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def _rank_earnings_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    ranked = _apply_sector_classification(df.copy())
+    ranked['Theme_Score'] = ranked['Priority_Sector'].apply(_compute_theme_score)
+    ranked['Tier'] = ranked['Market_Cap_Raw'].apply(
+        lambda v: 'Tier1' if v >= EARNINGS_TIER1_MCAP_MIN else ('Tier2' if v >= EARNINGS_TIER2_MCAP_MIN else 'Below')
+    )
+    ranked['Tier_Score'] = ranked['Tier'].map({'Tier1': 2, 'Tier2': 1, 'Below': 0})
+    ranked['Perf_Week'] = ranked['Perf_Week'].fillna(0)
+    ranked['Rel_Volume'] = ranked['Rel_Volume'].fillna(0)
+    ranked = ranked.sort_values(
+        ['Rel_Volume', 'Perf_Week', 'Theme_Score', 'Tier_Score', 'Market_Cap_Raw'],
+        ascending=[False, False, False, False, False]
+    )
+    return ranked
+
+
 def filter_sheet2_earnings(df: pd.DataFrame) -> pd.DataFrame:
     """
     Sheet 2 - 財報預熱
-    條件：EARNINGS_DAYS_AHEAD 天內有財報
-          市值 > EARNINGS_MIN_MCAP
-          優先產業優先排序
+    條件：未來 1~lookahead 天內有財報
+          市值 >= Tier2 下限，Tier1 / Tier2 分級排序
     """
     print("[步驟 3/4] 篩選財報預熱清單...")
 
-    df_with_earnings = df[df['Earnings_Date'].notna()].copy()
-
-    today = datetime.now()
-    df_with_earnings['Days_To_Earnings'] = df_with_earnings['Earnings_Date'].apply(
-        lambda x: (pd.to_datetime(x) - today).days if x else 999
-    )
-
-    filtered = df_with_earnings[
-        (df_with_earnings['Days_To_Earnings'] >= 0) &
-        (df_with_earnings['Days_To_Earnings'] <= EARNINGS_DAYS_AHEAD) &
-        (df_with_earnings['Market_Cap_Raw'] > EFFECTIVE_EARNINGS_MIN_MCAP)
+    candidates = df[
+        (df['Earnings_Status'] == 'upcoming') &
+        (df['Days_To_Earnings'].notna()) &
+        (df['Days_To_Earnings'] >= 1) &
+        (df['Days_To_Earnings'] <= EARNINGS_LOOKAHEAD_DAYS) &
+        (df['Market_Cap_Raw'] >= EARNINGS_TIER2_MCAP_MIN)
     ].copy()
 
-    if len(filtered) == 0:
+    if len(candidates) == 0:
         print("  [!] 沒有找到財報預熱信息，返回空表\n")
         return pd.DataFrame()
 
-    filtered = _apply_sector_classification(filtered)
-    filtered['Rating_Score'] = filtered['Rating'].map({'A': 3, 'B': 2, 'C': 1})
-    filtered = filtered.sort_values(['Rating_Score', 'Market_Cap_Raw'], ascending=[False, False])
+    filtered = _rank_earnings_candidates(candidates)
 
     cols_map = {
         'Ticker': '股票代碼',
+        'Days_To_Earnings': '距離財報天數',
         'Earnings_Date': '財報日期',
         'Earnings_Time': '財報時段',
         'EPS_Estimate': '預估EPS',
+        'Rel_Volume': '量能倍數',
+        'Perf_Week': '7日漲幅%',
+        'Tier': '市值分級',
         'Market_Cap': '市值',
         'Priority_Sector': '產業',
         'Rating': '評級',
@@ -1357,6 +1552,54 @@ def filter_sheet2_earnings(df: pd.DataFrame) -> pd.DataFrame:
     output = _finalize_signal_columns(output)
 
     print(f"  [OK] 篩選出 {len(output)} 檔財報預熱股票\n")
+    return output
+
+
+def filter_sheet2b_post_earnings(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sheet 2b - 財報後延續
+    條件：過去 1~lookback 天內已財報，市值 >= Tier2 下限
+    """
+    print("[步驟 3/4] 篩選財報後延續清單...")
+
+    candidates = df[
+        (df['Earnings_Status'] == 'past') &
+        (df['Days_To_Earnings'].notna()) &
+        (df['Days_To_Earnings'] <= -1) &
+        (df['Days_To_Earnings'] >= -EARNINGS_LOOKBACK_DAYS) &
+        (df['Market_Cap_Raw'] >= EARNINGS_TIER2_MCAP_MIN)
+    ].copy()
+
+    if len(candidates) == 0:
+        print("  [!] 沒有找到財報後延續信息，返回空表\n")
+        return pd.DataFrame()
+
+    filtered = _rank_earnings_candidates(candidates)
+
+    cols_map = {
+        'Ticker': '股票代碼',
+        'Days_To_Earnings': '距離財報天數',
+        'Earnings_Date': '財報日期',
+        'Earnings_Time': '財報時段',
+        'Rel_Volume': '量能倍數',
+        'Perf_Week': '7日漲幅%',
+        'Daily_Change': '今日漲幅%',
+        'Tier': '市值分級',
+        'Market_Cap': '市值',
+        'Priority_Sector': '產業',
+        'Rating': '評級',
+        'TV_VWAP': 'vwap',
+        'TV_SQZ_On': 'sqz_on',
+        'TV_SQZMOM_Color': 'sqzmom_color',
+        'TV_SQZMOM_Value': 'sqzmom_value',
+        'TV_Signal_Age_Min': 'signal_age',
+    }
+    available = {k: v for k, v in cols_map.items() if k in filtered.columns}
+    output = filtered[list(available.keys())].head(TOP_N_STOCKS).copy()
+    output.columns = list(available.values())
+    output = _finalize_signal_columns(output)
+
+    print(f"  [OK] 篩選出 {len(output)} 檔財報後延續股票\n")
     return output
 
 
@@ -1474,7 +1717,9 @@ def filter_track_f_lottery(df: pd.DataFrame, signals_available: bool) -> pd.Data
 
 
 
-def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet3: pd.DataFrame, sheet4: pd.DataFrame):
+def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet2b: pd.DataFrame,
+                    sheet3: pd.DataFrame, sheet4: pd.DataFrame,
+                    tv_need_list: pd.DataFrame = None):
     """顯示掃描結果摘要"""
     print("\n" + "=" * 70)
     print("  Alpha Finder 每日掃描結果摘要".center(60))
@@ -1501,6 +1746,13 @@ def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet3: pd.DataF
     else:
         print("  無符合條件的股票")
 
+    print(f"\n>> 財報後延續 Top {TOP_N_STOCKS}")
+    if len(sheet2b) > 0:
+        for i, (_, row) in enumerate(sheet2b.iterrows(), 1):
+            print(f"  {i}. {row[col_ticker]} - 財報 {row.get('財報日期', 'N/A')} | 天數 {row.get('距離財報天數', 'N/A')} | 評級 {row.get('評級', 'N/A')}")
+    else:
+        print("  無符合條件的股票")
+
     print(f"\n>> 預測情報 Top {TOP_N_STOCKS}")
     if len(sheet3) > 0:
         for i, (_, row) in enumerate(sheet3.iterrows(), 1):
@@ -1515,14 +1767,18 @@ def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet3: pd.DataF
     print(f"\n>> Track F 彩票 Top {TOP_N_STOCKS}")
     if len(sheet4) > 0:
         for i, (_, row) in enumerate(sheet4.iterrows(), 1):
-            print(
-                f"  {i}. {row[col_ticker]} - 漲幅 {row.get('今日漲幅%', 0):.1f}% | 量能 {row.get('量能倍數', 0):.1f}x"
-                f" | vwap {row.get('vwap', 'NA')} | sqz_on {row.get('sqz_on', 'NA')}"
-                f" | sqzmom {row.get('sqzmom_color', 'NA')}/{row.get('sqzmom_value', 'NA')}"
-                f" | age {row.get('signal_age', 'NA')}"
-            )
+            change_val = row.get('今日漲幅%', 0)
+            vol_val = row.get('量能倍數', 0)
+            print(f"  {i}. {row[col_ticker]} - 漲幅 {change_val:.1f}% | 量能 {vol_val:.1f}x | vwap {row.get('vwap', 'NA')} | sqz_on {row.get('sqz_on', 'NA')} | sqzmom {row.get('sqzmom_color', 'NA')}/{row.get('sqzmom_value', 'NA')} | age {row.get('signal_age', 'NA')}")
     else:
         print("  無符合條件的股票（需有效 TradingView 訊號）")
+
+    print(f"\n>> TV 指標需求清單")
+    if tv_need_list is not None and len(tv_need_list) > 0:
+        for i, (_, row) in enumerate(tv_need_list.iterrows(), 1):
+            print(f"  {i}. {row.get('Ticker', 'N/A')} - {row.get('need_tv_reason', '')}")
+    else:
+        print("  今日無需額外補圖")
 
     print("\n" + "=" * 70)
     print("  掃描完成！請查看 CSV 檔案瞭解詳細資訊".center(60))
@@ -1539,15 +1795,20 @@ def main():
         # 步驟 0: 大盤環境濾網（MVP，可關閉）
         apply_market_regime_filter()
 
-        # 步驟 1: 爬取 Finviz
-        df_finviz = scrape_finviz_screener()
+        # 步驟 1: 爬取 Finviz（或 DEMO 模式）
+        if DEMO_MODE:
+            print("[步驟 1/4] DEMO_MODE 啟用：使用 create_demo_data()")
+            df_finviz = create_demo_data()
+        else:
+            df_finviz = scrape_finviz_screener()
 
         if len(df_finviz) == 0:
             print("[X] 錯誤：未從 Finviz 取得任何數據")
             sys.exit(1)
 
-        # 步驟 1.5: 合併未來 7 天財報股（Finnhub）
-        df_finviz = merge_upcoming_earnings(df_finviz)
+        # 步驟 1.5: 合併未來財報股（Finnhub）
+        if not DEMO_MODE:
+            df_finviz = merge_upcoming_earnings(df_finviz)
 
         # 步驟 2: 補充 Yahoo Finance 資料
         df_enriched = enrich_with_yfinance(df_finviz)
@@ -1562,6 +1823,15 @@ def main():
         after_count = len(df_enriched)
         print(f"[步驟 2.2] 基礎資料驗證: {before_count} -> {after_count} 檔（全量保留）")
 
+        for col, default in {
+            'Earnings_Status': 'none',
+            'Days_To_Earnings': None,
+            'need_tv': False,
+            'need_tv_reason': '',
+        }.items():
+            if col not in df_enriched.columns:
+                df_enriched[col] = default
+
         # 步驟 2.6: 載入 TradingView 訊號並合併
         signal_map = load_latest_signal_map(asof=datetime.now().astimezone())
         signals_available = len(signal_map) > 0
@@ -1571,14 +1841,23 @@ def main():
         tickers_for_analyst = df_enriched['Ticker'].tolist()
         target_changes = fetch_analyst_target_changes(tickers_for_analyst)
 
-        # 步驟 3: 篩選三個清單
+        # 步驟 3: 篩選多軌清單
         sheet1 = filter_sheet1_launch(df_enriched)
         sheet2 = filter_sheet2_earnings(df_enriched)
+        sheet2b = filter_sheet2b_post_earnings(df_enriched)
         sheet3 = filter_sheet3_analyst(df_enriched, target_changes=target_changes)
         sheet4 = filter_track_f_lottery(df_enriched, signals_available=signals_available)
 
+        # 步驟 3.5: TV 指標需求清單（最多 TV_LIST_LIMIT 檔）
+        df_enriched, tv_need_list = _build_tv_demand_list(
+            df_enriched,
+            sheet1,
+            lookahead_days=EARNINGS_SNIPER_DAYS,
+            tv_list_limit=TV_LIST_LIMIT,
+        )
+
         # 顯示摘要（terminal 確認用）
-        display_summary(sheet1, sheet2, sheet3, sheet4)
+        display_summary(sheet1, sheet2, sheet2b, sheet3, sheet4, tv_need_list=tv_need_list)
 
         # 步驟 4: 上傳到 Google Sheets
         if GSHEET_AVAILABLE and GSHEET_ENABLED:
@@ -1592,8 +1871,15 @@ def main():
                 if uploader.get_or_create_spreadsheet():
                     # 上傳全量數據（AI 分析用）
                     uploader.upload_full_data(df_enriched)
-                    # 上傳每日精選報告（Top 3 三合一）
-                    uploader.upload_daily_report(sheet1, sheet2, sheet3, sheet4)
+                    # 上傳每日精選報告（含 Sheet2b 與 TV 指標需求清單）
+                    uploader.upload_daily_report(
+                        sheet1,
+                        sheet2,
+                        sheet3,
+                        sheet4,
+                        sheet2b=sheet2b,
+                        tv_need_list=tv_need_list,
+                    )
                 else:
                     print("[!] 跳過 Google Sheets 上傳")
             else:

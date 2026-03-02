@@ -14,14 +14,13 @@ cd /d "%BASE_DIR%" || (
 )
 
 if exist "%LOCK_FILE%" (
-    for /f %%A in ('powershell -NoProfile -Command "$age=(New-TimeSpan -Start (Get-Item ''%LOCK_FILE%'').LastWriteTime -End (Get-Date)).TotalMinutes; [math]::Floor($age)"') do set "LOCK_AGE_MIN=%%A"
-    if not defined LOCK_AGE_MIN set "LOCK_AGE_MIN=0"
+    powershell -NoProfile -Command "$lock='%LOCK_FILE%'; $age=[int][Math]::Floor((New-TimeSpan -Start (Get-Item -LiteralPath $lock).LastWriteTime -End (Get-Date)).TotalMinutes); if ($age -ge %LOCK_STALE_MINUTES%) { exit 10 } else { exit 20 }"
 
-    if %LOCK_AGE_MIN% GEQ %LOCK_STALE_MINUTES% (
-        echo [%date% %time%] 偵測到過期執行鎖（%LOCK_AGE_MIN% 分鐘），自動清除 >> "%LOG_FILE%"
+    if "%errorlevel%" == "10" (
+        echo [%date% %time%] 偵測到過期執行鎖（>= %LOCK_STALE_MINUTES% 分鐘），自動清除 >> "%LOG_FILE%"
         del /f /q "%LOCK_FILE%" > nul 2>&1
     ) else (
-        echo [%date% %time%] 偵測到執行鎖（%LOCK_AGE_MIN% 分鐘），略過本次（避免重複執行） >> "%LOG_FILE%"
+        echo [%date% %time%] 偵測到執行鎖（小於 %LOCK_STALE_MINUTES% 分鐘），略過本次（避免重複執行） >> "%LOG_FILE%"
         exit /b 0
     )
 )

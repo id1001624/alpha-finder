@@ -43,6 +43,15 @@ EARNINGS_MIN_VOLUME = 500_000        # 最低平均成交量（Finnhub 補強用
 MAX_EARNINGS_MERGE = 80              # Finnhub 財報補抓最大數量（防止爆量）
 EARNINGS_RESERVED_SLOTS = 40         # 財報股保留名額（不受信號排名截斷）
 
+# 財報拆分（新）
+EARNINGS_LOOKAHEAD_DAYS = int(os.getenv("EARNINGS_LOOKAHEAD_DAYS", "14"))
+EARNINGS_LOOKBACK_DAYS = int(os.getenv("EARNINGS_LOOKBACK_DAYS", "5"))
+EARNINGS_SNIPER_DAYS = int(os.getenv("EARNINGS_SNIPER_DAYS", "3"))
+
+# 財報市值分級門檻（新）
+EARNINGS_TIER1_MCAP_MIN = int(os.getenv("EARNINGS_TIER1_MCAP_MIN", "2000000000"))
+EARNINGS_TIER2_MCAP_MIN = int(os.getenv("EARNINGS_TIER2_MCAP_MIN", "300000000"))
+
 # 預測情報
 ANALYST_MIN_UPSIDE = 30.0      # 最低上漲空間 %
 ANALYST_MIN_COUNT = 3          # 最低分析師數量
@@ -111,3 +120,7 @@ SIGNAL_REQUIRE_SAME_DAY = os.getenv("SIGNAL_REQUIRE_SAME_DAY", "true").lower() =
 ALLOW_PLAIN_TEXT_WEBHOOK = os.getenv("ALLOW_PLAIN_TEXT_WEBHOOK", "false").lower() == "true"
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8000"))
+
+# ============ Demo / TV 補圖清單設定 ============
+DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
+TV_LIST_LIMIT = int(os.getenv("TV_LIST_LIMIT", "6"))
