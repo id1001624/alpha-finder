@@ -10,7 +10,9 @@ Alpha Finder 每日情報掃描腳本 v2.0
 import sys
 import os
 import shutil
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # ===== 最優先：修復 SSL 憑證路徑（中文路徑導致 curl 失敗）=====
 # 必須在任何 import 之前執行，確保環境變數生效
@@ -67,6 +69,8 @@ from config import (
     RATING_A_REL_VOL, RATING_A_UPSIDE,
     TOP_N_STOCKS,
     GSHEET_ENABLED, GSHEET_NAME, GSHEET_CREDENTIALS_FILE,
+    GSHEET_UPLOAD_DAILY_REPORT, GSHEET_UPLOAD_FULL_DATA,
+    LOCAL_OUTPUT_ENABLED, LOCAL_OUTPUT_DIR, LOCAL_OUTPUT_KEEP_DAYS,
     # 新增配置
     FINNHUB_API_KEY,
     LOTTERY_MIN_GAIN, LOTTERY_MIN_REL_VOL, LOTTERY_MAX_MCAP,
@@ -1785,6 +1789,203 @@ def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet2b: pd.Data
     print("=" * 70 + "\n")
 
 
+def _safe_subset(df: pd.DataFrame, preferred_cols: List[str]) -> pd.DataFrame:
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=[c for c in preferred_cols if c])
+    available = [c for c in preferred_cols if c in df.columns]
+    if not available:
+        return df.copy()
+    return df[available].copy()
+
+
+def _write_csv_local(df: pd.DataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df_to_save = df if df is not None else pd.DataFrame()
+    df_to_save.to_csv(output_path, index=False, encoding='utf-8-sig')
+
+
+def _extract_sheet_tickers(df: pd.DataFrame) -> List[str]:
+    if df is None or len(df) == 0:
+        return []
+    ticker_col = '股票代碼' if '股票代碼' in df.columns else ('Ticker' if 'Ticker' in df.columns else None)
+    if ticker_col is None:
+        return []
+    return [str(v).strip().upper() for v in df[ticker_col].tolist() if str(v).strip()]
+
+
+def _build_theme_heat(df_enriched: pd.DataFrame) -> pd.DataFrame:
+    if df_enriched is None or len(df_enriched) == 0:
+        return pd.DataFrame()
+    required_cols = {'Sector', 'Daily_Change', 'Rel_Volume', 'Ticker'}
+    if not required_cols.issubset(set(df_enriched.columns)):
+        return pd.DataFrame()
+
+    temp = df_enriched.copy()
+    temp['Sector'] = temp['Sector'].fillna('Unknown').astype(str)
+    temp['Daily_Change'] = pd.to_numeric(temp['Daily_Change'], errors='coerce').fillna(0)
+    temp['Rel_Volume'] = pd.to_numeric(temp['Rel_Volume'], errors='coerce').fillna(0)
+    temp['is_strong'] = ((temp['Daily_Change'] > 3) & (temp['Rel_Volume'] > 1.8)).astype(int)
+
+    grouped = temp.groupby('Sector', as_index=False).agg(
+        ticker_count=('Ticker', 'count'),
+        median_change_pct=('Daily_Change', 'median'),
+        avg_rel_volume=('Rel_Volume', 'mean'),
+        strong_count=('is_strong', 'sum'),
+    )
+    grouped['theme_heat_score'] = (
+        grouped['median_change_pct'].clip(lower=0) * 0.55 +
+        grouped['avg_rel_volume'].clip(lower=0) * 2.2 +
+        grouped['strong_count'].clip(lower=0) * 0.45
+    ).round(2)
+
+    grouped = grouped.sort_values('theme_heat_score', ascending=False).reset_index(drop=True)
+    return grouped
+
+
+def _build_theme_leaders(df_enriched: pd.DataFrame, theme_heat_df: pd.DataFrame, top_sectors: int = 5, leaders_per_sector: int = 3) -> pd.DataFrame:
+    if df_enriched is None or len(df_enriched) == 0 or theme_heat_df is None or len(theme_heat_df) == 0:
+        return pd.DataFrame()
+
+    ranked = df_enriched.copy()
+    ranked['Daily_Change'] = pd.to_numeric(ranked.get('Daily_Change'), errors='coerce').fillna(0)
+    ranked['Rel_Volume'] = pd.to_numeric(ranked.get('Rel_Volume'), errors='coerce').fillna(0)
+    ranked['Sector'] = ranked.get('Sector', '').fillna('Unknown').astype(str)
+    ranked['_signal_score'] = ranked['Daily_Change'].clip(lower=0) * 2 + (ranked['Rel_Volume'] - 1).clip(lower=0) * 3
+
+    hot_sectors = theme_heat_df.head(top_sectors)['Sector'].tolist()
+    leader_rows = []
+    for sector in hot_sectors:
+        candidates = ranked[ranked['Sector'] == sector].sort_values('_signal_score', ascending=False).head(leaders_per_sector)
+        if len(candidates) == 0:
+            continue
+        for _, row in candidates.iterrows():
+            leader_rows.append({
+                'theme': sector,
+                'ticker': row.get('Ticker', ''),
+                'daily_change_pct': round(float(row.get('Daily_Change', 0)), 2),
+                'rel_volume': round(float(row.get('Rel_Volume', 0)), 2),
+                'signal_score': round(float(row.get('_signal_score', 0)), 2),
+                'ai_query_hint': f"查詢 {row.get('Ticker', '')} 所屬題材 {sector} 的最新催化、同族群輪動與資金流向。",
+            })
+
+    return pd.DataFrame(leader_rows)
+
+
+def _cleanup_local_output_history(base_dir: Path, keep_days: int) -> None:
+    if keep_days <= 0 or not base_dir.exists():
+        return
+    cutoff = datetime.now().date() - timedelta(days=keep_days)
+    for child in base_dir.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            folder_date = datetime.strptime(child.name, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if folder_date < cutoff:
+            shutil.rmtree(child, ignore_errors=True)
+
+
+def export_daily_local_outputs(
+    df_enriched: pd.DataFrame,
+    sheet1: pd.DataFrame,
+    sheet2: pd.DataFrame,
+    sheet2b: pd.DataFrame,
+    sheet3: pd.DataFrame,
+    sheet4: pd.DataFrame,
+    tv_need_list: pd.DataFrame,
+) -> Optional[Path]:
+    if not LOCAL_OUTPUT_ENABLED:
+        print("[步驟 3.8] 本地每日輸出：停用")
+        return None
+
+    date_str = _previous_trading_day_str()
+    run_stamp = datetime.now().strftime("%H%M%S")
+    base_dir = Path(LOCAL_OUTPUT_DIR)
+    run_dir = base_dir / date_str / run_stamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    market_cols = [
+        'Ticker', 'Company', 'Sector', 'Industry', 'Price', 'Daily_Change', 'Rel_Volume',
+        'Market_Cap', 'Earnings_Date', 'Earnings_Status', 'Days_To_Earnings',
+        'Target_Price', 'Upside_Pct', 'Num_Analysts', 'need_tv', 'need_tv_reason',
+        'TV_VWAP', 'TV_SQZ_On', 'TV_SQZMOM_Color', 'TV_SQZMOM_Value', 'TV_Signal_Age_Min',
+    ]
+    market_snapshot = _safe_subset(df_enriched, market_cols)
+    _write_csv_local(market_snapshot, run_dir / 'raw_market_daily.csv')
+
+    _write_csv_local(sheet1, run_dir / 'shortlist_launch.csv')
+    _write_csv_local(sheet2, run_dir / 'shortlist_earnings_pre.csv')
+    _write_csv_local(sheet2b, run_dir / 'shortlist_earnings_post.csv')
+    _write_csv_local(sheet3, run_dir / 'shortlist_analyst.csv')
+    _write_csv_local(sheet4, run_dir / 'shortlist_track_f.csv')
+    _write_csv_local(tv_need_list, run_dir / 'tv_need_list.csv')
+
+    helper = GoogleSheetsUploader()
+    combined = helper._build_combined_report(sheet1, sheet2, sheet3, sheet4, sheet2b=sheet2b, tv_need_list=tv_need_list)
+    _write_csv_local(combined, run_dir / 'fusion_top_daily.csv')
+
+    theme_heat_df = _build_theme_heat(df_enriched)
+    theme_leaders_df = _build_theme_leaders(df_enriched, theme_heat_df)
+    _write_csv_local(theme_heat_df, run_dir / 'theme_heat_daily.csv')
+    _write_csv_local(theme_leaders_df, run_dir / 'theme_leaders_daily.csv')
+
+    ai_focus_rows = []
+    source_map = [
+        ('launch', sheet1),
+        ('earnings_pre', sheet2),
+        ('earnings_post', sheet2b),
+        ('analyst', sheet3),
+        ('track_f', sheet4),
+    ]
+    rank_score = 100
+    seen = set()
+    for source_name, source_df in source_map:
+        for ticker in _extract_sheet_tickers(source_df):
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            ai_focus_rows.append({
+                'ticker': ticker,
+                'source': source_name,
+                'priority_score': rank_score,
+                'ai_query_hint': f"查詢 {ticker} 的隔夜催化、財報時點、同族群強弱、以及是否有新公告造成動能延續。",
+            })
+            rank_score -= 3
+
+    ai_focus_df = pd.DataFrame(ai_focus_rows)
+    _write_csv_local(ai_focus_df, run_dir / 'ai_focus_list.csv')
+
+    manifest = {
+        'scan_date': date_str,
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'files': [
+            'raw_market_daily.csv',
+            'shortlist_launch.csv',
+            'shortlist_earnings_pre.csv',
+            'shortlist_earnings_post.csv',
+            'shortlist_analyst.csv',
+            'shortlist_track_f.csv',
+            'tv_need_list.csv',
+            'fusion_top_daily.csv',
+            'theme_heat_daily.csv',
+            'theme_leaders_daily.csv',
+            'ai_focus_list.csv',
+        ],
+        'notes': '每日刷新資料已輸出到 repo 本地，可直接提供 AI 讀取。',
+    }
+    with open(run_dir / 'README_local_outputs.json', 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    latest_dir = base_dir / 'latest'
+    if latest_dir.exists():
+        shutil.rmtree(latest_dir, ignore_errors=True)
+    shutil.copytree(run_dir, latest_dir)
+
+    _cleanup_local_output_history(base_dir, LOCAL_OUTPUT_KEEP_DAYS)
+    return run_dir
+
+
 # ============ 主程式 ============
 
 def main():
@@ -1859,6 +2060,19 @@ def main():
         # 顯示摘要（terminal 確認用）
         display_summary(sheet1, sheet2, sheet2b, sheet3, sheet4, tv_need_list=tv_need_list)
 
+        # 步驟 3.8: 本地每日輸出（給 AI 讀取，避免雲端同步誤差）
+        local_output_dir = export_daily_local_outputs(
+            df_enriched,
+            sheet1,
+            sheet2,
+            sheet2b,
+            sheet3,
+            sheet4,
+            tv_need_list,
+        )
+        if local_output_dir is not None:
+            print(f"[步驟 3.8] 本地每日輸出完成：{local_output_dir}")
+
         # 步驟 4: 上傳到 Google Sheets
         if GSHEET_AVAILABLE and GSHEET_ENABLED:
             print("\n" + "=" * 70)
@@ -1869,17 +2083,22 @@ def main():
 
             if uploader.authenticate():
                 if uploader.get_or_create_spreadsheet():
-                    # 上傳全量數據（AI 分析用）
-                    uploader.upload_full_data(df_enriched)
-                    # 上傳每日精選報告（含 Sheet2b 與 TV 指標需求清單）
-                    uploader.upload_daily_report(
-                        sheet1,
-                        sheet2,
-                        sheet3,
-                        sheet4,
-                        sheet2b=sheet2b,
-                        tv_need_list=tv_need_list,
-                    )
+                    if GSHEET_UPLOAD_FULL_DATA:
+                        uploader.upload_full_data(df_enriched)
+                    else:
+                        print("[*] 已停用全量數據上傳（改用 repo 本地每日輸出）")
+
+                    if GSHEET_UPLOAD_DAILY_REPORT:
+                        uploader.upload_daily_report(
+                            sheet1,
+                            sheet2,
+                            sheet3,
+                            sheet4,
+                            sheet2b=sheet2b,
+                            tv_need_list=tv_need_list,
+                        )
+                    else:
+                        print("[*] 已停用每日報告上傳")
                 else:
                     print("[!] 跳過 Google Sheets 上傳")
             else:

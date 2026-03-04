@@ -4,9 +4,9 @@ XQ 選股清單更新腳本
 
 功能:
 - 掃描 XQ_exports 資料夾下所有 CSV 檔案
-- 抓取每支股票最近 7 日的歷史價格
-- 新增欄位: avg_7d, high_7d, low_7d, chg_7d_pct
-- 執行完畢後顯示各檔案的 7 日漲幅 Top 5
+- 抓取每支股票最近 1/3/5 日的歷史價格與量能指標
+- 新增欄位: chg_1d_pct, chg_3d_pct, chg_5d_pct, vol_strength, short_trade_score
+- 執行完畢後顯示各檔案短炒分數 Top 5
 - 自動處理中文編碼問題
 
 使用方式:
@@ -23,6 +23,24 @@ from datetime import datetime, timedelta
 import argparse
 import time
 import re
+
+# 1/3/5 日核心設定（短炒版）
+LOOKBACK_WINDOWS = [1, 3, 5]
+MAX_LOOKBACK = max(LOOKBACK_WINDOWS)
+FETCH_BUFFER_DAYS = 20
+
+COL_1D_CHANGE_PCT = "chg_1d_pct"
+COL_3D_CHANGE_PCT = "chg_3d_pct"
+COL_5D_CHANGE_PCT = "chg_5d_pct"
+COL_5D_AVG_PRICE = "avg_price_5d"
+COL_5D_HIGH = "high_5d"
+COL_5D_LOW = "low_5d"
+COL_YDAY_VOLUME = "yday_volume"
+COL_5D_AVG_VOLUME = "avg_volume_5d"
+COL_VOL_STRENGTH = "vol_strength"
+COL_DOLLAR_VOL_M = "dollar_volume_m"
+COL_SHORT_SCORE = "short_trade_score"
+COL_AI_QUERY_HINT = "ai_query_hint"
 
 # 自動尋找 XQ_exports 資料夾 (優先順序: 腳本同層 > 腳本上層 > 當前工作目錄)
 def find_xq_exports_dir():
@@ -49,12 +67,10 @@ def find_xq_exports_dir():
 
 PROJECT_ROOT = Path(__file__).parent.parent
 XQ_EXPORTS_DIR = find_xq_exports_dir()
-
-DAYS_7 = 7
-COL_7D_AVG = "avg_7d"
-COL_7D_HIGH = "high_7d"
-COL_7D_LOW = "low_7d"
-COL_7D_CHANGE_PCT = "chg_7d_pct"
+BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
+PICK_LOG_FILE = BACKTEST_OUTPUT_DIR / "xq_pick_log.csv"
+DAILY_PICKS_DIR = BACKTEST_OUTPUT_DIR / "daily_xq_picks"
+TOP_PICKS_PER_FILE = 10
 
 COLUMN_RENAME_MAP = {
     "序號": "index",
@@ -185,7 +201,7 @@ def extract_ticker(row, ticker_column=None):
     return ticker
 
 
-def fetch_history(ticker, days=10):
+def fetch_history(ticker, days=MAX_LOOKBACK):
     """
     從 Yahoo Finance 抓取指定天數的歷史價格
     
@@ -199,7 +215,7 @@ def fetch_history(ticker, days=10):
     try:
         # 計算起始日期 (多抓幾天確保有足夠交易日)
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=days+10)
+        start_date = end_date - timedelta(days=days + FETCH_BUFFER_DAYS)
         
         # 下載數據
         stock = yf.Ticker(ticker)
@@ -210,7 +226,7 @@ def fetch_history(ticker, days=10):
             return None
         
         # 取最近 N 個交易日
-        hist = hist.tail(days)
+        hist = hist.tail(max(days, MAX_LOOKBACK + 1))
         
         return hist
     
@@ -219,35 +235,98 @@ def fetch_history(ticker, days=10):
         return None
 
 
-def calculate_metrics(hist, days):
+def _calc_change_pct(close_series, days):
+    if close_series is None or len(close_series) < days + 1:
+        return None
+    current_price = close_series.iloc[-1]
+    base_price = close_series.iloc[-(days + 1)]
+    if pd.isna(current_price) or pd.isna(base_price) or base_price == 0:
+        return None
+    return round(((current_price / base_price) - 1) * 100, 2)
+
+
+def _calc_short_trade_score(chg_1d, chg_3d, chg_5d, vol_strength):
+    vals = [chg_1d, chg_3d, chg_5d, vol_strength]
+    if any(v is None or pd.isna(v) for v in vals):
+        return None
+
+    score = (
+        (float(chg_1d) * 0.45) +
+        (float(chg_3d) * 0.35) +
+        (float(chg_5d) * 0.20) +
+        (max(float(vol_strength) - 1.0, 0) * 8.0)
+    )
+    return round(score, 2)
+
+
+def build_ai_query_hint(ticker):
+    return (
+        f"查詢 {ticker} 最新題材催化、隔夜新聞、財報日與市場共識，"
+        "重點確認是否有新公告、法說、指引變動、或同族群輪動。"
+    )
+
+
+def calculate_metrics(hist):
     """
     計算歷史數據的統計指標
     
     Args:
         hist: 歷史價格 DataFrame
-        days: 天數 (用於標註)
+        hist: 歷史價格 DataFrame
     
     Returns:
         dict: 包含各種統計指標
     """
     if hist is None or hist.empty:
         return {
-            COL_7D_AVG: None,
-            COL_7D_HIGH: None,
-            COL_7D_LOW: None,
-            COL_7D_CHANGE_PCT: None,
+            COL_1D_CHANGE_PCT: None,
+            COL_3D_CHANGE_PCT: None,
+            COL_5D_CHANGE_PCT: None,
+            COL_5D_AVG_PRICE: None,
+            COL_5D_HIGH: None,
+            COL_5D_LOW: None,
+            COL_YDAY_VOLUME: None,
+            COL_5D_AVG_VOLUME: None,
+            COL_VOL_STRENGTH: None,
+            COL_DOLLAR_VOL_M: None,
+            COL_SHORT_SCORE: None,
         }
     
-    # 只取最近 N 天
-    recent = hist.tail(days)
-    
+    recent = hist.tail(MAX_LOOKBACK + 1)
+    close_series = recent['Close'].dropna()
+    high_series = recent['High'].dropna()
+    low_series = recent['Low'].dropna()
+    volume_series = recent['Volume'].dropna()
+
+    yday_volume = float(volume_series.iloc[-1]) if len(volume_series) >= 1 else None
+    avg_volume_5d = float(volume_series.tail(5).mean()) if len(volume_series) >= 5 else None
+    vol_strength = None
+    if yday_volume is not None and avg_volume_5d and avg_volume_5d > 0:
+        vol_strength = round(yday_volume / avg_volume_5d, 2)
+
+    last_close = float(close_series.iloc[-1]) if len(close_series) >= 1 else None
+    dollar_volume_m = None
+    if last_close is not None and yday_volume is not None:
+        dollar_volume_m = round((last_close * yday_volume) / 1_000_000, 2)
+
+    chg_1d = _calc_change_pct(close_series, 1)
+    chg_3d = _calc_change_pct(close_series, 3)
+    chg_5d = _calc_change_pct(close_series, 5)
+
+    short_score = _calc_short_trade_score(chg_1d, chg_3d, chg_5d, vol_strength)
+
     return {
-        COL_7D_AVG: round(recent['Close'].mean(), 2),
-        COL_7D_HIGH: round(recent['High'].max(), 2),
-        COL_7D_LOW: round(recent['Low'].min(), 2),
-        COL_7D_CHANGE_PCT: round(
-            ((recent['Close'].iloc[-1] / recent['Close'].iloc[0] - 1) * 100), 2
-        ) if len(recent) > 0 else None,
+        COL_1D_CHANGE_PCT: chg_1d,
+        COL_3D_CHANGE_PCT: chg_3d,
+        COL_5D_CHANGE_PCT: chg_5d,
+        COL_5D_AVG_PRICE: round(close_series.tail(5).mean(), 2) if len(close_series) >= 5 else None,
+        COL_5D_HIGH: round(high_series.tail(5).max(), 2) if len(high_series) >= 5 else None,
+        COL_5D_LOW: round(low_series.tail(5).min(), 2) if len(low_series) >= 5 else None,
+        COL_YDAY_VOLUME: int(yday_volume) if yday_volume is not None else None,
+        COL_5D_AVG_VOLUME: int(avg_volume_5d) if avg_volume_5d is not None else None,
+        COL_VOL_STRENGTH: vol_strength,
+        COL_DOLLAR_VOL_M: dollar_volume_m,
+        COL_SHORT_SCORE: short_score,
     }
 
 
@@ -258,11 +337,11 @@ def print_top_movers(df, ticker_column):
     Args:
         df: 更新後的 DataFrame
         ticker_column: 股票代碼欄位名稱
-        days: 天數 (預設 7)
+        days: 天數
     """
-    change_col = COL_7D_CHANGE_PCT
-    if change_col not in df.columns:
-        print(f"⚠️ 找不到欄位: {change_col}")
+    score_col = COL_SHORT_SCORE
+    if score_col not in df.columns:
+        print(f"⚠️ 找不到欄位: {score_col}")
         return
 
     temp = df.copy()
@@ -271,16 +350,25 @@ def print_top_movers(df, ticker_column):
     else:
         temp['_ticker'] = temp.apply(lambda row: extract_ticker(row), axis=1)
 
-    temp[change_col] = pd.to_numeric(temp[change_col], errors='coerce')
-    top5 = temp.dropna(subset=[change_col]).sort_values(change_col, ascending=False).head(5)
+    for metric_col in [score_col, COL_1D_CHANGE_PCT, COL_3D_CHANGE_PCT, COL_5D_CHANGE_PCT, COL_VOL_STRENGTH]:
+        if metric_col in temp.columns:
+            temp[metric_col] = pd.to_numeric(temp[metric_col], errors='coerce')
+
+    top5 = temp.dropna(subset=[score_col]).sort_values(score_col, ascending=False).head(5)
 
     if top5.empty:
-        print("⚠️ 無可用的 7 日漲幅數據")
+        print("⚠️ 無可用的短炒分數數據")
         return
 
-    print("\n7-day change Top 5:")
-    for i, row in top5.iterrows():
-        print(f"{row['_ticker']}: {row[change_col]}%")
+    print("\nShort-trade score Top 5:")
+    for _, row in top5.iterrows():
+        print(
+            f"{row['_ticker']}: score={row.get(COL_SHORT_SCORE)} | "
+            f"1d={row.get(COL_1D_CHANGE_PCT)}% | "
+            f"3d={row.get(COL_3D_CHANGE_PCT)}% | "
+            f"5d={row.get(COL_5D_CHANGE_PCT)}% | "
+            f"vol={row.get(COL_VOL_STRENGTH)}x"
+        )
 
 
 def normalize_column_name(name):
@@ -325,6 +413,90 @@ def rename_columns_to_english(df):
     return df, rename_map
 
 
+def build_top_picks_snapshot(df, ticker_column, source_name, top_n=TOP_PICKS_PER_FILE):
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+
+    temp = df.copy()
+    if ticker_column in temp.columns:
+        temp['_ticker'] = temp[ticker_column].astype(str).str.strip().str.upper()
+    else:
+        temp['_ticker'] = temp.apply(lambda row: extract_ticker(row).upper(), axis=1)
+
+    numeric_cols = [
+        COL_SHORT_SCORE,
+        COL_1D_CHANGE_PCT,
+        COL_3D_CHANGE_PCT,
+        COL_5D_CHANGE_PCT,
+        COL_VOL_STRENGTH,
+        COL_DOLLAR_VOL_M,
+    ]
+    for col in numeric_cols:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors='coerce')
+
+    if COL_SHORT_SCORE in temp.columns:
+        ranked = temp.sort_values(COL_SHORT_SCORE, ascending=False)
+    elif COL_3D_CHANGE_PCT in temp.columns:
+        ranked = temp.sort_values(COL_3D_CHANGE_PCT, ascending=False)
+    else:
+        ranked = temp
+
+    ranked = ranked.dropna(subset=['_ticker']).head(top_n).copy()
+    if len(ranked) == 0:
+        return pd.DataFrame()
+
+    scan_date = datetime.now().strftime("%Y-%m-%d")
+    ranked.insert(0, 'rank', range(1, len(ranked) + 1))
+    ranked.insert(0, 'source_file', source_name)
+    ranked.insert(0, 'scan_date', scan_date)
+
+    output_cols = [
+        'scan_date',
+        'source_file',
+        'rank',
+        '_ticker',
+        COL_SHORT_SCORE,
+        COL_1D_CHANGE_PCT,
+        COL_3D_CHANGE_PCT,
+        COL_5D_CHANGE_PCT,
+        COL_VOL_STRENGTH,
+        COL_DOLLAR_VOL_M,
+        COL_AI_QUERY_HINT,
+    ]
+    available = [c for c in output_cols if c in ranked.columns]
+    snapshot = ranked[available].copy()
+    snapshot = snapshot.rename(columns={'_ticker': 'ticker'})
+    return snapshot
+
+
+def save_backtest_pick_log(snapshot_df):
+    if snapshot_df is None or len(snapshot_df) == 0:
+        return None, None
+
+    BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    DAILY_PICKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    daily_file = DAILY_PICKS_DIR / f"{datetime.now().strftime('%Y-%m-%d')}_xq_top_picks.csv"
+    if daily_file.exists():
+        existing_daily = pd.read_csv(daily_file)
+        combined_daily = pd.concat([existing_daily, snapshot_df], ignore_index=True)
+        combined_daily = combined_daily.drop_duplicates(subset=['scan_date', 'source_file', 'ticker'], keep='last')
+        combined_daily.to_csv(daily_file, index=False, encoding='utf-8-sig')
+    else:
+        snapshot_df.to_csv(daily_file, index=False, encoding='utf-8-sig')
+
+    if PICK_LOG_FILE.exists():
+        existing_log = pd.read_csv(PICK_LOG_FILE)
+        merged_log = pd.concat([existing_log, snapshot_df], ignore_index=True)
+        merged_log = merged_log.drop_duplicates(subset=['scan_date', 'source_file', 'ticker'], keep='last')
+        merged_log.to_csv(PICK_LOG_FILE, index=False, encoding='utf-8-sig')
+    else:
+        snapshot_df.to_csv(PICK_LOG_FILE, index=False, encoding='utf-8-sig')
+
+    return PICK_LOG_FILE, daily_file
+
+
 def update_csv_with_history(file_path, ticker_column=None):
     """
     更新 CSV 檔案,新增歷史價格數據
@@ -363,13 +535,22 @@ def update_csv_with_history(file_path, ticker_column=None):
             ticker_column = df.columns[0]
             print(f"⚠️ 無法偵測代碼欄位,使用第一欄: {ticker_column}")
     
-    days_list = [DAYS_7]
-
-    # 為 7 日建立新欄位
-    df[COL_7D_AVG] = None
-    df[COL_7D_HIGH] = None
-    df[COL_7D_LOW] = None
-    df[COL_7D_CHANGE_PCT] = None
+    # 建立新欄位（1/3/5 日 + 短炒評分）
+    for col in [
+        COL_1D_CHANGE_PCT,
+        COL_3D_CHANGE_PCT,
+        COL_5D_CHANGE_PCT,
+        COL_5D_AVG_PRICE,
+        COL_5D_HIGH,
+        COL_5D_LOW,
+        COL_YDAY_VOLUME,
+        COL_5D_AVG_VOLUME,
+        COL_VOL_STRENGTH,
+        COL_DOLLAR_VOL_M,
+        COL_SHORT_SCORE,
+        COL_AI_QUERY_HINT,
+    ]:
+        df[col] = None
     
     # 逐筆處理股票
     total = len(df)
@@ -379,14 +560,14 @@ def update_csv_with_history(file_path, ticker_column=None):
         ticker = extract_ticker(row, ticker_column)
         print(f"\n[{idx+1}/{total}] {ticker} ...", end=" ")
         
-        # 抓取歷史數據 (固定 7 日)
-        hist = fetch_history(ticker, days=days_list[0])
+        # 抓取歷史數據 (1/3/5 日所需)
+        hist = fetch_history(ticker, days=MAX_LOOKBACK)
         
         if hist is not None and not hist.empty:
-            # 計算 7 日指標
-            metrics = calculate_metrics(hist, days_list[0])
+            metrics = calculate_metrics(hist)
             for key, value in metrics.items():
                 df.at[idx, key] = value
+            df.at[idx, COL_AI_QUERY_HINT] = build_ai_query_hint(ticker)
             
             print(f"✅ 完成")
             success_count += 1
@@ -497,10 +678,23 @@ def main():
                 results.append(result)
 
     if results:
-        print("\n===== 每檔 7日漲幅 Top 5 =====")
+        pick_snapshots = []
+
+        print("\n===== 每檔短炒分數 Top 5 =====")
         for df, ticker_column, source_name in results:
             print(f"\n[{source_name}]")
             print_top_movers(df, ticker_column)
+
+            snapshot = build_top_picks_snapshot(df, ticker_column, source_name)
+            if len(snapshot) > 0:
+                pick_snapshots.append(snapshot)
+
+        if pick_snapshots:
+            combined_snapshot = pd.concat(pick_snapshots, ignore_index=True)
+            log_file, daily_file = save_backtest_pick_log(combined_snapshot)
+            print("\n===== 回測用 XQ 入選名單已記錄 =====")
+            print(f"主檔: {log_file}")
+            print(f"每日檔: {daily_file}")
     
     print(f"\n✅ 全部完成!\n")
 

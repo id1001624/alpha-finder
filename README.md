@@ -10,6 +10,7 @@
 ✅ **三大掃描** - 起飛清單、財報預熱、預測情報  
 ✅ **自動評級** - AI/半導體/資料中心等優先產業 A 級評級  
 ✅ **全量數據** - 依設定上傳完整數據（預設 120 檔），供 AI 分析  
+✅ **本地每日輸出** - 每次掃描自動輸出到 `repo_outputs/daily_refresh`（推薦給 AI 直接讀）  
 ✅ **Windows 排程** - 每日自動執行，結果就在 Google Sheets
 
 ---
@@ -65,6 +66,85 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 
 - **`全量數據`** tab - 依設定輸出完整數據，供 AI 分析
 - **`YYYY-MM-DD`** tab - 當日三合一精選報告（起飛 Top 3 + 財報 Top 3 + 預測 Top 3）
+
+同時會在專案本地輸出（建議給 AI 讀取）：
+
+- `repo_outputs/daily_refresh/latest/ai_focus_list.csv`
+- `repo_outputs/daily_refresh/latest/fusion_top_daily.csv`
+- `repo_outputs/daily_refresh/latest/theme_heat_daily.csv`
+- `repo_outputs/daily_refresh/latest/theme_leaders_daily.csv`
+
+> 預設已停用「全量數據」上傳到 Google Sheets，避免 AI 雲端讀取誤差。
+
+### 5️⃣ 一次執行（建議每日流程）
+
+```bash
+python main.py
+python scripts/update_xq_with_history.py
+```
+
+若你只要更新單一 XQ 檔案：
+
+```bash
+python scripts/update_xq_with_history.py --file "你的檔名.csv"
+```
+
+接著把以下本地檔案餵給 AI：
+
+- `repo_outputs/daily_refresh/latest/ai_focus_list.csv`
+- `repo_outputs/daily_refresh/latest/fusion_top_daily.csv`
+- `repo_outputs/daily_refresh/latest/theme_heat_daily.csv`
+- `repo_outputs/daily_refresh/latest/theme_leaders_daily.csv`
+- `XQ_exports/*_updated.csv`（XQ 短炒版）
+
+回測專用（不餵 AI）：
+
+- `repo_outputs/backtest/xq_pick_log.csv`（歷史累積主檔）
+- `repo_outputs/backtest/daily_xq_picks/YYYY-MM-DD_xq_top_picks.csv`（每日快照）
+
+盤前快檢（終端）：
+
+```bash
+python scripts/premarket_volume_check.py --symbols NVAX,FA,CBZ
+```
+
+直接吃 XQ 記錄名單回測（推薦）：
+
+```bash
+python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 2026-03-01 --hold-days 1
+```
+
+比較 rank 區間勝率（rank 1-3 vs rank 4-10）：
+
+```bash
+python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 2026-03-01 --hold-days 1 --by-rank-report
+```
+
+網頁 AI 產出紀錄（建議每日做）：
+
+1. 使用 `Alpha-Sniper-Protocol-v7.md` 要求 AI 至少輸出：
+	- `FILE: ai_decision_YYYY-MM-DD.csv`（必要）
+	- `FILE: ai_decision_YYYY-MM-DD.md`（選填）
+2. 把內容存到本地（建議資料夾：`repo_outputs/backtest/inbox/`）
+3. 執行歸檔：
+
+```bash
+python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv"
+```
+
+若你也有存 MD，可加上：
+
+```bash
+python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv" --md-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.md"
+```
+
+歸檔後會更新：
+
+- `repo_outputs/backtest/ai_decision_log.csv`（AI 決策歷史主檔）
+- `repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.csv`
+- `repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.md`
+- `repo_outputs/backtest/ai_decision_latest.csv`
+- `repo_outputs/backtest/ai_decision_latest.md`
 
 ---
 
@@ -218,6 +298,18 @@ SIGNAL_MAX_AGE_MINUTES = 240
 ---
 
 ## 🔧 常見問題
+
+### Q0: 盤前要怎麼快速比對量能？
+
+```bash
+python scripts/premarket_volume_check.py --symbols NVAX,FA,CBZ
+```
+
+若你在 TradingView 有更即時盤前量，可手動覆蓋：
+
+```bash
+python scripts/premarket_volume_check.py --symbols NVAX,FA --manual-premarket NVAX=120000,FA=80000
+```
 
 ### Q1: Finviz 爬取失敗？
 

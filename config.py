@@ -83,6 +83,14 @@ MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE = float(os.getenv("MARKET_FILTER_BEAR_ANAL
 GSHEET_ENABLED = True
 GSHEET_NAME = "Alpha_Sniper_Daily_Report"
 GSHEET_CREDENTIALS_FILE = "credentials.json"
+GSHEET_UPLOAD_DAILY_REPORT = True
+GSHEET_UPLOAD_FULL_DATA = False
+
+# ============ 本地每日輸出（推薦） ============
+# 每日刷新的資料優先存 repo，本地給 AI 讀取更穩定
+LOCAL_OUTPUT_ENABLED = True
+LOCAL_OUTPUT_DIR = "repo_outputs/daily_refresh"
+LOCAL_OUTPUT_KEEP_DAYS = 14
 
 # ============ API金鑰設定 ============
 # Finnhub 免費 API (60 call/min) - 財報日期 + 分析師目標價
