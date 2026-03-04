@@ -7,6 +7,7 @@ XQ 選股清單更新腳本
 - 抓取每支股票最近 1/3/5 日的歷史價格與量能指標
 - 新增欄位: chg_1d_pct, chg_3d_pct, chg_5d_pct, vol_strength, short_trade_score
 - 執行完畢後顯示各檔案短炒分數 Top 5
+- 不在 XQ_exports 產生 *_updated.csv，統一更新 `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
 - 自動處理中文編碼問題
 
 使用方式:
@@ -544,10 +545,10 @@ def _resolve_ai_ready_base_dir() -> Path:
     return raw if raw.is_absolute() else (PROJECT_ROOT / raw)
 
 
-def export_ai_ready_xq_file(source_csv: Path) -> Path | None:
+def export_ai_ready_xq_file(source_df: pd.DataFrame) -> Path | None:
     if not AI_READY_OUTPUT_ENABLED:
         return None
-    if source_csv is None or not source_csv.exists():
+    if source_df is None or len(source_df) == 0:
         return None
 
     base_dir = _resolve_ai_ready_base_dir()
@@ -555,7 +556,7 @@ def export_ai_ready_xq_file(source_csv: Path) -> Path | None:
     latest_dir.mkdir(parents=True, exist_ok=True)
 
     target = latest_dir / AI_XQ_TARGET_FILE
-    shutil.copy2(source_csv, target)
+    source_df.to_csv(target, index=False, encoding='utf-8-sig')
     return target
 
 
@@ -639,22 +640,18 @@ def update_csv_with_history(file_path, ticker_column=None):
         # 避免過度頻繁請求
         time.sleep(0.5)
     
-    # 儲存更新後的 CSV
-    output_path = file_path.parent / f"{file_path.stem}_updated{file_path.suffix}"
-    encoding = "utf-8"
-    
     try:
-        # 輸出前將欄位改為英文
+        # 輸出前將欄位改為英文（僅供後續寫入 ai_ready）
         df_out, rename_map = rename_columns_to_english(df)
         if ticker_column in rename_map:
             ticker_column = rename_map[ticker_column]
 
-        df_out.to_csv(output_path, index=False, encoding=encoding)
         print(f"\n{'='*60}")
-        print(f"✅ 已儲存: {output_path.name}")
+        print(f"✅ 已處理: {file_path.name}")
         print(f"📊 成功更新: {success_count}/{total} 支股票")
+        print(f"🧭 輸出目標: repo_outputs/ai_ready/latest/{AI_XQ_TARGET_FILE}")
         print(f"{'='*60}\n")
-        return df_out, ticker_column, file_path.name, output_path
+        return df_out, ticker_column, file_path.name
     except Exception as e:
         print(f"❌ 儲存失敗: {e}")
         return None
@@ -707,7 +704,7 @@ def main():
         print(f"  2. 腳本上層目錄: {Path(__file__).parent.parent / 'XQ_exports'}")
         print(f"  3. 當前工作目錄: {Path.cwd() / 'XQ_exports'}")
         return
-    
+
     # 處理單一檔案或所有 CSV
     results = []
 
@@ -741,11 +738,11 @@ def main():
 
     if results:
         pick_snapshots = []
-        best_ai_xq_path = None
+        best_ai_xq_df = None
         best_score_count = -1
 
         print("\n===== 每檔短炒分數 Top 5 =====")
-        for df, ticker_column, source_name, updated_path in results:
+        for df, ticker_column, source_name in results:
             print(f"\n[{source_name}]")
             print_top_movers(df, ticker_column)
 
@@ -754,7 +751,7 @@ def main():
                 score_count = pd.to_numeric(df[COL_SHORT_SCORE], errors='coerce').notna().sum()
             if score_count > best_score_count:
                 best_score_count = score_count
-                best_ai_xq_path = updated_path
+                best_ai_xq_df = df
 
             snapshot = build_top_picks_snapshot(df, ticker_column, source_name)
             if len(snapshot) > 0:
@@ -767,7 +764,7 @@ def main():
             print(f"主檔: {log_file}")
             print(f"每日檔: {daily_file}")
 
-        ai_target = export_ai_ready_xq_file(best_ai_xq_path)
+        ai_target = export_ai_ready_xq_file(best_ai_xq_df)
         if ai_target is not None:
             print("\n===== AI 五檔快捷輸出已更新 =====")
             print(f"XQ 檔案: {ai_target}")

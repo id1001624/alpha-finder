@@ -6,7 +6,7 @@
 
 ## 1) 鐵律（不可違反）
 
-- 以「本地輸出檔案」為唯一主資料源；Web 只做補充驗證，不可覆蓋主排序。
+- 以「你上傳的資料檔案」為唯一主資料源；Web 只做補充驗證，不可覆蓋主排序。
 - 不可用主觀語氣否決高分標的（例如「太風險所以不給」）；只能給「風險等級」與「需技術驗證」。
 - 預設輸出「評分排名 + 風險標記」，不要直接給買賣建議。
 - 若缺 VWAP/SQZMOM：所有交易動作一律輸出「需技術驗證」。
@@ -21,21 +21,27 @@
     - `vol_strength`, `dollar_volume_m`
     - `short_trade_score`, `ai_query_hint`
 
-### B) Repo 每日輸出（必要）
-路徑固定以本地為主：`repo_outputs/daily_refresh/latest/`
+### B) Repo 每日輸出（必要，請直接上傳以下檔案）
 
 - `ai_focus_list.csv`（AI 應優先查核名單）
 - `fusion_top_daily.csv`（多軌合併後名單）
-- `raw_market_daily.csv`（市場補充欄位）
 - `theme_heat_daily.csv`（腳本計算的題材熱度）
 - `theme_leaders_daily.csv`（題材領頭羊）
+
+可選但強烈建議：
+
+- `raw_market_daily.csv`（中長期 `core_score` 主要欄位來源）
+
+若未提供 `raw_market_daily.csv`：
+
+- 必須啟用「Web 補欄模式」再做中長期分析（見第 5.3 與第 7 節）
 
 ### C) 主力清單 Core（可選）
 - `Alpha_Sniper_Core_List_YYYYMMDD.md`
 
 ## 3) Local-first 工作順序（嚴格）
 
-1. 先讀本地 CSV 並完成評分排序
+1. 先讀你上傳的 CSV 並完成評分排序
 2. 再做高優先級 Web 補充驗證（最多 Top 5 標的）
 3. 最後輸出「分數與名單」，不可先 Web 再決定名單
 
@@ -77,6 +83,15 @@
     - `core_score = min(Upside_Pct, 120)*0.4 + min(Num_Analysts, 20)*1.5 + earnings_bonus`
     - `earnings_bonus`：若 `Earnings_Status` 為 upcoming（且 D<=7）加 5，否則 0
 
+若缺 `raw_market_daily.csv`（或欄位缺失）：
+
+- 不可直接放棄中長期分析。
+- 必須對「中長期候選 Top 5」啟用 Web 補欄：
+    - 補 `Upside_Pct`（目標價 vs 現價）
+    - 補 `Num_Analysts`
+    - 補 `Earnings_Status`（是否 upcoming、距離幾天）
+- 每檔至少 2 個來源；不足 2 個來源時，該欄位標註 `資料不足`。
+
 ## 6) 題材熱度（Hybrid：腳本主、Web 輔）
 
 - 題材熱度主表：`theme_heat_daily.csv`
@@ -86,23 +101,39 @@
     - 每題材只查前 1 檔領頭羊
     - 若 Web 與腳本衝突：以腳本排序為主，Web 僅標註 `催化不一致`
 
-## 7) Web 驗證範圍（避免漏查/過查）
+## 7) Web 驗證範圍（強制規範：哪些要查、哪些不用查）
 
-僅查以下高優先級：
+### 7.1 必查（一定要 Web 搜尋）
 
-1. `ai_focus_list.csv` 前 5 檔
+1. `ai_focus_list.csv` 前 5 檔（逐檔查）
 2. 題材前 3 的領頭羊（每題材 1 檔）
-3. 若有近期財報（D<=3）再補查財報日期一致性
+3. 近期財報標的（D<=3）的財報日期與共識一致性
+4. 若 `raw_market_daily.csv` 缺失：中長期候選 Top 5 的 `Upside_Pct`、`Num_Analysts`、`Earnings_Status`
 
 每檔至少 2 個來源；來源矛盾則標註 `來源矛盾`，但不直接刪除該檔。
+
+### 7.2 不用查（禁止過度搜尋）
+
+1. 短炒 Top 5 中「不在 ai_focus 前 5」的標的（維持 Local-first）
+2. 題材前 3 之外的非領頭羊
+3. `ai_focus_list` 第 6 名以後（除非你明確要求）
+
+### 7.3 查核輸出要求（防止 AI 只說有查但沒查）
+
+- 在輸出中新增一段 `Web 查核覆蓋`，列出：
+    - 必查總檔數
+    - 實際完成查核檔數
+    - 未完成查核清單（若有）
+- 每個有做 Web 查核的 ticker，必須在 `reason_summary` 或正文附上來源摘要；不可只寫「已查證」。
 
 ## 8) 輸出格式（固定）
 
 ### (1) 資料狀態
 - XQ 檔案：OK/缺失
-- Repo 本地檔案：OK/缺失
+- Repo/上傳檔案：OK/缺失
 - 日期時差：X 天
 - 可評分標的數：N
+- Web 查核覆蓋：完成 X/Y（未完成需列出 ticker）
 
 ### (2) 短炒 Top 5（主輸出）
 | Rank | Ticker | short_score_final | chg_1d% | chg_3d% | chg_5d% | vol_strength | dollar_volume_m | 風險等級 | 技術狀態 |
@@ -148,10 +179,11 @@ CSV 必備欄位（第一行標頭固定）：
 - 禁止輸出「不建議買」但沒有量化原因
 - 禁止遺漏 `ai_focus_list.csv` 的前 5 檔
 - 禁止把題材判斷全部交給 Web，忽略 `theme_heat_daily.csv`
+- 禁止聲稱「已 Web 查核」但未給出來源摘要或覆蓋統計
 
 ## 10) 最終原則
 
-先用你提供的本地資料做穩定排序，再用 Web 做小範圍精準驗證；
+先用你上傳的資料做穩定排序，再用 Web 做小範圍精準驗證；
 AI 的職責是「排序與風險標記」，不是替你放棄高動能標的。
 
 ## 11) Web 使用場景補充（你目前的用法）

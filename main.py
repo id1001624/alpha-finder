@@ -1908,6 +1908,7 @@ def _export_ai_ready_quick_pack(run_dir: Path, date_str: str, run_stamp: str) ->
     quick_files = [
         'ai_focus_list.csv',
         'fusion_top_daily.csv',
+        'raw_market_daily.csv',
         'theme_heat_daily.csv',
         'theme_leaders_daily.csv',
     ]
@@ -1928,7 +1929,7 @@ def _export_ai_ready_quick_pack(run_dir: Path, date_str: str, run_stamp: str) ->
         'scan_date': date_str,
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'files': copied_files,
-        'notes': '給 AI 的固定入口。前 4 檔由 main.py 產生，第 5 檔 xq_short_term_updated.csv 由 update_xq_with_history.py 更新。',
+        'notes': '給 AI 的固定入口。前 5 檔由 main.py 產生，第 6 檔 xq_short_term_updated.csv 由 update_xq_with_history.py 更新。',
     }
     with open(ai_run_dir / 'README_ai_quick_pack.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)

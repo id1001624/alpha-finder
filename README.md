@@ -91,24 +91,17 @@ python scripts/update_xq_with_history.py --file "你的檔名.csv"
 
 接著把以下本地檔案餵給 AI：
 
-- `repo_outputs/daily_refresh/latest/ai_focus_list.csv`
-- `repo_outputs/daily_refresh/latest/fusion_top_daily.csv`
-- `repo_outputs/daily_refresh/latest/theme_heat_daily.csv`
-- `repo_outputs/daily_refresh/latest/theme_leaders_daily.csv`
-- `XQ_exports/*_updated.csv`（XQ 短炒版）
-
-若你不想在大量 CSV 中找檔案，可直接用固定快捷資料夾（推薦）：
-
 - `repo_outputs/ai_ready/latest/ai_focus_list.csv`
 - `repo_outputs/ai_ready/latest/fusion_top_daily.csv`
+- `repo_outputs/ai_ready/latest/raw_market_daily.csv`
 - `repo_outputs/ai_ready/latest/theme_heat_daily.csv`
 - `repo_outputs/ai_ready/latest/theme_leaders_daily.csv`
 - `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
 
 說明：
 
-- `python main.py` 會更新前 4 檔
-- `python scripts/update_xq_with_history.py` 會更新第 5 檔（`xq_short_term_updated.csv`）
+- `python main.py` 會更新前 5 檔
+- `python scripts/update_xq_with_history.py` 會更新第 6 檔
 
 ### 5.1️⃣ 為什麼會生成很多 CSV？
 
@@ -116,7 +109,7 @@ python scripts/update_xq_with_history.py --file "你的檔名.csv"
 
 - `daily_refresh/*`：完整日更產線（含除錯/審核/回放）
 - `backtest/*`：歷史回測與績效統計
-- `ai_ready/latest/*`：固定給 AI 的 5 檔最小集合（你每天只看這裡）
+- `ai_ready/latest/*`：固定給 AI 的 6 檔最小集合（你每天只看這裡）
 
 回測專用（不餵 AI）：
 
