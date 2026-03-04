@@ -40,6 +40,28 @@ REQUIRED_COLUMNS = [
     "source_ref",
 ]
 
+VALID_DECISION_TAGS = {"keep", "watch", "replace_candidate"}
+
+
+def _infer_decision_tag(row: pd.Series) -> str:
+    short_score = pd.to_numeric(row.get("short_score_final"), errors="coerce")
+    core_score = pd.to_numeric(row.get("core_score"), errors="coerce")
+    tech_status = str(row.get("tech_status", "")).strip()
+
+    if pd.isna(short_score):
+        return "watch"
+
+    if short_score < 10:
+        return "replace_candidate"
+
+    if short_score >= 20 and tech_status != "需技術驗證":
+        return "keep"
+
+    if not pd.isna(core_score) and core_score <= 8 and short_score < 12:
+        return "replace_candidate"
+
+    return "watch"
+
 
 def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
     out = df.copy()
@@ -54,6 +76,13 @@ def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
     out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
     out["tech_status"] = out["tech_status"].astype(str).str.strip()
     out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
+    out["short_score_final"] = pd.to_numeric(out["short_score_final"], errors="coerce")
+    out["swing_score"] = pd.to_numeric(out["swing_score"], errors="coerce")
+    out["core_score"] = pd.to_numeric(out["core_score"], errors="coerce")
+
+    invalid_tag_mask = ~out["decision_tag"].isin(VALID_DECISION_TAGS)
+    if invalid_tag_mask.any():
+        out.loc[invalid_tag_mask, "decision_tag"] = out[invalid_tag_mask].apply(_infer_decision_tag, axis=1)
 
     out = out[out["ticker"] != ""]
     out = out.dropna(subset=["rank"]).copy()

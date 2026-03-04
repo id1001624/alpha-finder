@@ -5,7 +5,8 @@ XQ 選股清單更新腳本
 功能:
 - 掃描 XQ_exports 資料夾下所有 CSV 檔案
 - 抓取每支股票最近 1/3/5 日的歷史價格與量能指標
-- 新增欄位: chg_1d_pct, chg_3d_pct, chg_5d_pct, vol_strength, short_trade_score
+- 新增欄位: chg_1d_pct, chg_3d_pct, chg_5d_pct, vol_strength, short_trade_score,
+  swing_score, momentum_mix, continuation_grade, prob_next_day, prob_day2, decision_tag_hint
 - 執行完畢後顯示各檔案短炒分數 Top 5
 - 不在 XQ_exports 產生 *_updated.csv，統一更新 `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
 - 自動處理中文編碼問題
@@ -73,6 +74,13 @@ COL_5D_AVG_VOLUME = "avg_volume_5d"
 COL_VOL_STRENGTH = "vol_strength"
 COL_DOLLAR_VOL_M = "dollar_volume_m"
 COL_SHORT_SCORE = "short_trade_score"
+COL_SWING_SCORE = "swing_score"
+COL_MOMENTUM_MIX = "momentum_mix"
+COL_CONTINUATION_GRADE = "continuation_grade"
+COL_PROB_NEXT_DAY = "prob_next_day"
+COL_PROB_DAY2 = "prob_day2"
+COL_REVERSAL_FLAGS = "reversal_flags"
+COL_DECISION_TAG_HINT = "decision_tag_hint"
 COL_AI_QUERY_HINT = "ai_query_hint"
 
 # 自動尋找 XQ_exports 資料夾 (優先順序: 腳本同層 > 腳本上層 > 當前工作目錄)
@@ -302,6 +310,116 @@ def _calc_short_trade_score(chg_1d, chg_3d, chg_5d, vol_strength):
     return round(score, 2)
 
 
+def _calc_swing_score(chg_3d, chg_5d, vol_strength):
+    vals = [chg_3d, chg_5d, vol_strength]
+    if any(v is None or pd.isna(v) for v in vals):
+        return None
+
+    score = (
+        (float(chg_3d) * 0.35) +
+        (float(chg_5d) * 0.35) +
+        (float(vol_strength) * 0.30)
+    )
+    return round(score, 2)
+
+
+def _calc_reversal_levels(chg_1d, chg_5d, vol_strength):
+    vals = [chg_1d, chg_5d, vol_strength]
+    if any(v is None or pd.isna(v) for v in vals):
+        return 0, "none"
+
+    levels = 0
+    flags = []
+
+    if float(chg_1d) > 15 and float(vol_strength) < 1.5:
+        levels += 1
+        flags.append("high_spike_low_volume")
+
+    if float(chg_5d) > 25 and float(chg_1d) < -1:
+        levels += 1
+        flags.append("five_day_run_pullback")
+
+    if float(chg_1d) < -3:
+        levels += 1
+        flags.append("daily_negative_break")
+
+    return min(levels, 2), "|".join(flags) if flags else "none"
+
+
+def _downgrade_grade(grade, levels):
+    order = ["A", "B", "C", "D"]
+    if grade not in order:
+        return "D"
+    idx = order.index(grade)
+    idx = min(idx + max(int(levels), 0), len(order) - 1)
+    return order[idx]
+
+
+def _grade_to_probability_ranges(grade):
+    mapping = {
+        "A": ("70-80%", "60-70%"),
+        "B": ("55-68%", "48-60%"),
+        "C": ("45-58%", "38-50%"),
+        "D": ("30-45%", "25-40%"),
+    }
+    return mapping.get(grade, ("30-45%", "25-40%"))
+
+
+def _calc_continuation_outlook(short_score, swing_score, chg_1d, chg_5d, vol_strength):
+    vals = [short_score, swing_score, chg_1d, chg_5d, vol_strength]
+    if any(v is None or pd.isna(v) for v in vals):
+        return {
+            COL_MOMENTUM_MIX: None,
+            COL_CONTINUATION_GRADE: None,
+            COL_PROB_NEXT_DAY: None,
+            COL_PROB_DAY2: None,
+            COL_REVERSAL_FLAGS: "none",
+        }
+
+    momentum_mix = round((float(short_score) * 0.6) + (float(swing_score) * 0.4), 2)
+
+    if momentum_mix >= 16 and float(vol_strength) >= 2.0:
+        base_grade = "A"
+    elif momentum_mix >= 12:
+        base_grade = "B"
+    elif momentum_mix >= 8:
+        base_grade = "C"
+    else:
+        base_grade = "D"
+
+    penalty_levels, reversal_flags = _calc_reversal_levels(chg_1d, chg_5d, vol_strength)
+    final_grade = _downgrade_grade(base_grade, penalty_levels)
+    prob_next_day, prob_day2 = _grade_to_probability_ranges(final_grade)
+
+    return {
+        COL_MOMENTUM_MIX: momentum_mix,
+        COL_CONTINUATION_GRADE: final_grade,
+        COL_PROB_NEXT_DAY: prob_next_day,
+        COL_PROB_DAY2: prob_day2,
+        COL_REVERSAL_FLAGS: reversal_flags,
+    }
+
+
+def _build_decision_tag_hint(short_score, chg_1d, chg_5d, vol_strength):
+    vals = [short_score, chg_1d, chg_5d, vol_strength]
+    if any(v is None or pd.isna(v) for v in vals):
+        return "watch"
+
+    short_score = float(short_score)
+    chg_1d = float(chg_1d)
+    chg_5d = float(chg_5d)
+    vol_strength = float(vol_strength)
+
+    overheat = chg_1d > 12 and vol_strength < 1.3
+    pullback = chg_5d > 20 and chg_1d < -2
+
+    if short_score < 10 or overheat or pullback:
+        return "replace_candidate"
+    if short_score >= 20 and vol_strength >= 1.8 and not overheat:
+        return "keep"
+    return "watch"
+
+
 def build_ai_query_hint(ticker):
     return (
         f"查詢 {ticker} 最新題材催化、隔夜新聞、財報日與市場共識，"
@@ -333,6 +451,13 @@ def calculate_metrics(hist):
             COL_VOL_STRENGTH: None,
             COL_DOLLAR_VOL_M: None,
             COL_SHORT_SCORE: None,
+            COL_SWING_SCORE: None,
+            COL_MOMENTUM_MIX: None,
+            COL_CONTINUATION_GRADE: None,
+            COL_PROB_NEXT_DAY: None,
+            COL_PROB_DAY2: None,
+            COL_REVERSAL_FLAGS: "none",
+            COL_DECISION_TAG_HINT: "watch",
         }
     
     recent = hist.tail(MAX_LOOKBACK + 1)
@@ -357,6 +482,9 @@ def calculate_metrics(hist):
     chg_5d = _calc_change_pct(close_series, 5)
 
     short_score = _calc_short_trade_score(chg_1d, chg_3d, chg_5d, vol_strength)
+    swing_score = _calc_swing_score(chg_3d, chg_5d, vol_strength)
+    continuation_outlook = _calc_continuation_outlook(short_score, swing_score, chg_1d, chg_5d, vol_strength)
+    decision_tag_hint = _build_decision_tag_hint(short_score, chg_1d, chg_5d, vol_strength)
 
     return {
         COL_1D_CHANGE_PCT: chg_1d,
@@ -370,6 +498,13 @@ def calculate_metrics(hist):
         COL_VOL_STRENGTH: vol_strength,
         COL_DOLLAR_VOL_M: dollar_volume_m,
         COL_SHORT_SCORE: short_score,
+        COL_SWING_SCORE: swing_score,
+        COL_MOMENTUM_MIX: continuation_outlook[COL_MOMENTUM_MIX],
+        COL_CONTINUATION_GRADE: continuation_outlook[COL_CONTINUATION_GRADE],
+        COL_PROB_NEXT_DAY: continuation_outlook[COL_PROB_NEXT_DAY],
+        COL_PROB_DAY2: continuation_outlook[COL_PROB_DAY2],
+        COL_REVERSAL_FLAGS: continuation_outlook[COL_REVERSAL_FLAGS],
+        COL_DECISION_TAG_HINT: decision_tag_hint,
     }
 
 
@@ -407,6 +542,8 @@ def print_top_movers(df, ticker_column):
     for _, row in top5.iterrows():
         print(
             f"{row['_ticker']}: score={row.get(COL_SHORT_SCORE)} | "
+            f"swing={row.get(COL_SWING_SCORE)} | "
+            f"grade={row.get(COL_CONTINUATION_GRADE)} | "
             f"1d={row.get(COL_1D_CHANGE_PCT)}% | "
             f"3d={row.get(COL_3D_CHANGE_PCT)}% | "
             f"5d={row.get(COL_5D_CHANGE_PCT)}% | "
@@ -468,6 +605,8 @@ def build_top_picks_snapshot(df, ticker_column, source_name, top_n=TOP_PICKS_PER
 
     numeric_cols = [
         COL_SHORT_SCORE,
+        COL_SWING_SCORE,
+        COL_MOMENTUM_MIX,
         COL_1D_CHANGE_PCT,
         COL_3D_CHANGE_PCT,
         COL_5D_CHANGE_PCT,
@@ -500,6 +639,13 @@ def build_top_picks_snapshot(df, ticker_column, source_name, top_n=TOP_PICKS_PER
         'rank',
         '_ticker',
         COL_SHORT_SCORE,
+        COL_SWING_SCORE,
+        COL_MOMENTUM_MIX,
+        COL_CONTINUATION_GRADE,
+        COL_PROB_NEXT_DAY,
+        COL_PROB_DAY2,
+        COL_REVERSAL_FLAGS,
+        COL_DECISION_TAG_HINT,
         COL_1D_CHANGE_PCT,
         COL_3D_CHANGE_PCT,
         COL_5D_CHANGE_PCT,
@@ -611,6 +757,13 @@ def update_csv_with_history(file_path, ticker_column=None):
         COL_VOL_STRENGTH,
         COL_DOLLAR_VOL_M,
         COL_SHORT_SCORE,
+        COL_SWING_SCORE,
+        COL_MOMENTUM_MIX,
+        COL_CONTINUATION_GRADE,
+        COL_PROB_NEXT_DAY,
+        COL_PROB_DAY2,
+        COL_REVERSAL_FLAGS,
+        COL_DECISION_TAG_HINT,
         COL_AI_QUERY_HINT,
     ]:
         df[col] = None

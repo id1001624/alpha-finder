@@ -1882,6 +1882,43 @@ def _build_theme_leaders(df_enriched: pd.DataFrame, theme_heat_df: pd.DataFrame,
     return pd.DataFrame(leader_rows)
 
 
+def _enrich_market_snapshot_with_core_score(snapshot: pd.DataFrame) -> pd.DataFrame:
+    if snapshot is None or len(snapshot) == 0:
+        return snapshot
+
+    out = snapshot.copy()
+
+    upside = pd.to_numeric(out.get('Upside_Pct'), errors='coerce').fillna(0)
+    analysts = pd.to_numeric(out.get('Num_Analysts'), errors='coerce').fillna(0)
+    daily_change = pd.to_numeric(out.get('Daily_Change'), errors='coerce').fillna(0)
+    rel_volume = pd.to_numeric(out.get('Rel_Volume'), errors='coerce').fillna(0)
+    days_to_earnings = pd.to_numeric(out.get('Days_To_Earnings'), errors='coerce')
+    earnings_status = out.get('Earnings_Status', '').fillna('').astype(str).str.lower()
+
+    upside_component = upside.clip(lower=0, upper=120) * 0.35
+    upside_component = upside_component.where(upside > 0, 15.0)
+
+    analyst_component = analysts.clip(lower=0, upper=20) * 1.2
+    analyst_component = analyst_component.where(analysts > 0, 8.0)
+
+    earnings_bonus = pd.Series(0.0, index=out.index)
+    is_upcoming = earnings_status.eq('upcoming')
+    earnings_bonus.loc[is_upcoming & days_to_earnings.le(3)] = 8.0
+    earnings_bonus.loc[is_upcoming & days_to_earnings.gt(3) & days_to_earnings.le(7)] = 5.0
+
+    reversal_penalty = pd.Series(0.0, index=out.index)
+    reversal_penalty.loc[(daily_change > 12) & (rel_volume < 1.3)] = 10.0
+
+    core_score_v81 = (upside_component + analyst_component + earnings_bonus - reversal_penalty).clip(lower=0)
+
+    out['core_score_v81'] = core_score_v81.round(2)
+    out['core_score_source'] = 'local_enriched'
+    out.loc[(upside <= 0) & (analysts <= 0), 'core_score_source'] = 'local_fallback'
+    out['reversal_penalty_v81'] = reversal_penalty.astype(int)
+
+    return out
+
+
 def _cleanup_local_output_history(base_dir: Path, keep_days: int) -> None:
     if keep_days <= 0 or not base_dir.exists():
         return
@@ -1968,6 +2005,7 @@ def export_daily_local_outputs(
         'TV_VWAP', 'TV_SQZ_On', 'TV_SQZMOM_Color', 'TV_SQZMOM_Value', 'TV_Signal_Age_Min',
     ]
     market_snapshot = _safe_subset(df_enriched, market_cols)
+    market_snapshot = _enrich_market_snapshot_with_core_score(market_snapshot)
     _write_csv_local(market_snapshot, run_dir / 'raw_market_daily.csv')
 
     _write_csv_local(sheet1, run_dir / 'shortlist_launch.csv')
