@@ -97,6 +97,27 @@ python scripts/update_xq_with_history.py --file "你的檔名.csv"
 - `repo_outputs/daily_refresh/latest/theme_leaders_daily.csv`
 - `XQ_exports/*_updated.csv`（XQ 短炒版）
 
+若你不想在大量 CSV 中找檔案，可直接用固定快捷資料夾（推薦）：
+
+- `repo_outputs/ai_ready/latest/ai_focus_list.csv`
+- `repo_outputs/ai_ready/latest/fusion_top_daily.csv`
+- `repo_outputs/ai_ready/latest/theme_heat_daily.csv`
+- `repo_outputs/ai_ready/latest/theme_leaders_daily.csv`
+- `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
+
+說明：
+
+- `python main.py` 會更新前 4 檔
+- `python scripts/update_xq_with_history.py` 會更新第 5 檔（`xq_short_term_updated.csv`）
+
+### 5.1️⃣ 為什麼會生成很多 CSV？
+
+這些 CSV 用於不同目的，不是都給 AI 讀：
+
+- `daily_refresh/*`：完整日更產線（含除錯/審核/回放）
+- `backtest/*`：歷史回測與績效統計
+- `ai_ready/latest/*`：固定給 AI 的 5 檔最小集合（你每天只看這裡）
+
 回測專用（不餵 AI）：
 
 - `repo_outputs/backtest/xq_pick_log.csv`（歷史累積主檔）
@@ -124,7 +145,6 @@ python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 202
 
 1. 使用 `Alpha-Sniper-Protocol-v7.md` 要求 AI 至少輸出：
 	- `FILE: ai_decision_YYYY-MM-DD.csv`（必要）
-	- `FILE: ai_decision_YYYY-MM-DD.md`（選填）
 2. 把內容存到本地（建議資料夾：`repo_outputs/backtest/inbox/`）
 3. 執行歸檔：
 
@@ -132,19 +152,11 @@ python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 202
 python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv"
 ```
 
-若你也有存 MD，可加上：
-
-```bash
-python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv" --md-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.md"
-```
-
 歸檔後會更新：
 
 - `repo_outputs/backtest/ai_decision_log.csv`（AI 決策歷史主檔）
 - `repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.csv`
-- `repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.md`
 - `repo_outputs/backtest/ai_decision_latest.csv`
-- `repo_outputs/backtest/ai_decision_latest.md`
 
 ---
 
@@ -336,7 +348,7 @@ python scripts/premarket_volume_check.py --symbols NVAX,FA --manual-premarket NV
 
 ### Q4: SSL 憑證錯誤（curl: 77）？
 
-安裝路徑含中文時 curl 無法讀取憑證，main.py 的 `_fix_ssl_cert_path()` 會自動修復，不需要手動處理。
+安裝路徑含中文時 curl 無法讀取憑證，`main.py` 與 `scripts/update_xq_with_history.py` 都已內建 `_fix_ssl_cert_path()` 自動修復，不需要手動處理。
 
 ---
 

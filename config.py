@@ -92,6 +92,12 @@ LOCAL_OUTPUT_ENABLED = True
 LOCAL_OUTPUT_DIR = "repo_outputs/daily_refresh"
 LOCAL_OUTPUT_KEEP_DAYS = 14
 
+# ============ AI 五檔快捷輸出（推薦） ============
+# 固定輸出給 AI 的 5 檔入口，避免在大量 CSV 中尋找
+AI_READY_OUTPUT_ENABLED = True
+AI_READY_OUTPUT_DIR = "repo_outputs/ai_ready"
+AI_READY_KEEP_DAYS = 14
+
 # ============ API金鑰設定 ============
 # Finnhub 免費 API (60 call/min) - 財報日期 + 分析師目標價
 # 註冊: https://finnhub.io/register

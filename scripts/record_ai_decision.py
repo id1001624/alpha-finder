@@ -1,14 +1,13 @@
 """
-將網頁 AI 產生的 ai_decision CSV（必要）/MD（選填）歸檔到回測資料夾。
+將網頁 AI 產生的 ai_decision CSV（必要）歸檔到回測資料夾。
 
 用途：
 - 追加到回測主檔：repo_outputs/backtest/ai_decision_log.csv
-- 建立每日快照：repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.*
-- 更新最新副本：repo_outputs/backtest/ai_decision_latest.*
+- 建立每日快照：repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.csv
+- 更新最新副本：repo_outputs/backtest/ai_decision_latest.csv
 
 範例：
 python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv"
-python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv" --md-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.md"
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 DAILY_AI_DIR = BACKTEST_DIR / "daily_ai_decisions"
 MASTER_LOG_FILE = BACKTEST_DIR / "ai_decision_log.csv"
 LATEST_CSV_FILE = BACKTEST_DIR / "ai_decision_latest.csv"
-LATEST_MD_FILE = BACKTEST_DIR / "ai_decision_latest.md"
 
 REQUIRED_COLUMNS = [
     "decision_date",
@@ -78,34 +76,23 @@ def append_to_master_log(df: pd.DataFrame) -> None:
         )
 
 
-def copy_daily_and_latest(csv_file: Path, md_file: Path | None, decision_date: str) -> None:
+def copy_daily_and_latest(csv_file: Path, decision_date: str) -> None:
     daily_csv = DAILY_AI_DIR / f"{decision_date}_ai_decision.csv"
 
     shutil.copy2(csv_file, daily_csv)
     shutil.copy2(csv_file, LATEST_CSV_FILE)
 
-    if md_file is not None and md_file.exists():
-        daily_md = DAILY_AI_DIR / f"{decision_date}_ai_decision.md"
-        shutil.copy2(md_file, daily_md)
-        shutil.copy2(md_file, LATEST_MD_FILE)
-
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="歸檔 AI 決策輸出（CSV 必要 / MD 選填）")
+    parser = argparse.ArgumentParser(description="歸檔 AI 決策輸出（CSV 必要）")
     parser.add_argument("--csv-file", required=True, help="ai_decision_YYYY-MM-DD.csv 路徑")
-    parser.add_argument("--md-file", default="", help="ai_decision_YYYY-MM-DD.md 路徑（選填）")
     parser.add_argument("--date", default="", help="可選，強制指定 decision_date（YYYY-MM-DD）")
 
     args = parser.parse_args()
 
     csv_file = Path(args.csv_file)
-    md_file = Path(args.md_file) if args.md_file else None
-
     if not csv_file.exists():
         print(f"找不到 CSV: {csv_file}")
-        return
-    if md_file is not None and not md_file.exists():
-        print(f"找不到 MD: {md_file}")
         return
 
     BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
@@ -125,17 +112,12 @@ def main() -> None:
         return
 
     append_to_master_log(norm_df)
-    copy_daily_and_latest(csv_file, md_file, decision_date)
+    copy_daily_and_latest(csv_file, decision_date)
 
     print("\n=== AI 決策已記錄 ===")
     print(f"主檔: {MASTER_LOG_FILE}")
     print(f"每日 CSV: {DAILY_AI_DIR / (decision_date + '_ai_decision.csv')}")
     print(f"最新 CSV: {LATEST_CSV_FILE}")
-    if md_file is not None and md_file.exists():
-        print(f"每日 MD: {DAILY_AI_DIR / (decision_date + '_ai_decision.md')}")
-        print(f"最新 MD: {LATEST_MD_FILE}")
-    else:
-        print("MD: 本次未提供（可選）")
 
 
 if __name__ == "__main__":

@@ -16,13 +16,45 @@ XQ 選股清單更新腳本
 
 import os
 import sys
-import pandas as pd
-import yfinance as yf
+import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
 import argparse
 import time
 import re
+
+
+def _fix_ssl_cert_path():
+    """修復 SSL 憑證路徑中文問題（與 main.py 相同）"""
+    try:
+        import certifi
+        original = certifi.where()
+        try:
+            original.encode('ascii')
+            return
+        except UnicodeEncodeError:
+            pass
+
+        safe_dir = os.path.join(os.path.expanduser('~'), '.alpha_finder_certs')
+        os.makedirs(safe_dir, exist_ok=True)
+        safe_cert = os.path.join(safe_dir, 'cacert.pem')
+
+        if not os.path.exists(safe_cert) or \
+           os.path.getmtime(original) > os.path.getmtime(safe_cert):
+            shutil.copy2(original, safe_cert)
+
+        os.environ['CURL_CA_BUNDLE'] = safe_cert
+        os.environ['SSL_CERT_FILE'] = safe_cert
+        os.environ['REQUESTS_CA_BUNDLE'] = safe_cert
+        os.environ['SSL_NO_VERIFY'] = '0'
+    except Exception:
+        pass
+
+
+_fix_ssl_cert_path()
+
+import pandas as pd
+import yfinance as yf
 
 # 1/3/5 日核心設定（短炒版）
 LOOKBACK_WINDOWS = [1, 3, 5]
@@ -66,11 +98,21 @@ def find_xq_exports_dir():
     return script_dir.parent / "XQ_exports"
 
 PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from config import AI_READY_OUTPUT_ENABLED, AI_READY_OUTPUT_DIR
+except Exception:
+    AI_READY_OUTPUT_ENABLED = True
+    AI_READY_OUTPUT_DIR = "repo_outputs/ai_ready"
+
 XQ_EXPORTS_DIR = find_xq_exports_dir()
 BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 PICK_LOG_FILE = BACKTEST_OUTPUT_DIR / "xq_pick_log.csv"
 DAILY_PICKS_DIR = BACKTEST_OUTPUT_DIR / "daily_xq_picks"
 TOP_PICKS_PER_FILE = 10
+AI_XQ_TARGET_FILE = "xq_short_term_updated.csv"
 
 COLUMN_RENAME_MAP = {
     "序號": "index",
@@ -497,6 +539,26 @@ def save_backtest_pick_log(snapshot_df):
     return PICK_LOG_FILE, daily_file
 
 
+def _resolve_ai_ready_base_dir() -> Path:
+    raw = Path(AI_READY_OUTPUT_DIR)
+    return raw if raw.is_absolute() else (PROJECT_ROOT / raw)
+
+
+def export_ai_ready_xq_file(source_csv: Path) -> Path | None:
+    if not AI_READY_OUTPUT_ENABLED:
+        return None
+    if source_csv is None or not source_csv.exists():
+        return None
+
+    base_dir = _resolve_ai_ready_base_dir()
+    latest_dir = base_dir / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+
+    target = latest_dir / AI_XQ_TARGET_FILE
+    shutil.copy2(source_csv, target)
+    return target
+
+
 def update_csv_with_history(file_path, ticker_column=None):
     """
     更新 CSV 檔案,新增歷史價格數據
@@ -592,7 +654,7 @@ def update_csv_with_history(file_path, ticker_column=None):
         print(f"✅ 已儲存: {output_path.name}")
         print(f"📊 成功更新: {success_count}/{total} 支股票")
         print(f"{'='*60}\n")
-        return df_out, ticker_column, file_path.name
+        return df_out, ticker_column, file_path.name, output_path
     except Exception as e:
         print(f"❌ 儲存失敗: {e}")
         return None
@@ -679,11 +741,20 @@ def main():
 
     if results:
         pick_snapshots = []
+        best_ai_xq_path = None
+        best_score_count = -1
 
         print("\n===== 每檔短炒分數 Top 5 =====")
-        for df, ticker_column, source_name in results:
+        for df, ticker_column, source_name, updated_path in results:
             print(f"\n[{source_name}]")
             print_top_movers(df, ticker_column)
+
+            score_count = 0
+            if COL_SHORT_SCORE in df.columns:
+                score_count = pd.to_numeric(df[COL_SHORT_SCORE], errors='coerce').notna().sum()
+            if score_count > best_score_count:
+                best_score_count = score_count
+                best_ai_xq_path = updated_path
 
             snapshot = build_top_picks_snapshot(df, ticker_column, source_name)
             if len(snapshot) > 0:
@@ -695,6 +766,11 @@ def main():
             print("\n===== 回測用 XQ 入選名單已記錄 =====")
             print(f"主檔: {log_file}")
             print(f"每日檔: {daily_file}")
+
+        ai_target = export_ai_ready_xq_file(best_ai_xq_path)
+        if ai_target is not None:
+            print("\n===== AI 五檔快捷輸出已更新 =====")
+            print(f"XQ 檔案: {ai_target}")
     
     print(f"\n✅ 全部完成!\n")
 

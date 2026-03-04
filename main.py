@@ -71,6 +71,7 @@ from config import (
     GSHEET_ENABLED, GSHEET_NAME, GSHEET_CREDENTIALS_FILE,
     GSHEET_UPLOAD_DAILY_REPORT, GSHEET_UPLOAD_FULL_DATA,
     LOCAL_OUTPUT_ENABLED, LOCAL_OUTPUT_DIR, LOCAL_OUTPUT_KEEP_DAYS,
+    AI_READY_OUTPUT_ENABLED, AI_READY_OUTPUT_DIR, AI_READY_KEEP_DAYS,
     # 新增配置
     FINNHUB_API_KEY,
     LOTTERY_MIN_GAIN, LOTTERY_MIN_REL_VOL, LOTTERY_MAX_MCAP,
@@ -1804,6 +1805,16 @@ def _write_csv_local(df: pd.DataFrame, output_path: Path) -> None:
     df_to_save.to_csv(output_path, index=False, encoding='utf-8-sig')
 
 
+def _reset_path(path_obj: Path) -> None:
+    if path_obj.is_dir():
+        shutil.rmtree(path_obj, ignore_errors=True)
+    elif path_obj.exists():
+        try:
+            path_obj.unlink()
+        except Exception:
+            pass
+
+
 def _extract_sheet_tickers(df: pd.DataFrame) -> List[str]:
     if df is None or len(df) == 0:
         return []
@@ -1884,6 +1895,50 @@ def _cleanup_local_output_history(base_dir: Path, keep_days: int) -> None:
             continue
         if folder_date < cutoff:
             shutil.rmtree(child, ignore_errors=True)
+
+
+def _export_ai_ready_quick_pack(run_dir: Path, date_str: str, run_stamp: str) -> Optional[Path]:
+    if not AI_READY_OUTPUT_ENABLED:
+        return None
+
+    ai_base_dir = Path(AI_READY_OUTPUT_DIR)
+    ai_run_dir = ai_base_dir / date_str / run_stamp
+    ai_run_dir.mkdir(parents=True, exist_ok=True)
+
+    quick_files = [
+        'ai_focus_list.csv',
+        'fusion_top_daily.csv',
+        'theme_heat_daily.csv',
+        'theme_leaders_daily.csv',
+    ]
+    copied_files = []
+
+    for file_name in quick_files:
+        src = run_dir / file_name
+        if src.exists():
+            shutil.copy2(src, ai_run_dir / file_name)
+            copied_files.append(file_name)
+
+    previous_xq_file = ai_base_dir / 'latest' / 'xq_short_term_updated.csv'
+    if previous_xq_file.exists():
+        shutil.copy2(previous_xq_file, ai_run_dir / 'xq_short_term_updated.csv')
+        copied_files.append('xq_short_term_updated.csv')
+
+    manifest = {
+        'scan_date': date_str,
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'files': copied_files,
+        'notes': '給 AI 的固定入口。前 4 檔由 main.py 產生，第 5 檔 xq_short_term_updated.csv 由 update_xq_with_history.py 更新。',
+    }
+    with open(ai_run_dir / 'README_ai_quick_pack.json', 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    latest_dir = ai_base_dir / 'latest'
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(ai_run_dir, latest_dir, dirs_exist_ok=True)
+
+    _cleanup_local_output_history(ai_base_dir, AI_READY_KEEP_DAYS)
+    return ai_run_dir
 
 
 def export_daily_local_outputs(
@@ -1978,9 +2033,12 @@ def export_daily_local_outputs(
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     latest_dir = base_dir / 'latest'
-    if latest_dir.exists():
-        shutil.rmtree(latest_dir, ignore_errors=True)
-    shutil.copytree(run_dir, latest_dir)
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(run_dir, latest_dir, dirs_exist_ok=True)
+
+    ai_quick_dir = _export_ai_ready_quick_pack(run_dir, date_str, run_stamp)
+    if ai_quick_dir is not None:
+        print(f"[步驟 3.8] AI 五檔快捷輸出：{Path(AI_READY_OUTPUT_DIR) / 'latest'}")
 
     _cleanup_local_output_history(base_dir, LOCAL_OUTPUT_KEEP_DAYS)
     return run_dir
