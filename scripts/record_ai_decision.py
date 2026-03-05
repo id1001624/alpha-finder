@@ -1,5 +1,5 @@
 """
-將網頁 AI 產生的 ai_decision CSV（必要）歸檔到回測資料夾。
+將 AI 決策 CSV 歸檔到回測資料夾。
 
 用途：
 - 追加到回測主檔：repo_outputs/backtest/ai_decision_log.csv
@@ -8,6 +8,7 @@
 
 範例：
 python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv"
+python scripts/record_ai_decision.py --auto-latest
 """
 
 from __future__ import annotations
@@ -24,6 +25,9 @@ BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 DAILY_AI_DIR = BACKTEST_DIR / "daily_ai_decisions"
 MASTER_LOG_FILE = BACKTEST_DIR / "ai_decision_log.csv"
 LATEST_CSV_FILE = BACKTEST_DIR / "ai_decision_latest.csv"
+INBOX_DIR = BACKTEST_DIR / "inbox"
+AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
+DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
 
 REQUIRED_COLUMNS = [
     "decision_date",
@@ -41,6 +45,25 @@ REQUIRED_COLUMNS = [
 ]
 
 VALID_DECISION_TAGS = {"keep", "watch", "replace_candidate"}
+
+
+def _find_latest_decision_csv() -> Path | None:
+    candidates = []
+    search_dirs = [INBOX_DIR, AI_READY_LATEST_DIR, DAILY_REFRESH_LATEST_DIR]
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for file in directory.glob("ai_decision_*.csv"):
+            try:
+                candidates.append((file.stat().st_mtime, file))
+            except OSError:
+                continue
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def _infer_decision_tag(row: pd.Series) -> str:
@@ -113,13 +136,21 @@ def copy_daily_and_latest(csv_file: Path, decision_date: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="歸檔 AI 決策輸出（CSV 必要）")
-    parser.add_argument("--csv-file", required=True, help="ai_decision_YYYY-MM-DD.csv 路徑")
+    parser = argparse.ArgumentParser(description="歸檔 AI 決策輸出（支援自動找最新 CSV）")
+    parser.add_argument("--csv-file", default="", help="ai_decision_YYYY-MM-DD.csv 路徑")
+    parser.add_argument("--auto-latest", action="store_true", help="自動搜尋最新 ai_decision_*.csv")
     parser.add_argument("--date", default="", help="可選，強制指定 decision_date（YYYY-MM-DD）")
 
     args = parser.parse_args()
 
-    csv_file = Path(args.csv_file)
+    csv_file = Path(args.csv_file) if args.csv_file.strip() else None
+    if csv_file is None or args.auto_latest:
+        found = _find_latest_decision_csv()
+        if found is None:
+            print("找不到可歸檔的 ai_decision_*.csv（已搜尋 inbox / ai_ready/latest / daily_refresh/latest）")
+            return
+        csv_file = found
+
     if not csv_file.exists():
         print(f"找不到 CSV: {csv_file}")
         return
@@ -144,6 +175,7 @@ def main() -> None:
     copy_daily_and_latest(csv_file, decision_date)
 
     print("\n=== AI 決策已記錄 ===")
+    print(f"來源 CSV: {csv_file}")
     print(f"主檔: {MASTER_LOG_FILE}")
     print(f"每日 CSV: {DAILY_AI_DIR / (decision_date + '_ai_decision.csv')}")
     print(f"最新 CSV: {LATEST_CSV_FILE}")

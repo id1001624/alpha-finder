@@ -45,11 +45,22 @@ echo [%date% %time%] Alpha Finder 每日掃描開始 >> "%LOG_FILE%"
 "%PYTHON_EXE%" main.py >> "%LOG_FILE%" 2>&1
 set "EXIT_CODE=%errorlevel%"
 
-if "%EXIT_CODE%" == "0" (
-    echo [%date% %time%] 掃描完成 OK >> "%LOG_FILE%"
-) else (
+if not "%EXIT_CODE%" == "0" (
     echo [%date% %time%] 掃描失敗，exit code: %EXIT_CODE% >> "%LOG_FILE%"
+    del /f /q "%LOCK_FILE%" > nul 2>&1
+    exit /b %EXIT_CODE%
 )
+
+echo [%date% %time%] 步驟：更新 XQ 歷史欄位開始 >> "%LOG_FILE%"
+"%PYTHON_EXE%" scripts\update_xq_with_history.py >> "%LOG_FILE%" 2>&1
+set "EXIT_CODE=%errorlevel%"
+if not "%EXIT_CODE%" == "0" (
+    echo [%date% %time%] 警示：XQ 更新失敗，改用 fallback 資料繼續 >> "%LOG_FILE%"
+    del /f /q "%LOCK_FILE%" > nul 2>&1
+    exit /b %EXIT_CODE%
+)
+
+echo [%date% %time%] 掃描完成 OK >> "%LOG_FILE%"
 
 del /f /q "%LOCK_FILE%" > nul 2>&1
 exit /b %EXIT_CODE%

@@ -85,6 +85,7 @@ from config import (
 )
 
 from signal_store import get_latest_signals
+from power_awake import keep_system_awake
 
 # Google Sheets 相關套件
 try:
@@ -2214,5 +2215,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with keep_system_awake():
+        main()
 

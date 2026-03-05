@@ -110,6 +110,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from power_awake import keep_system_awake
+
 try:
     from config import AI_READY_OUTPUT_ENABLED, AI_READY_OUTPUT_DIR
 except Exception:
@@ -926,4 +928,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with keep_system_awake():
+        main()

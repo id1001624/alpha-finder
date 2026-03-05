@@ -67,29 +67,7 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 - **`全量數據`** tab - 依設定輸出完整數據，供 AI 分析
 - **`YYYY-MM-DD`** tab - 當日三合一精選報告（起飛 Top 3 + 財報 Top 3 + 預測 Top 3）
 
-同時會在專案本地輸出（建議給 AI 讀取）：
-
-- `repo_outputs/daily_refresh/latest/ai_focus_list.csv`
-- `repo_outputs/daily_refresh/latest/fusion_top_daily.csv`
-- `repo_outputs/daily_refresh/latest/theme_heat_daily.csv`
-- `repo_outputs/daily_refresh/latest/theme_leaders_daily.csv`
-
-> 預設已停用「全量數據」上傳到 Google Sheets，避免 AI 雲端讀取誤差。
-
-### 5️⃣ 一次執行（建議每日流程）
-
-```bash
-python main.py
-python scripts/update_xq_with_history.py
-```
-
-若你只要更新單一 XQ 檔案：
-
-```bash
-python scripts/update_xq_with_history.py --file "你的檔名.csv"
-```
-
-接著把以下本地檔案餵給 AI：
+同時會在專案本地輸出（建議給 AI 直接讀 6 檔）：
 
 - `repo_outputs/ai_ready/latest/ai_focus_list.csv`
 - `repo_outputs/ai_ready/latest/fusion_top_daily.csv`
@@ -98,10 +76,64 @@ python scripts/update_xq_with_history.py --file "你的檔名.csv"
 - `repo_outputs/ai_ready/latest/theme_leaders_daily.csv`
 - `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
 
-說明：
+> 預設已停用「全量數據」上傳到 Google Sheets，避免 AI 雲端讀取誤差。
 
-- `python main.py` 會更新前 5 檔
-- `python scripts/update_xq_with_history.py` 會更新第 6 檔
+### 5️⃣ 一次執行（建議每日流程）
+
+```bash
+run_daily.bat
+```
+
+這個批次流程會自動完成：
+
+1. `python main.py`
+2. `python scripts/update_xq_with_history.py`
+
+你一天只要做 3 件事（固定不變）：
+
+1. （可選）先確認 TradingView webhook server 正在跑（要用 TV 指標時才需要）
+2. 執行 `run_daily.bat`
+3. 把 `repo_outputs/ai_ready/latest` 的 6 檔 CSV、Alpha-Sniper-Protocol-v8.md 一次餵給 AI，直接要最終結論
+
+補充（避免放錯檔案位置）：
+
+- `ai_focus_list.csv` 不用手動放，`run_daily.bat` 會自動更新在 `repo_outputs/ai_ready/latest/ai_focus_list.csv`
+- 網頁 AI 回傳的 `FILE: ai_decision_YYYY-MM-DD.csv`，請存到 `repo_outputs/backtest/inbox/`
+- 存好後執行：
+
+```bash
+python scripts/record_ai_decision.py --auto-latest
+```
+
+這樣會自動更新：
+
+- `repo_outputs/backtest/ai_decision_log.csv`（AI 決策歷史）
+- `repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.csv`（每日快照）
+- `repo_outputs/backtest/ai_decision_latest.csv`（最新一份）
+
+每週額外自動化（零人工）：
+
+```bash
+run_weekly_review.bat
+```
+
+會輸出：
+
+- `repo_outputs/backtest/weekly_reports/weekly_report_latest.md`（單一週報：Local / Local-Fusion / AI 三軌）
+- `repo_outputs/backtest/weekly_reports/weekly_trades_latest.csv`（Local 自動交易日誌）
+- `repo_outputs/backtest/weekly_reports/weekly_fusion_trades_latest.csv`（Local-Fusion 自動交易日誌）
+- `repo_outputs/backtest/weekly_reports/weekly_ai_trades_latest.csv`（AI 自動交易日誌）
+
+三個策略定義：
+
+- `Local`：只使用 `xq_pick_log.csv`
+- `Local-Fusion`：同日合併 `xq_pick_log + ai_focus_list`（同 ticker 去重後回測）
+- `AI`：使用 `ai_decision_log.csv`
+
+週報中的差值欄位說明：
+
+- `ai_minus_fusion_*`：AI - Local-Fusion（正值代表 AI 較佳）
+- `ai_fusion_drawdown_improve`：Local-Fusion 最大回撤 - AI 最大回撤（正值代表 AI 回撤較小）
 
 ### 5.1️⃣ 為什麼會生成很多 CSV？
 
@@ -114,7 +146,12 @@ python scripts/update_xq_with_history.py --file "你的檔名.csv"
 回測專用（不餵 AI）：
 
 - `repo_outputs/backtest/xq_pick_log.csv`（歷史累積主檔）
+- `repo_outputs/backtest/ai_decision_log.csv`（AI 決策歷史主檔）
 - `repo_outputs/backtest/daily_xq_picks/YYYY-MM-DD_xq_top_picks.csv`（每日快照）
+- `repo_outputs/backtest/weekly_reports/weekly_report_latest.md`（每週制度化評估，含三軌比較）
+- `repo_outputs/backtest/weekly_reports/weekly_trades_latest.csv`（每週 Local 交易日誌）
+- `repo_outputs/backtest/weekly_reports/weekly_fusion_trades_latest.csv`（每週 Local-Fusion 交易日誌）
+- `repo_outputs/backtest/weekly_reports/weekly_ai_trades_latest.csv`（每週 AI 交易日誌）
 
 盤前快檢（終端）：
 
@@ -134,22 +171,7 @@ python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 202
 python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 2026-03-01 --hold-days 1 --by-rank-report
 ```
 
-網頁 AI 產出紀錄（建議每日做）：
-
-1. 使用 `Alpha-Sniper-Protocol-v7.md` 要求 AI 至少輸出：
-	- `FILE: ai_decision_YYYY-MM-DD.csv`（必要）
-2. 把內容存到本地（建議資料夾：`repo_outputs/backtest/inbox/`）
-3. 執行歸檔：
-
-```bash
-python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv"
-```
-
-歸檔後會更新：
-
-- `repo_outputs/backtest/ai_decision_log.csv`（AI 決策歷史主檔）
-- `repo_outputs/backtest/daily_ai_decisions/YYYY-MM-DD_ai_decision.csv`
-- `repo_outputs/backtest/ai_decision_latest.csv`
+`run_daily.bat` 目前只負責產生 AI 所需 6 檔 CSV；AI 決策歸檔需另外執行 `record_ai_decision.py`。
 
 ---
 
@@ -196,6 +218,32 @@ python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_
 ```bash
 python -c "from signal_store import get_latest_signals; from datetime import datetime, timezone; print(get_latest_signals('signals.db', asof=datetime.now(timezone.utc), max_age_minutes=240))"
 ```
+
+### TradingView 指標快速自檢（建議先跑一次）
+
+1. 開 server（另一個終端）：
+
+```bash
+python server.py
+```
+
+2. 在 PowerShell 送一筆測試 webhook：
+
+```powershell
+$secret=$env:TV_WEBHOOK_SECRET; $payload=@{schema_version=1;source='tradingview';symbol='AVAV';exchange='NASDAQ';timeframe='1D';ts=(Get-Date).ToUniversalTime().ToString('o');close=150.12;vwap=149.5;sqz_on=$true;sqzmom_value=0.42;sqzmom_color='green';event='entry'} | ConvertTo-Json -Compress; Invoke-RestMethod -Uri 'http://127.0.0.1:8000/tv/webhook' -Method Post -ContentType 'application/json' -Headers @{'X-Webhook-Token'=$secret} -Body $payload
+```
+
+3. 確認資料入庫：
+
+```bash
+python -c "import sqlite3; conn=sqlite3.connect('signals.db'); cur=conn.cursor(); cur.execute('select count(*) from signals'); print(cur.fetchone()); cur.execute('select symbol, ts, received_at from signals order by received_at desc limit 1'); print(cur.fetchone()); conn.close()"
+```
+
+若 `signals` 仍是 0，優先檢查：
+
+- TradingView Alert URL 是否正確指向 `/tv/webhook`
+- `TV_WEBHOOK_SECRET` 是否與 TradingView Header 一致
+- server 是否真的在收外網請求（本機測試可過，但外網打不到）
 
 ---
 
@@ -357,10 +405,24 @@ python scripts/premarket_volume_check.py --symbols NVAX,FA --manual-premarket NV
 
 ### 2️⃣ Windows Task Scheduler 每日自動執行
 
-在 PowerShell 執行（設定每天早上 05:30，美股收盤約 1.5 小時後）：
+一鍵建立（推薦）：
+
+```bash
+setup_schtasks.bat
+```
+
+執行一次後就會註冊 Daily + Weekly 兩個工作；若你不想保留這個安裝器，可刪除 `setup_schtasks.bat`，不影響既有排程。
+
+在 PowerShell 執行（設定每天 13:00，確保電腦開啟時段）：
 
 ```powershell
-schtasks /create /tn "AlphaFinder_Daily" /tr "\"C:\Users\w6359\OneDrive\文件\alpha-finder\run_daily.bat\"" /sc daily /st 05:30 /ru SYSTEM /f
+schtasks /create /tn "AlphaFinder_Daily" /tr "\"C:\Users\w6359\OneDrive\文件\alpha-finder\run_daily.bat\"" /sc daily /st 13:00 /it /f
+```
+
+每週制度化評估（建議週日 16:00）：
+
+```powershell
+schtasks /create /tn "AlphaFinder_WeeklyReview" /tr "\"C:\Users\w6359\OneDrive\文件\alpha-finder\run_weekly_review.bat\"" /sc weekly /d SUN /st 16:00 /it /f
 ```
 
 執行結果記錄在 `run_log.txt`（同目錄）。

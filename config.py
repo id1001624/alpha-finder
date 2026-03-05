@@ -98,6 +98,14 @@ AI_READY_OUTPUT_ENABLED = True
 AI_READY_OUTPUT_DIR = "repo_outputs/ai_ready"
 AI_READY_KEEP_DAYS = 14
 
+# ============ 每週制度化評估輸出（零人工） ============
+WEEKLY_REPORT_ENABLED = os.getenv("WEEKLY_REPORT_ENABLED", "true").lower() == "true"
+WEEKLY_REPORT_OUTPUT_DIR = os.getenv("WEEKLY_REPORT_OUTPUT_DIR", "repo_outputs/backtest/weekly_reports")
+WEEKLY_REPORT_LOOKBACK_DAYS = int(os.getenv("WEEKLY_REPORT_LOOKBACK_DAYS", "7"))
+WEEKLY_REPORT_HOLD_DAYS = int(os.getenv("WEEKLY_REPORT_HOLD_DAYS", "1"))
+WEEKLY_REPORT_MAX_RANK = int(os.getenv("WEEKLY_REPORT_MAX_RANK", "10"))
+WEEKLY_REPORT_MAX_SYMBOLS = int(os.getenv("WEEKLY_REPORT_MAX_SYMBOLS", "80"))
+
 # ============ API金鑰設定 ============
 # Finnhub 免費 API (60 call/min) - 財報日期 + 分析師目標價
 # 註冊: https://finnhub.io/register
