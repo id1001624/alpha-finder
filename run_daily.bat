@@ -60,6 +60,13 @@ if not "%EXIT_CODE%" == "0" (
     exit /b %EXIT_CODE%
 )
 
+echo [%date% %time%] 步驟：建立 AI Trading 資料集開始 >> "%LOG_FILE%"
+"%PYTHON_EXE%" scripts\build_ai_trading_dataset.py >> "%LOG_FILE%" 2>&1
+set "PIPE_EXIT_CODE=%errorlevel%"
+if not "%PIPE_EXIT_CODE%" == "0" (
+    echo [%date% %time%] 警示：AI Trading 資料集建立失敗（不中斷主流程） >> "%LOG_FILE%"
+)
+
 echo [%date% %time%] 掃描完成 OK >> "%LOG_FILE%"
 
 del /f /q "%LOCK_FILE%" > nul 2>&1

@@ -117,6 +117,85 @@ LOTTERY_MIN_GAIN = 10.0        # 單日漲幅 >10%
 LOTTERY_MIN_REL_VOL = 3.0      # 量能倍數 >3
 LOTTERY_MAX_MCAP = 50_000_000_000  # 市值 <$50B
 
+# ============ 妖股雷達設定 (Monster Radar) ============
+MONSTER_RADAR_ENABLED = os.getenv("MONSTER_RADAR_ENABLED", "true").lower() == "true"
+MONSTER_TOP_K = int(os.getenv("MONSTER_TOP_K", "12"))
+MONSTER_MIN_GAIN = float(os.getenv("MONSTER_MIN_GAIN", "4.0"))
+MONSTER_MIN_REL_VOL = float(os.getenv("MONSTER_MIN_REL_VOL", "1.8"))
+MONSTER_MIN_PRICE = float(os.getenv("MONSTER_MIN_PRICE", "1.0"))
+MONSTER_MAX_MCAP = int(os.getenv("MONSTER_MAX_MCAP", "30000000000"))
+MONSTER_SCORE_300 = float(os.getenv("MONSTER_SCORE_300", "28"))
+MONSTER_SCORE_500 = float(os.getenv("MONSTER_SCORE_500", "34"))
+MONSTER_SCORE_1000 = float(os.getenv("MONSTER_SCORE_1000", "42"))
+MONSTER_USE_SIGNAL_BOOST = os.getenv("MONSTER_USE_SIGNAL_BOOST", "true").lower() == "true"
+
+# ============ AI Trading 排名引擎設定 ============
+AI_RANK_TOP_K = int(os.getenv("AI_RANK_TOP_K", "80"))
+AI_RANK_BASE_WEIGHT = float(os.getenv("AI_RANK_BASE_WEIGHT", "0.42"))
+AI_RANK_FEATURE_WEIGHT = float(os.getenv("AI_RANK_FEATURE_WEIGHT", "0.28"))
+AI_RANK_RADAR_WEIGHT = float(os.getenv("AI_RANK_RADAR_WEIGHT", "0.20"))
+AI_RANK_EVENT_WEIGHT = float(os.getenv("AI_RANK_EVENT_WEIGHT", "0.10"))
+AI_RANK_MONSTER_BONUS_WEIGHT = float(os.getenv("AI_RANK_MONSTER_BONUS_WEIGHT", "0.08"))
+AI_RANK_FOCUS_BONUS = float(os.getenv("AI_RANK_FOCUS_BONUS", "1.5"))
+AI_RANK_FUSION_BONUS = float(os.getenv("AI_RANK_FUSION_BONUS", "1.0"))
+
+# Regime 判斷（強勢股佔比）
+AI_RANK_REGIME_BULL_MIN_BREADTH = float(os.getenv("AI_RANK_REGIME_BULL_MIN_BREADTH", "0.22"))
+AI_RANK_REGIME_BEAR_MAX_BREADTH = float(os.getenv("AI_RANK_REGIME_BEAR_MAX_BREADTH", "0.10"))
+
+# Regime 權重倍率
+AI_RANK_BULL_BASE_MULT = float(os.getenv("AI_RANK_BULL_BASE_MULT", "1.15"))
+AI_RANK_BULL_FEATURE_MULT = float(os.getenv("AI_RANK_BULL_FEATURE_MULT", "1.10"))
+AI_RANK_BULL_RADAR_MULT = float(os.getenv("AI_RANK_BULL_RADAR_MULT", "0.90"))
+AI_RANK_BULL_EVENT_MULT = float(os.getenv("AI_RANK_BULL_EVENT_MULT", "0.85"))
+
+AI_RANK_BEAR_BASE_MULT = float(os.getenv("AI_RANK_BEAR_BASE_MULT", "0.80"))
+AI_RANK_BEAR_FEATURE_MULT = float(os.getenv("AI_RANK_BEAR_FEATURE_MULT", "0.90"))
+AI_RANK_BEAR_RADAR_MULT = float(os.getenv("AI_RANK_BEAR_RADAR_MULT", "1.15"))
+AI_RANK_BEAR_EVENT_MULT = float(os.getenv("AI_RANK_BEAR_EVENT_MULT", "1.25"))
+
+# Tier 門檻
+AI_RANK_TIER_A_MIN = float(os.getenv("AI_RANK_TIER_A_MIN", "42.0"))
+AI_RANK_TIER_B_MIN = float(os.getenv("AI_RANK_TIER_B_MIN", "30.0"))
+
+# ============ AI Trading 決策風險層設定 ============
+AI_DECISION_TOP_K = int(os.getenv("AI_DECISION_TOP_K", "80"))
+AI_DECISION_KEEP_MIN_SCORE = float(os.getenv("AI_DECISION_KEEP_MIN_SCORE", "42.0"))
+AI_DECISION_WATCH_MIN_SCORE = float(os.getenv("AI_DECISION_WATCH_MIN_SCORE", "30.0"))
+AI_DECISION_MAX_KEEP_RISK_SCORE = float(os.getenv("AI_DECISION_MAX_KEEP_RISK_SCORE", "3.2"))
+
+AI_DECISION_ENTRY_MIN_GAIN = float(os.getenv("AI_DECISION_ENTRY_MIN_GAIN", "2.0"))
+AI_DECISION_ENTRY_MAX_GAIN = float(os.getenv("AI_DECISION_ENTRY_MAX_GAIN", "8.0"))
+AI_DECISION_STRONG_VOL = float(os.getenv("AI_DECISION_STRONG_VOL", "1.8"))
+AI_DECISION_LOW_VOL = float(os.getenv("AI_DECISION_LOW_VOL", "1.3"))
+AI_DECISION_OVERHEAT_GAIN = float(os.getenv("AI_DECISION_OVERHEAT_GAIN", "12.0"))
+
+# ============ AI Catalyst Detector（Tavily + Gemini Flash）===========
+AI_RESEARCH_MODE = os.getenv("AI_RESEARCH_MODE", "web").lower()  # web | api
+CATALYST_DETECTOR_ENABLED = os.getenv("CATALYST_DETECTOR_ENABLED", "false").lower() == "true"
+CATALYST_TOP_K = int(os.getenv("CATALYST_TOP_K", "12"))
+CATALYST_TAVILY_MAX_RESULTS = int(os.getenv("CATALYST_TAVILY_MAX_RESULTS", "4"))
+CATALYST_HTTP_TIMEOUT_SEC = float(os.getenv("CATALYST_HTTP_TIMEOUT_SEC", "15.0"))
+
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# ============ Scanner Profile（條件組）===========
+SCANNER_PROFILE = os.getenv("SCANNER_PROFILE", "balanced").lower()  # balanced | monster_v1
+
+# monster_v1（偏妖股掃描）
+SCANNER_MONSTER_PRICE_MIN = float(os.getenv("SCANNER_MONSTER_PRICE_MIN", "2.0"))
+SCANNER_MONSTER_PRICE_MAX = float(os.getenv("SCANNER_MONSTER_PRICE_MAX", "20.0"))
+SCANNER_MONSTER_MCAP_MAX = float(os.getenv("SCANNER_MONSTER_MCAP_MAX", "2000000000"))
+SCANNER_MONSTER_RELVOL_MIN = float(os.getenv("SCANNER_MONSTER_RELVOL_MIN", "3.0"))
+SCANNER_MONSTER_DAY_CHANGE_MIN = float(os.getenv("SCANNER_MONSTER_DAY_CHANGE_MIN", "5.0"))
+SCANNER_MONSTER_DOLLAR_VOL_M_MIN = float(os.getenv("SCANNER_MONSTER_DOLLAR_VOL_M_MIN", "10.0"))
+SCANNER_MONSTER_FLOAT_TIGHTNESS_MIN = float(os.getenv("SCANNER_MONSTER_FLOAT_TIGHTNESS_MIN", "6.0"))
+SCANNER_MONSTER_FLOAT_ROTATION_MIN = float(os.getenv("SCANNER_MONSTER_FLOAT_ROTATION_MIN", "0.03"))
+SCANNER_MONSTER_KEEP_MIN_SCORE = float(os.getenv("SCANNER_MONSTER_KEEP_MIN_SCORE", "34.0"))
+SCANNER_MONSTER_WATCH_MIN_SCORE = float(os.getenv("SCANNER_MONSTER_WATCH_MIN_SCORE", "22.0"))
+
 # ============ A/B/C 評級設定 ============
 # A 級條件
 GRADE_A_UPSIDE = 30.0          # 上漲空間 >30%

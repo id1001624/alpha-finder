@@ -75,6 +75,9 @@ from config import (
     # 新增配置
     FINNHUB_API_KEY,
     LOTTERY_MIN_GAIN, LOTTERY_MIN_REL_VOL, LOTTERY_MAX_MCAP,
+    MONSTER_RADAR_ENABLED, MONSTER_TOP_K, MONSTER_MIN_GAIN, MONSTER_MIN_REL_VOL,
+    MONSTER_MIN_PRICE, MONSTER_MAX_MCAP, MONSTER_SCORE_300, MONSTER_SCORE_500,
+    MONSTER_SCORE_1000, MONSTER_USE_SIGNAL_BOOST,
     GRADE_A_UPSIDE, GRADE_A_ANALYSTS, GRADE_A_SECTORS,
     GRADE_B_UPSIDE, GRADE_B_7D_GAIN,
     USE_TRADINGVIEW_SIGNALS, SIGNAL_STORE_PATH, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY,
@@ -1722,9 +1725,193 @@ def filter_track_f_lottery(df: pd.DataFrame, signals_available: bool) -> pd.Data
     return output
 
 
+def _monster_stage_label(daily_change: float, rel_volume: float, perf_week: float) -> str:
+    if daily_change > 15 and rel_volume < 1.5:
+        return '過熱'
+    if perf_week > 25 and daily_change < 0:
+        return '回檔'
+    if rel_volume >= 3.0 and daily_change >= 3:
+        return '啟動'
+    return '擴散'
+
+
+def _monster_potential_tier(monster_score: float) -> str:
+    if monster_score >= MONSTER_SCORE_1000:
+        return '1000%觀察'
+    if monster_score >= MONSTER_SCORE_500:
+        return '500%觀察'
+    if monster_score >= MONSTER_SCORE_300:
+        return '300%觀察'
+    return '高波動觀察'
+
+
+def _monster_next_day_bias(monster_score: float) -> str:
+    if monster_score >= MONSTER_SCORE_1000:
+        return '偏多(高波動)'
+    if monster_score >= MONSTER_SCORE_500:
+        return '偏多'
+    if monster_score >= MONSTER_SCORE_300:
+        return '中性偏多'
+    return '中性'
+
+
+def build_monster_radar(df: pd.DataFrame, signals_available: bool) -> pd.DataFrame:
+    """
+    妖股雷達 v1（不做自動下單）
+    目標：從高動能 + 放量 + 中小市值 + 催化條件中，提早挑出高爆發候選。
+    """
+    print("[步驟 3/4] 建立妖股雷達（Monster Radar）...")
+
+    if not MONSTER_RADAR_ENABLED:
+        print("  [*] MONSTER_RADAR_ENABLED=false，跳過\n")
+        return pd.DataFrame()
+
+    if df is None or len(df) == 0:
+        print("  [!] 輸入資料為空，跳過\n")
+        return pd.DataFrame()
+
+    ranked = df.copy()
+
+    for col in ['Daily_Change', 'Rel_Volume', 'Perf_Week', 'Market_Cap_Raw', 'Price', 'Upside_Pct', 'Num_Analysts']:
+        if col not in ranked.columns:
+            ranked[col] = 0
+
+    ranked['Daily_Change'] = pd.to_numeric(ranked['Daily_Change'], errors='coerce').fillna(0)
+    ranked['Rel_Volume'] = pd.to_numeric(ranked['Rel_Volume'], errors='coerce').fillna(0)
+    ranked['Perf_Week'] = pd.to_numeric(ranked['Perf_Week'], errors='coerce').fillna(0)
+    ranked['Market_Cap_Raw'] = pd.to_numeric(ranked['Market_Cap_Raw'], errors='coerce').fillna(0)
+    ranked['Price'] = pd.to_numeric(ranked['Price'], errors='coerce').fillna(0)
+    ranked['Upside_Pct'] = pd.to_numeric(ranked['Upside_Pct'], errors='coerce').fillna(0)
+    ranked['Num_Analysts'] = pd.to_numeric(ranked['Num_Analysts'], errors='coerce').fillna(0)
+
+    if 'Priority_Sector' not in ranked.columns or 'Rating' not in ranked.columns:
+        ranked = _apply_sector_classification(ranked)
+
+    base_mask = (
+        (ranked['Daily_Change'] >= MONSTER_MIN_GAIN) &
+        (ranked['Rel_Volume'] >= MONSTER_MIN_REL_VOL) &
+        (ranked['Price'] >= MONSTER_MIN_PRICE) &
+        (ranked['Market_Cap_Raw'] > 0) &
+        (ranked['Market_Cap_Raw'] <= MONSTER_MAX_MCAP)
+    )
+    filtered = ranked[base_mask].copy()
+
+    if len(filtered) == 0:
+        print("  [!] 目前無符合妖股雷達門檻的標的\n")
+        return pd.DataFrame()
+
+    rel_excess = (filtered['Rel_Volume'] - 1.0).clip(lower=0)
+    filtered['monster_momentum_score'] = (
+        filtered['Daily_Change'].clip(lower=0, upper=20) * 1.2 +
+        rel_excess.clip(upper=5) * 5.0 +
+        filtered['Perf_Week'].clip(lower=-10, upper=35) * 0.6
+    )
+
+    mcap = filtered['Market_Cap_Raw']
+    filtered['monster_size_score'] = 1.0
+    filtered.loc[mcap <= 20_000_000_000, 'monster_size_score'] = 4.0
+    filtered.loc[mcap <= 10_000_000_000, 'monster_size_score'] = 6.0
+    filtered.loc[mcap <= 5_000_000_000, 'monster_size_score'] = 8.0
+    filtered.loc[mcap <= 2_000_000_000, 'monster_size_score'] = 10.0
+
+    filtered['monster_catalyst_score'] = 0.0
+    if 'Days_To_Earnings' in filtered.columns and 'Earnings_Status' in filtered.columns:
+        dte = pd.to_numeric(filtered['Days_To_Earnings'], errors='coerce')
+        earnings_status = filtered['Earnings_Status'].fillna('').astype(str).str.lower()
+        filtered.loc[(earnings_status == 'upcoming') & dte.le(7), 'monster_catalyst_score'] += 4.0
+        filtered.loc[(earnings_status == 'upcoming') & dte.gt(7) & dte.le(14), 'monster_catalyst_score'] += 2.0
+
+    filtered.loc[filtered['Upside_Pct'] >= 40, 'monster_catalyst_score'] += 4.0
+    filtered.loc[(filtered['Upside_Pct'] >= 20) & (filtered['Upside_Pct'] < 40), 'monster_catalyst_score'] += 2.0
+    filtered.loc[(filtered['Num_Analysts'] >= 3) & (filtered['Num_Analysts'] <= 15), 'monster_catalyst_score'] += 2.0
+    filtered.loc[(filtered['Num_Analysts'] > 0) & (filtered['Num_Analysts'] < 3), 'monster_catalyst_score'] += 1.0
+
+    filtered['monster_signal_score'] = 0.0
+    if MONSTER_USE_SIGNAL_BOOST and signals_available:
+        if 'TV_Signal_Fresh' in filtered.columns:
+            filtered.loc[filtered['TV_Signal_Fresh'] == True, 'monster_signal_score'] += 2.0
+        if 'TV_SQZ_On' in filtered.columns:
+            filtered.loc[filtered['TV_SQZ_On'] == True, 'monster_signal_score'] += 2.0
+        if 'TV_SQZMOM_Color' in filtered.columns:
+            sqz_color = filtered['TV_SQZMOM_Color'].fillna('').astype(str).str.lower()
+            filtered.loc[sqz_color.isin(['green', 'lime']), 'monster_signal_score'] += 2.0
+        if 'TV_VWAP' in filtered.columns:
+            vwap = pd.to_numeric(filtered['TV_VWAP'], errors='coerce')
+            filtered.loc[filtered['Price'] >= vwap, 'monster_signal_score'] += 1.0
+
+    filtered['monster_risk_penalty'] = 0.0
+    filtered.loc[(filtered['Daily_Change'] > 15) & (filtered['Rel_Volume'] < 1.5), 'monster_risk_penalty'] += 8.0
+    filtered.loc[(filtered['Perf_Week'] > 25) & (filtered['Daily_Change'] < 0), 'monster_risk_penalty'] += 5.0
+    filtered.loc[filtered['Rel_Volume'] < 1.2, 'monster_risk_penalty'] += 3.0
+
+    filtered['Monster_Score'] = (
+        filtered['monster_momentum_score'] +
+        filtered['monster_size_score'] +
+        filtered['monster_catalyst_score'] +
+        filtered['monster_signal_score'] -
+        filtered['monster_risk_penalty']
+    ).round(2)
+
+    filtered['Potential_Tier'] = filtered['Monster_Score'].apply(_monster_potential_tier)
+    filtered['Next_Day_Bias'] = filtered['Monster_Score'].apply(_monster_next_day_bias)
+    filtered['Stage'] = filtered.apply(
+        lambda r: _monster_stage_label(
+            float(r.get('Daily_Change', 0) or 0),
+            float(r.get('Rel_Volume', 0) or 0),
+            float(r.get('Perf_Week', 0) or 0),
+        ),
+        axis=1,
+    )
+    filtered['Reason'] = filtered.apply(
+        lambda r: (
+            f"漲幅{float(r.get('Daily_Change', 0) or 0):.1f}%/量能{float(r.get('Rel_Volume', 0) or 0):.1f}x"
+            f"；週動能{float(r.get('Perf_Week', 0) or 0):.1f}%"
+            f"；潛力={r.get('Potential_Tier', '')}"
+        ),
+        axis=1,
+    )
+
+    filtered = filtered.sort_values(
+        ['Monster_Score', 'Rel_Volume', 'Daily_Change', 'Ticker'],
+        ascending=[False, False, False, True],
+    )
+
+    cols_map = {
+        'Ticker': '股票代碼',
+        'Monster_Score': '妖股分數',
+        'Potential_Tier': '潛力等級',
+        'Stage': '型態階段',
+        'Next_Day_Bias': '明日偏向',
+        'Daily_Change': '今日漲幅%',
+        'Perf_Week': '週漲幅%',
+        'Rel_Volume': '量能倍數',
+        'Market_Cap': '市值',
+        'Price': '股價',
+        'Upside_Pct': '預測上行%',
+        'Num_Analysts': '分析師數',
+        'Earnings_Status': '財報狀態',
+        'Days_To_Earnings': '距離財報天數',
+        'Priority_Sector': '產業',
+        'Rating': '評級',
+        'Reason': '理由摘要',
+        'TV_VWAP': 'vwap',
+        'TV_SQZ_On': 'sqz_on',
+        'TV_SQZMOM_Color': 'sqzmom_color',
+        'TV_SQZMOM_Value': 'sqzmom_value',
+        'TV_Signal_Age_Min': 'signal_age',
+    }
+    available = {k: v for k, v in cols_map.items() if k in filtered.columns}
+    output = filtered[list(available.keys())].head(MONSTER_TOP_K).copy()
+    output.columns = list(available.values())
+    output = _finalize_signal_columns(output)
+
+    print(f"  [OK] 妖股雷達輸出 {len(output)} 檔（Top {MONSTER_TOP_K}）\n")
+    return output
+
+
 
 def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet2b: pd.DataFrame,
-                    sheet3: pd.DataFrame, sheet4: pd.DataFrame,
+                    sheet3: pd.DataFrame, sheet4: pd.DataFrame, monster_radar: pd.DataFrame,
                     tv_need_list: pd.DataFrame = None):
     """顯示掃描結果摘要"""
     print("\n" + "=" * 70)
@@ -1778,6 +1965,19 @@ def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet2b: pd.Data
             print(f"  {i}. {row[col_ticker]} - 漲幅 {change_val:.1f}% | 量能 {vol_val:.1f}x | vwap {row.get('vwap', 'NA')} | sqz_on {row.get('sqz_on', 'NA')} | sqzmom {row.get('sqzmom_color', 'NA')}/{row.get('sqzmom_value', 'NA')} | age {row.get('signal_age', 'NA')}")
     else:
         print("  無符合條件的股票（需有效 TradingView 訊號）")
+
+    monster_show_n = min(5, len(monster_radar)) if monster_radar is not None else 0
+    print(f"\n>> 妖股雷達 Top {monster_show_n}")
+    if monster_radar is not None and len(monster_radar) > 0:
+        for i, (_, row) in enumerate(monster_radar.head(5).iterrows(), 1):
+            print(
+                f"  {i}. {row.get('股票代碼', 'N/A')} - 分數 {row.get('妖股分數', 0):.1f}"
+                f" | 潛力 {row.get('潛力等級', 'N/A')}"
+                f" | 漲幅 {row.get('今日漲幅%', 0):.1f}%"
+                f" | 量能 {row.get('量能倍數', 0):.1f}x"
+            )
+    else:
+        print("  無符合條件的股票")
 
     print(f"\n>> TV 指標需求清單")
     if tv_need_list is not None and len(tv_need_list) > 0:
@@ -1935,6 +2135,85 @@ def _cleanup_local_output_history(base_dir: Path, keep_days: int) -> None:
             shutil.rmtree(child, ignore_errors=True)
 
 
+def _build_ai_ready_bundle_excel(ai_run_dir: Path) -> Optional[str]:
+    sheet_map = [
+        ('ai_focus_list.csv', 'ai_focus_list'),
+        ('fusion_top_daily.csv', 'fusion_top_daily'),
+        ('monster_radar_daily.csv', 'monster_radar_daily'),
+        ('raw_market_daily.csv', 'raw_market_daily'),
+        ('theme_heat_daily.csv', 'theme_heat_daily'),
+        ('theme_leaders_daily.csv', 'theme_leaders_daily'),
+        ('xq_short_term_updated.csv', 'xq_short_term_updated'),
+    ]
+
+    existing = [(csv_name, sheet_name) for csv_name, sheet_name in sheet_map if (ai_run_dir / csv_name).exists()]
+    if len(existing) == 0:
+        return None
+
+    bundle_path = ai_run_dir / 'ai_ready_bundle.xlsx'
+    temp_path = ai_run_dir / 'ai_ready_bundle.tmp.xlsx'
+
+    try:
+        with pd.ExcelWriter(
+            temp_path,
+            engine='xlsxwriter',
+            engine_kwargs={'options': {'strings_to_urls': False}},
+        ) as writer:
+            for csv_name, sheet_name in existing:
+                csv_path = ai_run_dir / csv_name
+                try:
+                    df = pd.read_csv(csv_path, encoding='utf-8-sig')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(csv_path)
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        os.replace(temp_path, bundle_path)
+    except (ModuleNotFoundError, ImportError, OSError, PermissionError, ValueError):
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        return None
+
+    return bundle_path.name
+
+
+def _sync_ai_ready_latest(ai_run_dir: Path, latest_dir: Path) -> None:
+    latest_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in ai_run_dir.iterdir():
+        if not src.is_file():
+            continue
+
+        dst = latest_dir / src.name
+        temp_dst = latest_dir / f"{src.stem}.tmp{src.suffix}"
+
+        try:
+            shutil.copy2(src, temp_dst)
+            os.replace(temp_dst, dst)
+        except PermissionError:
+            if temp_dst.exists():
+                try:
+                    temp_dst.unlink()
+                except OSError:
+                    pass
+
+            fallback_name = f"{src.stem}_{datetime.now().strftime('%H%M%S')}{src.suffix}"
+            fallback_dst = latest_dir / fallback_name
+            try:
+                shutil.copy2(src, fallback_dst)
+                print(f"[AI_READY] 目標檔被占用，已輸出備援檔：{fallback_dst.name}")
+            except OSError:
+                pass
+        except OSError:
+            if temp_dst.exists():
+                try:
+                    temp_dst.unlink()
+                except OSError:
+                    pass
+
+
 def _export_ai_ready_quick_pack(run_dir: Path, date_str: str, run_stamp: str) -> Optional[Path]:
     if not AI_READY_OUTPUT_ENABLED:
         return None
@@ -1946,6 +2225,7 @@ def _export_ai_ready_quick_pack(run_dir: Path, date_str: str, run_stamp: str) ->
     quick_files = [
         'ai_focus_list.csv',
         'fusion_top_daily.csv',
+        'monster_radar_daily.csv',
         'raw_market_daily.csv',
         'theme_heat_daily.csv',
         'theme_leaders_daily.csv',
@@ -1963,18 +2243,21 @@ def _export_ai_ready_quick_pack(run_dir: Path, date_str: str, run_stamp: str) ->
         shutil.copy2(previous_xq_file, ai_run_dir / 'xq_short_term_updated.csv')
         copied_files.append('xq_short_term_updated.csv')
 
+    bundle_file = _build_ai_ready_bundle_excel(ai_run_dir)
+    if bundle_file is not None:
+        copied_files.append(bundle_file)
+
     manifest = {
         'scan_date': date_str,
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'files': copied_files,
-        'notes': '給 AI 的固定入口。前 5 檔由 main.py 產生，第 6 檔 xq_short_term_updated.csv 由 update_xq_with_history.py 更新。',
+        'notes': '給 AI 的固定入口。優先上傳 ai_ready_bundle.xlsx（單檔多 sheet）；CSV 檔保留相容用途。',
     }
     with open(ai_run_dir / 'README_ai_quick_pack.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     latest_dir = ai_base_dir / 'latest'
-    latest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(ai_run_dir, latest_dir, dirs_exist_ok=True)
+    _sync_ai_ready_latest(ai_run_dir, latest_dir)
 
     _cleanup_local_output_history(ai_base_dir, AI_READY_KEEP_DAYS)
     return ai_run_dir
@@ -1987,6 +2270,7 @@ def export_daily_local_outputs(
     sheet2b: pd.DataFrame,
     sheet3: pd.DataFrame,
     sheet4: pd.DataFrame,
+    monster_radar: pd.DataFrame,
     tv_need_list: pd.DataFrame,
 ) -> Optional[Path]:
     if not LOCAL_OUTPUT_ENABLED:
@@ -2014,6 +2298,7 @@ def export_daily_local_outputs(
     _write_csv_local(sheet2b, run_dir / 'shortlist_earnings_post.csv')
     _write_csv_local(sheet3, run_dir / 'shortlist_analyst.csv')
     _write_csv_local(sheet4, run_dir / 'shortlist_track_f.csv')
+    _write_csv_local(monster_radar, run_dir / 'monster_radar_daily.csv')
     _write_csv_local(tv_need_list, run_dir / 'tv_need_list.csv')
 
     helper = GoogleSheetsUploader()
@@ -2027,6 +2312,7 @@ def export_daily_local_outputs(
 
     ai_focus_rows = []
     source_map = [
+        ('monster_radar', monster_radar),
         ('launch', sheet1),
         ('earnings_pre', sheet2),
         ('earnings_post', sheet2b),
@@ -2061,6 +2347,7 @@ def export_daily_local_outputs(
             'shortlist_earnings_post.csv',
             'shortlist_analyst.csv',
             'shortlist_track_f.csv',
+            'monster_radar_daily.csv',
             'tv_need_list.csv',
             'fusion_top_daily.csv',
             'theme_heat_daily.csv',
@@ -2078,7 +2365,7 @@ def export_daily_local_outputs(
 
     ai_quick_dir = _export_ai_ready_quick_pack(run_dir, date_str, run_stamp)
     if ai_quick_dir is not None:
-        print(f"[步驟 3.8] AI 五檔快捷輸出：{Path(AI_READY_OUTPUT_DIR) / 'latest'}")
+        print(f"[步驟 3.8] AI 單檔整包輸出：{Path(AI_READY_OUTPUT_DIR) / 'latest' / 'ai_ready_bundle.xlsx'}")
 
     _cleanup_local_output_history(base_dir, LOCAL_OUTPUT_KEEP_DAYS)
     return run_dir
@@ -2146,6 +2433,7 @@ def main():
         sheet2b = filter_sheet2b_post_earnings(df_enriched)
         sheet3 = filter_sheet3_analyst(df_enriched, target_changes=target_changes)
         sheet4 = filter_track_f_lottery(df_enriched, signals_available=signals_available)
+        monster_radar = build_monster_radar(df_enriched, signals_available=signals_available)
 
         # 步驟 3.5: TV 指標需求清單（最多 TV_LIST_LIMIT 檔）
         df_enriched, tv_need_list = _build_tv_demand_list(
@@ -2156,7 +2444,7 @@ def main():
         )
 
         # 顯示摘要（terminal 確認用）
-        display_summary(sheet1, sheet2, sheet2b, sheet3, sheet4, tv_need_list=tv_need_list)
+        display_summary(sheet1, sheet2, sheet2b, sheet3, sheet4, monster_radar, tv_need_list=tv_need_list)
 
         # 步驟 3.8: 本地每日輸出（給 AI 讀取，避免雲端同步誤差）
         local_output_dir = export_daily_local_outputs(
@@ -2166,6 +2454,7 @@ def main():
             sheet2b,
             sheet3,
             sheet4,
+            monster_radar,
             tv_need_list,
         )
         if local_output_dir is not None:

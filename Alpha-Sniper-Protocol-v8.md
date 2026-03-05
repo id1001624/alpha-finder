@@ -1,4 +1,4 @@
-# Alpha Sniper 每日綜合分析 Prompt（v8.1｜Stable Decision Mode）
+# Alpha Sniper 每日綜合分析 Prompt（v8.2｜Stable Decision Mode + Monster Radar）
 
 ## 0) 身份
 
@@ -25,16 +25,30 @@
 
 ### B) Repo 每日輸出（必要，請直接上傳）
 
+優先上傳單一整包檔：
+
+- `ai_ready_bundle.xlsx`（建議；單檔多 sheet）
+
+`ai_ready_bundle.xlsx` 的 sheet 對應如下：
+
+- `ai_focus_list`（= `ai_focus_list.csv`）
+- `fusion_top_daily`（= `fusion_top_daily.csv`）
+- `monster_radar_daily`（= `monster_radar_daily.csv`）
+- `theme_heat_daily`（= `theme_heat_daily.csv`）
+- `theme_leaders_daily`（= `theme_leaders_daily.csv`）
+- `raw_market_daily`（= `raw_market_daily.csv`）
+- `xq_short_term_updated`（= `xq_short_term_updated.csv`）
+
+若你是分檔上傳（相容模式），可改傳：
+
 - `ai_focus_list.csv`（AI 優先查核名單）
 - `fusion_top_daily.csv`（多軌合併名單）
+- `monster_radar_daily.csv`（妖股雷達候選，含 300%/500%/1000% 觀察標籤）
 - `theme_heat_daily.csv`（題材熱度）
 - `theme_leaders_daily.csv`（題材領頭羊）
-
-可選但強烈建議：
-
 - `raw_market_daily.csv`（中長期 `core_score` 主要來源）
 
-若未提供 `raw_market_daily.csv`：
+若未提供 `raw_market_daily`（sheet 或 CSV）：
 
 - 僅允許對「中長期候選 Top 5」啟用 Web 補欄（見第 5.3）。
 
@@ -82,7 +96,7 @@
 
 ### 5.3 中長期品質 `core_score`（2~8 週參考）
 
-- 優先來源：`raw_market_daily.csv`
+- 優先來源：`raw_market_daily`（sheet）或 `raw_market_daily.csv`
     - `Upside_Pct`, `Num_Analysts`, `Earnings_Status`
 - 計算（缺值保留分，避免資料稀少被誤殺）：
     - `upside_component = min(max(Upside_Pct,0),120)*0.35`，若 `Upside_Pct` 缺失或 <=0，改給 `15`
@@ -93,7 +107,7 @@
     - `chg_1d_pct > 12` 且 `vol_strength < 1.3`：`reversal_penalty = 10`
     - `chg_5d_pct > 25` 且 `chg_1d_pct < 0`：`reversal_penalty = max(reversal_penalty, 5)`
 
-若 `raw_market_daily.csv` 缺失（或欄位不足）：
+若 `raw_market_daily`（sheet 或 CSV）缺失（或欄位不足）：
 
 - 只對中長期候選 Top 5 補欄：`Upside_Pct`, `Num_Analysts`, `Earnings_Status`
 - 每檔至少 2 個來源；不足 2 個來源時標註 `資料不足`
@@ -149,10 +163,11 @@
 
 ### 7.1 必查
 
-1. `ai_focus_list.csv` 前 5 檔
-2. 題材前 3 的領頭羊（每題材 1 檔）
-3. 近期財報標的（D<=3）的財報日期與共識一致性
-4. 若缺 `raw_market_daily.csv`：中長期候選 Top 5 的補欄資料
+1. `ai_focus_list`（sheet 或 CSV）前 5 檔
+2. `monster_radar_daily`（sheet 或 CSV）前 5 檔
+3. 題材前 3 的領頭羊（每題材 1 檔）
+4. 近期財報標的（D<=3）的財報日期與共識一致性
+5. 若缺 `raw_market_daily`（sheet 或 CSV）：中長期候選 Top 5 的補欄資料
 
 每檔至少 2 個來源；來源矛盾需標註 `來源矛盾`，但不可直接刪除。
 
@@ -199,7 +214,7 @@
 | 題材 | theme_heat_score | 候選數 | 領頭羊 | 催化驗證狀態 |
 
 ### (6) AI 查核清單
-輸出 `ticker -> ai_query_hint` 前 10 檔（優先 `ai_focus_list.csv`）。
+輸出 `ticker -> ai_query_hint` 前 10 檔（優先 `monster_radar_daily` + `ai_focus_list`，其次 `ai_focus_list` sheet 或 `ai_focus_list.csv`）。
 
 ### (7) 檔案化輸出（必做）
 
@@ -218,7 +233,7 @@ CSV 第一行標頭固定：
 - `decision_tag` 僅可填：`keep` / `watch` / `replace_candidate`
 - `tech_status` 在無 VWAP/SQZMOM 時只能填：`需技術驗證`
 - `reason_summary` 必須含：明日/後日判斷 + 建議動作 + 失效條件
-- `source_ref` 需標註主要來源（例如：`ai_focus_list.csv;theme_heat_daily.csv`）
+- `source_ref` 需標註主要來源（例如：`ai_focus_list;theme_heat_daily` 或 `ai_focus_list.csv;theme_heat_daily.csv`）
 - `decision_tag` 必須依第 5.5 節規則產生，不可主觀指定
 
 輸出順序（必須）：
@@ -231,7 +246,7 @@ CSV 第一行標頭固定：
 - 禁止只用新聞情緒覆蓋數據排序
 - 禁止不給「今日最佳短炒」
 - 禁止輸出「不建議」但沒有量化依據
-- 禁止遺漏 `ai_focus_list.csv` 前 5 檔
+- 禁止遺漏 `ai_focus_list`（sheet 或 CSV）前 5 檔
 - 禁止把題材判斷全部交給 Web 而忽略 `theme_heat_daily.csv`
 - 禁止聲稱「已 Web 查核」但未附來源摘要或覆蓋統計
 

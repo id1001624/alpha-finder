@@ -37,6 +37,7 @@ env/
 *~
 
 # 輸出檔案
+repo_outputs/
 *.csv
 *.png
 *.jpg

@@ -11,6 +11,7 @@
 ✅ **自動評級** - AI/半導體/資料中心等優先產業 A 級評級  
 ✅ **全量數據** - 依設定上傳完整數據（預設 120 檔），供 AI 分析  
 ✅ **本地每日輸出** - 每次掃描自動輸出到 `repo_outputs/daily_refresh`（推薦給 AI 直接讀）  
+✅ **妖股雷達** - 新增 `monster_radar_daily.csv`，聚焦高動能中小市值爆發候選  
 ✅ **Windows 排程** - 每日自動執行，結果就在 Google Sheets
 
 ---
@@ -67,10 +68,15 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 - **`全量數據`** tab - 依設定輸出完整數據，供 AI 分析
 - **`YYYY-MM-DD`** tab - 當日三合一精選報告（起飛 Top 3 + 財報 Top 3 + 預測 Top 3）
 
-同時會在專案本地輸出（建議給 AI 直接讀 6 檔）：
+同時會在專案本地輸出（建議給 AI 直接讀單一整包）：
+
+- `repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx`（建議上傳，單檔多 sheet）
+
+相容保留（仍會輸出）：
 
 - `repo_outputs/ai_ready/latest/ai_focus_list.csv`
 - `repo_outputs/ai_ready/latest/fusion_top_daily.csv`
+- `repo_outputs/ai_ready/latest/monster_radar_daily.csv`
 - `repo_outputs/ai_ready/latest/raw_market_daily.csv`
 - `repo_outputs/ai_ready/latest/theme_heat_daily.csv`
 - `repo_outputs/ai_ready/latest/theme_leaders_daily.csv`
@@ -84,20 +90,38 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 run_daily.bat
 ```
 
+雙 profile 比較（一鍵）：
+
+```bash
+.\run_ai_compare.bat web
+```
+
+或（API 備援模式）：
+
+```bash
+.\run_ai_compare.bat api
+```
+
+會自動執行 `balanced + monster_v1`，並輸出比較報告：
+
+- `repo_outputs/ai_trading/profile_compare/latest/profile_compare_summary.csv`
+- `repo_outputs/ai_trading/profile_compare/latest/profile_compare_summary.md`
+
 這個批次流程會自動完成：
 
 1. `python main.py`
 2. `python scripts/update_xq_with_history.py`
+3. `python scripts/build_ai_trading_dataset.py`
 
 你一天只要做 3 件事（固定不變）：
 
 1. （可選）先確認 TradingView webhook server 正在跑（要用 TV 指標時才需要）
 2. 執行 `run_daily.bat`
-3. 把 `repo_outputs/ai_ready/latest` 的 6 檔 CSV、Alpha-Sniper-Protocol-v8.md 一次餵給 AI，直接要最終結論
+3. 把 `repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx` + `Alpha-Sniper-Protocol-v8.md` 餵給 AI，直接要最終結論
 
 補充（避免放錯檔案位置）：
 
-- `ai_focus_list.csv` 不用手動放，`run_daily.bat` 會自動更新在 `repo_outputs/ai_ready/latest/ai_focus_list.csv`
+- `ai_ready_bundle.xlsx` 會在 `run_daily.bat` 後自動更新在 `repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx`
 - 網頁 AI 回傳的 `FILE: ai_decision_YYYY-MM-DD.csv`，請存到 `repo_outputs/backtest/inbox/`
 - 存好後執行：
 
@@ -141,7 +165,78 @@ run_weekly_review.bat
 
 - `daily_refresh/*`：完整日更產線（含除錯/審核/回放）
 - `backtest/*`：歷史回測與績效統計
-- `ai_ready/latest/*`：固定給 AI 的 6 檔最小集合（你每天只看這裡）
+- `ai_ready/latest/*`：固定給 AI 的單檔整包 + 相容 CSV（你每天主要看 `ai_ready_bundle.xlsx`）
+
+妖股雷達（非自動交易）定位：
+
+- `monster_radar_daily.csv` 是「偵測 + 預測輔助」層，不會自動送單
+- 分級標籤 `300%/500%/1000%觀察` 是候選強度，不是報酬保證
+- 主要目標是提早收斂高爆發名單，交給你和 AI 做最終決策
+
+AI Trading 研究資料層（No Auto-Execution）：
+
+- `repo_outputs/ai_trading/latest/market_dataset_daily.csv`（統一候選資料集）
+- `repo_outputs/ai_trading/latest/feature_signals_daily.csv`（特徵工程引擎 Top 訊號）
+- `repo_outputs/ai_trading/latest/radar_signals_daily.csv`（多雷達掃描器 Top 訊號）
+- `repo_outputs/ai_trading/latest/event_signals_daily.csv`（事件偵測引擎輸出）
+- `repo_outputs/ai_trading/latest/ranking_signals_daily.csv`（排名引擎輸出：Regime-aware 排序）
+- `repo_outputs/ai_trading/latest/decision_signals_daily.csv`（決策風險層輸出：keep/watch + 失效條件）
+- `repo_outputs/ai_trading/latest/pipeline_manifest.json`（當次輸入/輸出與統計）
+- `repo_outputs/ai_trading/latest/ai_research_candidates.csv`（給 AI 的研究優先名單）
+- `repo_outputs/ai_trading/latest/ai_research_prompt.md`（可直接貼給網頁 AI 的研究提示）
+- `repo_outputs/ai_trading/latest/ai_research_manifest.json`（研究層輸出摘要）
+
+雙模式研究流程（建議）：
+
+- `web`（預設、免費）：輸出 `ai_research_candidates.csv + ai_research_prompt.md`，交給網頁 AI 分析
+- `api`（網頁額度用完時）：啟用 Tavily + Gemini Flash API，自動產生 `api_catalyst_analysis_daily.csv`
+
+模式切換（PowerShell）：
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("AI_RESEARCH_MODE", "api", "User")
+[System.Environment]::SetEnvironmentVariable("CATALYST_DETECTOR_ENABLED", "true", "User")
+[System.Environment]::SetEnvironmentVariable("TAVILY_API_KEY", "YOUR_TAVILY_KEY", "User")
+[System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "YOUR_GEMINI_KEY", "User")
+```
+
+Scanner 條件組切換（PowerShell）：
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("SCANNER_PROFILE", "balanced", "User")
+# 或
+[System.Environment]::SetEnvironmentVariable("SCANNER_PROFILE", "monster_v1", "User")
+```
+
+兩套條件如何選：
+
+- `balanced`：適合日常全市場研究（候選較多，覆蓋面廣）
+- `monster_v1`：適合專抓妖股（候選更少、更嚴格）
+
+建議實務做法：
+
+- 先同時跑兩套（本專案已支援）
+- 用每週回測/命中率決定當週主策略
+- 不建議立即硬合併成單一條件，先累積 2~4 週比較樣本再做融合
+
+架構原則（你現在這套就是這樣）：
+
+- 專案主體是 `Scanner/Research/Ranking`，不是指標交易引擎
+- `VWAP/SQZMOM` 屬於 timing 訊號，主要用於第二層決策，不是第一層找股核心
+
+特徵工程 v1（已接入 dataset）：
+
+- `trend_persistence_score`（續漲級別 + 機率中位）
+- `momentum_accel_1d3d` / `momentum_accel_3d5d`（動能加速度）
+- `squeeze_pressure_score`（擠壓壓力）
+- `float_tightness_proxy` / `liquidity_turnover_proxy_pct`（籌碼緊度代理）
+- `earnings_catalyst_score` / `analyst_conviction_score` / `news_velocity_proxy`（催化與關注度）
+
+多雷達 v1.1（已接入 dataset）：
+
+- `sector_rotation`：族群輪動強度（題材熱區 + 量價結構）
+- `post_earnings_drift`：財報後 1~5 日延續動能
+- `squeeze_setup`：SQZ/量能擠壓突破型態
 
 回測專用（不餵 AI）：
 
@@ -171,7 +266,7 @@ python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 202
 python tests/backtest_winrate.py --mode xq-pick-log --start 2026-01-01 --end 2026-03-01 --hold-days 1 --by-rank-report
 ```
 
-`run_daily.bat` 目前只負責產生 AI 所需 6 檔 CSV；AI 決策歸檔需另外執行 `record_ai_decision.py`。
+`run_daily.bat` 目前會產生 AI 所需單檔整包 `ai_ready_bundle.xlsx`（並保留相容 CSV）；AI 決策歸檔需另外執行 `record_ai_decision.py`。
 
 ---
 
