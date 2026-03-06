@@ -66,7 +66,10 @@
 ### Layer E.5: Dual-Mode AI Analysis
 - Web mode（free）：網頁 AI + `ai_research_prompt.md`
 - API mode（fallback）：Tavily Search + Gemini Flash
+- 兩種模式共用最終決策契約：`ai_decision_YYYY-MM-DD.csv`
 - API 輸出：`api_catalyst_analysis_daily.csv` / `api_catalyst_brief.md`
+- 回測主入口維持單一：`ai_decision_YYYY-MM-DD.csv` → `ai_decision_log.csv`
+- `api_catalyst_analysis_daily.csv` 是中間催化表，供決策 CSV 補欄與回頭檢驗 mode 差異，不直接取代回測主檔
 
 ---
 

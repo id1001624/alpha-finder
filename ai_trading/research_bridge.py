@@ -143,6 +143,8 @@ def build_research_bridge(
         "輸出格式要求：",
         "- 先給 Top 1（今日最佳）",
         "- 再給 Top 5 備選",
+        "- web / api 模式都必須輸出同一份 ai_decision 契約",
+        "- 若 api_catalyst_analysis 有資料，優先引用；若沒有，催化欄位仍要保留但可留空",
         "- 最後輸出 ai_decision_YYYY-MM-DD.csv",
     ]
     prompt_path = output_dir / 'ai_research_prompt.md'

@@ -14,7 +14,6 @@ python scripts/record_ai_decision.py --auto-latest
 from __future__ import annotations
 
 import argparse
-import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -28,8 +27,9 @@ LATEST_CSV_FILE = BACKTEST_DIR / "ai_decision_latest.csv"
 INBOX_DIR = BACKTEST_DIR / "inbox"
 AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
 DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
+AI_TRADING_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest"
 
-REQUIRED_COLUMNS = [
+BASE_COLUMNS = [
     "decision_date",
     "rank",
     "ticker",
@@ -43,6 +43,20 @@ REQUIRED_COLUMNS = [
     "reason_summary",
     "source_ref",
 ]
+
+CATALYST_COLUMNS = [
+    "research_mode",
+    "catalyst_type",
+    "catalyst_sentiment",
+    "explosion_probability",
+    "hype_score",
+    "confidence",
+    "api_final_score",
+    "catalyst_source",
+    "catalyst_summary",
+]
+
+REQUIRED_COLUMNS = BASE_COLUMNS + CATALYST_COLUMNS
 
 VALID_DECISION_TAGS = {"keep", "watch", "replace_candidate"}
 
@@ -86,6 +100,81 @@ def _infer_decision_tag(row: pd.Series) -> str:
     return "watch"
 
 
+def _read_csv_fallback(csv_path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(csv_path, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return pd.read_csv(csv_path)
+
+
+def _load_api_catalyst_map() -> pd.DataFrame:
+    api_path = AI_TRADING_LATEST_DIR / "api_catalyst_analysis_daily.csv"
+    if not api_path.exists():
+        return pd.DataFrame()
+
+    try:
+        df = _read_csv_fallback(api_path)
+    except (FileNotFoundError, PermissionError, OSError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
+
+    if len(df) == 0 or "ticker" not in df.columns:
+        return pd.DataFrame()
+
+    out = df.copy()
+    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    out = out[out["ticker"] != ""].copy()
+    if len(out) == 0:
+        return pd.DataFrame()
+
+    rename_map = {
+        "sentiment": "catalyst_sentiment",
+        "reason": "catalyst_summary",
+    }
+    out = out.rename(columns=rename_map)
+    keep_cols = [
+        "ticker",
+        "catalyst_type",
+        "catalyst_sentiment",
+        "explosion_probability",
+        "hype_score",
+        "confidence",
+        "api_final_score",
+        "catalyst_summary",
+    ]
+    for col in keep_cols:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[keep_cols].drop_duplicates(subset=["ticker"], keep="first")
+    out["catalyst_source"] = "api_catalyst_analysis_daily.csv"
+    out["research_mode"] = "api"
+    return out
+
+
+def _fill_missing_values(base: pd.Series, incoming: pd.Series) -> pd.Series:
+    base_obj = base.astype(object)
+    incoming_obj = incoming.astype(object)
+    base_missing = base_obj.isna() | (base_obj.astype(str).str.strip() == "")
+    return base_obj.where(~base_missing, incoming_obj)
+
+
+def enrich_with_api_catalyst(df: pd.DataFrame) -> pd.DataFrame:
+    catalyst_df = _load_api_catalyst_map()
+    if len(catalyst_df) == 0:
+        return df
+
+    out = df.copy()
+    merged = out.merge(catalyst_df, on="ticker", how="left", suffixes=("", "__api"))
+
+    for col in CATALYST_COLUMNS:
+        incoming_col = f"{col}__api"
+        if incoming_col not in merged.columns:
+            continue
+        merged[col] = _fill_missing_values(merged[col], merged[incoming_col])
+        merged = merged.drop(columns=[incoming_col])
+
+    return merged
+
+
 def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
     out = df.copy()
 
@@ -94,14 +183,22 @@ def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
             out[col] = ""
 
     out = out[REQUIRED_COLUMNS].copy()
+    out = enrich_with_api_catalyst(out)
     out["decision_date"] = out["decision_date"].replace("", pd.NA).fillna(fallback_date)
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
     out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
     out["tech_status"] = out["tech_status"].astype(str).str.strip()
+    out["research_mode"] = out["research_mode"].astype(str).str.strip().str.lower()
+    blank_mode_mask = out["research_mode"] == ""
+    out.loc[blank_mode_mask, "research_mode"] = "web"
     out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
     out["short_score_final"] = pd.to_numeric(out["short_score_final"], errors="coerce")
     out["swing_score"] = pd.to_numeric(out["swing_score"], errors="coerce")
     out["core_score"] = pd.to_numeric(out["core_score"], errors="coerce")
+    out["explosion_probability"] = pd.to_numeric(out["explosion_probability"], errors="coerce")
+    out["hype_score"] = pd.to_numeric(out["hype_score"], errors="coerce")
+    out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
+    out["api_final_score"] = pd.to_numeric(out["api_final_score"], errors="coerce")
 
     invalid_tag_mask = ~out["decision_tag"].isin(VALID_DECISION_TAGS)
     if invalid_tag_mask.any():
@@ -128,11 +225,11 @@ def append_to_master_log(df: pd.DataFrame) -> None:
         )
 
 
-def copy_daily_and_latest(csv_file: Path, decision_date: str) -> None:
+def copy_daily_and_latest(df: pd.DataFrame, decision_date: str) -> None:
     daily_csv = DAILY_AI_DIR / f"{decision_date}_ai_decision.csv"
-
-    shutil.copy2(csv_file, daily_csv)
-    shutil.copy2(csv_file, LATEST_CSV_FILE)
+    export_df = df[REQUIRED_COLUMNS].copy()
+    export_df.to_csv(daily_csv, index=False, encoding="utf-8-sig")
+    export_df.to_csv(LATEST_CSV_FILE, index=False, encoding="utf-8-sig")
 
 
 def main() -> None:
@@ -158,7 +255,7 @@ def main() -> None:
     BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
     DAILY_AI_DIR.mkdir(parents=True, exist_ok=True)
 
-    raw_df = pd.read_csv(csv_file)
+    raw_df = _read_csv_fallback(csv_file)
     decision_date = args.date.strip()
     if not decision_date:
         if "decision_date" in raw_df.columns and raw_df["decision_date"].notna().any():
@@ -172,7 +269,7 @@ def main() -> None:
         return
 
     append_to_master_log(norm_df)
-    copy_daily_and_latest(csv_file, decision_date)
+    copy_daily_and_latest(norm_df, decision_date)
 
     print("\n=== AI 決策已記錄 ===")
     print(f"來源 CSV: {csv_file}")
