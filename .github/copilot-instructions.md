@@ -33,7 +33,7 @@ run_daily.bat
 - AI_RESEARCH_MODE='web' 是預設
 - 日常提供給網頁 AI 的固定組合：
   - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
-  - Alpha-Sniper-Protocol-v8.md
+  - Alpha-Sniper-Protocol.md
 - 網頁 AI 最終必須輸出 ai_decision_YYYY-MM-DD.csv
 - 使用者再執行 python .\scripts\record_ai_decision.py --auto-latest
 
@@ -130,7 +130,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 - scripts/run_discord_trade_bot.py: Discord 成交回報 bot
 - ai_trading/intraday_execution_engine.py: 盤中訊號核心
 - ai_trading/position_state.py: 持倉與成交 ledger
-- Alpha-Sniper-Protocol-v8.md: 提供給網頁 AI 的決策 prompt
+- Alpha-Sniper-Protocol.md: 提供給網頁 AI 的決策 prompt
 
 ---
 

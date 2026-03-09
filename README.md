@@ -26,7 +26,15 @@ Alpha Finder 現在已經是一條完整的研究到執行追蹤流程。
 1. 把這 2 個檔案丟給網頁 AI
 
 - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
-- Alpha-Sniper-Protocol-v8.md
+- Alpha-Sniper-Protocol.md
+
+如果你是走 Dropbox 給 AI 讀 md 檔，而不是直接上傳 xlsx：
+
+```powershell
+python .\scripts\upload_ai_ready_to_dropbox.py
+```
+
+這支腳本會把 repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx 轉成給 AI 使用的 12 個核心 md，輸出到 repo_outputs/ai_ready/latest/ai_ready_bundle_md/，並用 DROPBOX_APP_KEY、DROPBOX_APP_SECRET、DROPBOX_REFRESH_TOKEN 自動刷新 access token 後上傳。
 
 1. 把網頁 AI 輸出的 ai_decision_YYYY-MM-DD.csv 放進 repo_outputs/backtest/inbox/
 
@@ -89,6 +97,12 @@ python .\scripts\record_ai_decision.py --auto-latest
 - 預設 INTRADAY_DATA_PROVIDER=auto
 - 有 FINNHUB_API_KEY 時優先走 Finnhub 免費分鐘行情
 - 否則自動 fallback 到 yfinance
+
+盤中執行時段：
+
+- 預設只在本機時間 21:20 到 05:10 之間跑 loop
+- 超出時段會自動 idle，不抓資料、不推 Discord
+- 預設每 5 分鐘輪詢一次，超出時段則改成較低頻率待命
 
 所以 README 不再列這些手動執行指令，避免你混淆。
 
