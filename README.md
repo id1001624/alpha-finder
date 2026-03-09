@@ -1,163 +1,144 @@
-﻿# Alpha Finder 個人操作手冊
+# Alpha Finder 個人操作手冊
 
-## 這個專案在做什麼
+## 現在這個專案是什麼
 
-這個專案是我的 AI Trading 情報引擎（不自動下單），負責：
+Alpha Finder 現在已經是一條完整的研究到執行追蹤流程。
 
-- 每天找可能爆發的股票
-- 做多層排序（feature/radar/event/ranking/decision）
-- 輸出給我和 AI 做研究判斷
+- 每天先跑主產線找出候選股
+- Web 或 API 產出 ai_decision_YYYY-MM-DD.csv
+- 系統把決策歸檔到 backtest
+- 盤中由 repo 內建 engine 自己計算分鐘級訊號
+- Discord Bot 負責接你回報的真實成交
+- 系統接續管理持倉與提醒
 
-核心分工：
+這套系統不自動下單。
 
-- 找股票：Scanner / Research / Ranking
-- 交易時機：VWAP / SQZMOM（輔助，不是核心找股）
+## 你平常怎麼操作
 
-## 我每天要做什麼
+你平常真的只要做這 4 步。
 
-1. 跑日更（主產線）
+1. 跑主產線
 
 ```powershell
 .\run_daily.bat
 ```
 
-1. 跑雙策略比較（建議每天都跑）
+1. 把這 2 個檔案丟給網頁 AI
 
-```powershell
-.\run_ai_compare.bat web
-```
+- repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
+- Alpha-Sniper-Protocol-v8.md
 
-1. 看比較結果（決定今天偏向哪個 profile）
+1. 把網頁 AI 輸出的 ai_decision_YYYY-MM-DD.csv 放進 repo_outputs/backtest/inbox/
 
-- `repo_outputs/ai_trading/profile_compare/latest/profile_compare_summary.md`
-
-1. 把研究檔餵給網頁 AI（見下方「丟哪些檔案」）
-
-## Web / API 開關
-
-`AI_RESEARCH_MODE` 只填模式字串：
-
-- `web`：免費、預設
-- `api`：網頁額度用完時切換（Tavily + Gemini）
-
-兩種模式現在都走同一份決策契約：
-
-- 最終都應產出 `ai_decision_YYYY-MM-DD.csv`
-- 同一份 CSV 固定包含催化欄位（`research_mode`、`catalyst_type`、`catalyst_sentiment`、`explosion_probability`、`hype_score`、`confidence`、`api_final_score`、`catalyst_source`、`catalyst_summary`）
-- `record_ai_decision.py` 歸檔時會保留以上欄位，並在可用時自動從 `api_catalyst_analysis_daily.csv` 補齊缺漏值
-- `api` 模式現在會直接產出最終 `ai_decision_YYYY-MM-DD.csv` 到 `repo_outputs/backtest/inbox/`
-
-即時切換（目前終端）：
-
-```powershell
-$env:AI_RESEARCH_MODE='web'   # 或 api
-```
-
-補充：
-
-- 只要 `AI_RESEARCH_MODE='api'`，就會啟用 API 備援決策流程
-- 若你真的想強制關閉 API 偵測器，才另外設：`$env:CATALYST_DETECTOR_ENABLED='false'`
-
-## 要丟給網頁 AI 哪些檔案
-
-- `repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx`
-- `Alpha-Sniper-Protocol-v8.md`
-
-說明：
-
-- `ai_ready_bundle.xlsx` 現在是統一入口，已合併原本 A 的關鍵訊號（feature/radar/event/ranking/decision）與原本 B 的核心表。
-- 日常只要上傳上面 2 個檔案即可，網頁 AI 回答最後必須輸出 `ai_decision_YYYY-MM-DD.csv`。
-
-## ai_decision_YYYY-MM-DD.csv 要放哪裡
-
-網頁 AI 產生後，放到：
-
-- `repo_outputs/backtest/inbox/`
-
-以下指令都假設你現在就在專案根目錄，且終端已啟用 `(.venv)`。
-
-然後執行：
+1. 歸檔決策
 
 ```powershell
 python .\scripts\record_ai_decision.py --auto-latest
 ```
 
-補充：
+做完後，盤中提醒與 Discord 回報成交就是這條線的後半段。
 
-- 即使你用 `web` 模式，`ai_decision` 也要維持同一份欄位結構
-- 若你改用 `api` 模式，歸檔時會自動把 `repo_outputs/ai_trading/latest/api_catalyst_analysis_daily.csv` 可對應的催化欄位補進 `ai_decision_log.csv`
+## Discord 怎麼用
 
-`--auto-latest` 會依序搜尋：
+你現在的 Discord Bot 已經是正式操作面。
 
-- `repo_outputs/backtest/inbox/`
-- `repo_outputs/ai_ready/latest/`
-- `repo_outputs/daily_refresh/latest/`
+平常你只要用 slash commands：
 
-## 第二、三層通知（Discord/LINE）
+- /tradehelp
+- /positions
+- /position
+- /buy
+- /add
+- /sell
 
-當你已產生 `ai_decision_YYYY-MM-DD.csv` 後，可以直接發即時通知：
+推薦實際用法：
 
-先測試（只預覽，不送出）：
+1. 先看目前部位
 
-```powershell
-python .\scripts\push_alerts_from_ai_decision.py --auto-latest --dry-run
+```text
+/positions
 ```
 
-送 Discord（推薦）：
+1. 有真實成交時回報
 
-```powershell
-$env:DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/你的URL'
-python .\scripts\push_alerts_from_ai_decision.py --auto-latest --channel discord --top-n 5 --tags keep,watch
+```text
+/buy
+/add
+/sell
 ```
 
-送 LINE（Messaging API）：
-
-```powershell
-$env:LINE_CHANNEL_ACCESS_TOKEN='你的token'
-$env:LINE_TO_USER_ID='你的userId'
-python .\scripts\push_alerts_from_ai_decision.py --auto-latest --channel line --top-n 5 --tags keep,watch
-```
+1. 系統之後會根據目前持倉與盤中訊號繼續提醒你
 
 補充：
 
-- 腳本會自動讀取 TradingView 已落地到 `signals.db` 的最新 VWAP/SQZMOM 訊號，合併進通知文字。
-- `--channel both` 可同時推 Discord + LINE。
+- !buy、!sell 這類文字指令仍然能用，但平常直接用 slash commands 就好
+- 若你只是做測試單，建議用一筆 /sell 把測試倉位平掉，不要直接手改 csv
 
-## 第四層追蹤（回寫位置）
+## 盤中系統現在怎麼運作
 
-通知和決策不要貼回聊天室，直接寫檔追蹤：
+現在盤中 execution 已經不是靠你手動維護 TradingView alert。
 
-- 決策主檔：`repo_outputs/backtest/ai_decision_log.csv`
-- 通知紀錄：`repo_outputs/backtest/alerts/alert_log.csv`
-- 最新通知文字：`repo_outputs/backtest/alerts/latest_alert_message.txt`
+- watchlist 來源是 ai_decision_latest.csv
+- engine 自己抓分鐘級 OHLCV
+- 自己算 Dynamic AVWAP + SQZMOM
+- 只輸出四種執行建議：適合買、可加碼、適合先賣一部分、適合全出
+- 你在 Discord 回報真實成交後，系統用該成交更新持倉與後續提醒
 
-每週覆盤時，把 `ai_decision_log.csv` + `weekly_report_latest.md` 一起看，就能回頭檢查「有通知但沒進場」「有進場但停損/停利執行」的差異。
+分鐘資料源：
 
-## 每週回測資料多久丟給你一次
+- 預設 INTRADAY_DATA_PROVIDER=auto
+- 有 FINNHUB_API_KEY 時優先走 Finnhub 免費分鐘行情
+- 否則自動 fallback 到 yfinance
 
-建議每 7 天一次（固定週日或每 5 個交易日）。
+所以 README 不再列這些手動執行指令，避免你混淆。
 
-每週丟這些就夠：
-
-- `repo_outputs/backtest/weekly_reports/weekly_report_latest.md`
-- `repo_outputs/backtest/weekly_reports/weekly_trades_latest.csv`
-- `repo_outputs/backtest/weekly_reports/weekly_ai_trades_latest.csv`
-- `repo_outputs/ai_trading/profile_compare/latest/profile_compare_summary.csv`
-
-若連續 2-3 天異常，提早丟，不用等一週。
-
-## Auto-hybrid v2 提醒（下週）
-
-下週要做：Auto-hybrid v2
-
-目標：
-
-- 用最近 2-4 週比較結果自動調權重
-- 減少手動判斷當日走 balanced 或 monster_v1
-- 產出單一主策略 + 備援清單
-
-## 快速自檢
+如果你改了 token、頻道 ID 或其他設定，只要重跑一次：
 
 ```powershell
-python -c "import config; print(config.AI_RESEARCH_MODE, config.CATALYST_DETECTOR_ENABLED, bool(config.TAVILY_API_KEY), bool(config.GEMINI_API_KEY), config.GEMINI_MODEL)"
+.\setup.bat
 ```
+
+## 關鍵輸出檔
+
+你平常最常看的檔案只有這些：
+
+- 決策主檔：repo_outputs/backtest/ai_decision_log.csv
+- 最新決策：repo_outputs/backtest/ai_decision_latest.csv
+- 開倉部位：repo_outputs/backtest/positions_latest.csv
+- 真實成交紀錄：repo_outputs/backtest/position_trade_log.csv
+- 盤中快照：repo_outputs/backtest/intraday/intraday_signal_latest.csv
+- 執行主檔：repo_outputs/backtest/execution_trade_log.csv
+
+## Web / API 模式
+
+預設是 AI_RESEARCH_MODE='web'。
+
+- web：你把 bundle 丟給網頁 AI，然後把回傳的 ai_decision_YYYY-MM-DD.csv 放進 inbox
+- api：系統自己走 Tavily + Gemini 備援流程
+
+兩種模式最後都要回到同一份決策契約：
+
+- ai_decision_YYYY-MM-DD.csv
+
+## 每週回看什麼
+
+每週回看這幾個檔案就夠：
+
+- repo_outputs/backtest/ai_decision_log.csv
+- repo_outputs/backtest/execution_trade_log.csv
+- repo_outputs/backtest/weekly_reports/weekly_report_latest.md
+
+## 專案現況
+
+就目前目標來說，這個專案已經完成可用版本。
+
+現在的狀態不是「開發中 demo」，而是：
+
+- daily 研究流程可跑
+- AI 決策契約穩定
+- XQ 新鮮度防呆已完成
+- 盤中分鐘級訊號引擎已完成
+- Discord Bot 回報成交已完成
+- Windows 自啟與排程已完成
+
+下一階段若還要做，只會是優化項，不是基礎缺口。

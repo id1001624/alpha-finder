@@ -2,210 +2,152 @@
 
 ## Project Overview
 
-**Alpha Finder** 是一個免費的 S&P 500 股票每日掃描系統，使用 Finviz + Yahoo Finance 標準 API 自動找出「起飛信號、財報預熱、預測情報」三大交易訊號。所有結果自動上傳 Google Sheets，供 AI 分析使用。
+Alpha Finder 現在是一條完整的 AI 研究、決策、盤中執行提醒、持倉追蹤工作流。
 
-**架構核心**：
-```
-Finviz（503 檔股票） 
-  ↓ 按信號強度排序（漲幅×2 + 量能×3）
-Yahoo Finance（前 40 強詳細數據）
-  ↓ 三個並行篩選軌道
-Google Sheets（全量 40 檔 + 精選 Top 3）
+主流程：
+
+```text
+run_daily.bat
+  -> repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
+  -> Web 或 API 產出 ai_decision_YYYY-MM-DD.csv
+  -> scripts/record_ai_decision.py 歸檔
+  -> ai_decision_latest.csv 成為盤中 engine watchlist
+  -> intraday engine 計算分鐘級訊號
+  -> Discord Bot 接收真實成交回報
+  -> positions / execution logs 持續更新
 ```
 
-**關鍵設計選擇**：
-- 不輸出 CSV，改為純 GSheets（AI 才是讀者，減少磁碟操作）
-- 信號強度排序優先於字母順序，避免完全錯過啟動初期股票
-- 軌道保持不同門檻（3%/1.8x vs XQ 的 4.5%/2.5x），便於雙重確認
+專案核心目標：
+
+- 找出明日最可能延續上漲的 Top 1 與 Top 5
+- 維持 ai_decision_YYYY-MM-DD.csv 決策契約穩定
+- 讓使用者只做最少人工步驟，盤中主要透過 Discord 操作
+- 不自動下單，只做研究、提醒、成交回報與追蹤
 
 ---
 
-## Code Architecture
+## Operating Model
 
-### 1. Config-Driven Design
+### 1. Web Mode Is Still Default
 
-**檔案**: `config.py`（38 行）
-- 所有業務邏輯數字都是 config 常數，不寫死在 main.py
-- 例：`LAUNCH_MIN_GAIN = 3.0`, `TOP_N_STOCKS = 3`
-- **關鍵慣例**：修改任何篩選邏輯都從 config 開始，不改 main.py
+- AI_RESEARCH_MODE='web' 是預設
+- 日常提供給網頁 AI 的固定組合：
+  - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
+  - Alpha-Sniper-Protocol-v8.md
+- 網頁 AI 最終必須輸出 ai_decision_YYYY-MM-DD.csv
+- 使用者再執行 python .\scripts\record_ai_decision.py --auto-latest
 
-### 2. Three-Track Filtering Pipeline
+### 2. API Mode Is Fallback
 
-| Track | 函數 | 條件 | 用途 |
-|-------|------|------|------|
-| **起飛清單** | `filter_sheet1_launch()` | 漲幅 >3%, 量能 >1.8x | 當日爆漲 |
-| **財報預熱** | `filter_sheet2_earnings()` | 7 天內財報, MCap >1B | 事件驅動 |
-| **預測情報** | `filter_sheet3_analyst()` | 上漲空間 >30%, 分析師 ≥3 | 機構看好 |
+- AI_RESEARCH_MODE='api' 時，系統走 Tavily + Gemini 備援
+- 只有真的拿到有效決策列時，才可寫出 ai_decision_YYYY-MM-DD.csv
+- 不允許用純本地排序偽裝成 AI 決策
 
-**管道流程**（main() 第 973 行）：
-```
-scrape_finviz_screener()  # 爬 503 檔，排序 → DataFrame
-  ↓
-enrich_with_yfinance()    # 前 40 強查詳細資料（財報日、目標價、新聞）
-  ↓
-filter_sheet1/2/3()      # 三軌並行篩選，各輸出 Top 3
-  ↓
-GoogleSheetsUploader.upload_full_data() + upload_daily_report()
-```
+### 3. Intraday Operation Is Repo-Native
 
-### 3. Signal Strength Scoring
+- 盤中主流程已經不是依賴手動 TradingView alert 維護
+- ai_trading/intraday_execution_engine.py 自己抓分鐘資料並計算 Dynamic AVWAP + SQZMOM
+- scripts/run_discord_trade_bot.py 是真實成交回報入口
+- watchlist 核心來源是 repo_outputs/backtest/ai_decision_latest.csv
 
-**位置**：`scrape_finviz_screener()` 第 550 行
-```python
-df['_change_score'] = df['Daily_Change'].clip(lower=0)          # 負漲幅視為 0
-df['_vol_score'] = (df['Rel_Volume'] - 1).clip(lower=0)         # 只計超過 1 的部分
-df['_signal_score'] = df['_change_score'] * 2 + df['_vol_score'] * 3
-df = df.sort_values('_signal_score', ascending=False)
-```
-**為何**：防止「負漲幅但量能大」的股票排在「微漲但起動中」的前面，漲幅權重加倍。
+### 4. Discord Is The User Surface
 
-### 4. Priority Sector Classification
-
-**位置**：`_apply_sector_classification()` 第 690 行
-```python
-PRIORITY_KEYWORDS = {
-    'AI/半導體': ['ai', 'chip', 'gpu', ...],
-    '資料中心': ['data center', ...],
-    ...
-}
-```
-**3-tier rating**：
-- **A 級**：優先產業 + 量能 >2.5x（只給起飛清單最強訊號）
-- **B 級**：優先產業或分析師看好
-- **C 級**：基本條件達到
-
-### 5. SSL Certificate Workaround
-
-**位置**：`_fix_ssl_cert_path()` 第 15-52 行
-- **問題**：Windows 中文路徑（"文件"含 UTF-8）導致 curl 無法讀 CA 憑證
-- **解決**：啟動時將 certifi 憑證複製到 `~/.alpha_finder_certs/cacert.pem`（純 ASCII），設定 `CURL_CA_BUNDLE=` env var
-- **重要**：部署到其他環境時，如果路徑含非 ASCII 字符，此函數會自動激活
+- 使用者平常在 Discord 用 /buy、/add、/sell、/positions
+- slash commands 是主介面
+- prefix commands 只是相容保留，不是主操作方式
 
 ---
 
-## Development Workflow
+## Architecture Notes
 
-### Run Daily Scan
-```bash
-python main.py
-```
-- 標準輸出顯示摘要（5 檔強勢股、三軌結果）
-- 無 CSV 輸出，全部上傳到 GSheets (`Alpha_Sniper_Daily_Report`)
-- 建立兩個 tab：`全量數據`（40 檔完整）+ `YYYY-MM-DD`（精選 Top 3）
+### 1. Bundle-First Input
 
-### Automated Execution (Windows Task Scheduler)
-```powershell
-schtasks /create /tn "AlphaFinder_Daily" /tr "\"C:\...\run_daily.bat\"" /sc daily /st 05:30 /ru SYSTEM /f
-```
-- 每天 05:30（美股收盤後 1.5h）自動跑
-- log 記在 `run_log.txt`
+- repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx 是 web AI 的統一入口
+- 不要再回到舊的多檔分散輸入模式，除非使用者明確要求
 
-### Debug Tips
-1. **SSL 失敗**：檢查 `~/.alpha_finder_certs/cacert.pem` 是否存在，若路徑含中文重新跑 `_fix_ssl_cert_path()`
-2. **API 限制**：減少 `MAX_STOCKS_TO_PROCESS`（改為 20），增加 `API_DELAY`（改為 1.0）
-3. **GSheets 認證失敗**：檢查 `credentials.json` 是否放在專案根目錄，確認服務帳號被分享到 GSheets
+### 2. Decision Contract Is Stable
 
----
+ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
-## Project-Specific Patterns
+- 基礎決策欄位：decision_date, rank, ticker, short_score_final, swing_score, core_score, risk_level, tech_status, theme, decision_tag, reason_summary, source_ref
+- 催化欄位：research_mode, catalyst_type, catalyst_sentiment, explosion_probability, hype_score, confidence, api_final_score, catalyst_source, catalyst_summary
 
-### Pattern 1: Config-First Refactoring
-新增篩選條件時，**先加到 config.py**，再在對應 filter_sheet*() 函數裡使用。永不硬碼。
+修改流程時優先維持這份契約穩定。
 
-### Pattern 2: Dataframe Chaining
-每個 filter/enrich 函數用 pandas iterator `iterrows()` 逐筆處理，返回乾淨的 DataFrame。
-```python
-for idx, row in df.iterrows():
-    # 邏輯
-    enriched.append({**row.to_dict(), 'new_col': value})
-return pd.DataFrame(enriched)
-```
+### 3. Intraday Data Provider
 
-### Pattern 3: Error Graceful Degradation
-缺少欄位（如新聞標題）時用空字串或 None，不拋例外：
-```python
-enriched_data.append({
-    **row.to_dict(),
-    'News_Headline': '',  # 找不到新聞就空
-    'Earnings_Date': None,
-})
-```
+- INTRADAY_DATA_PROVIDER=auto|finnhub|yfinance
+- auto 會優先用 Finnhub 免費分鐘資料
+- 拿不到或不相容時 fallback 到 yfinance
 
-### Pattern 4: GSheets Column Mapping
-上傳前重新對應欄名（CONFIG 保持英文，GSheets 輸出用中文）：
-```python
-cols_map = {
-    'Ticker': '股票代碼',
-    'Daily_Change': '今日漲幅%',
-    ...
-}
-available = {k: v for k, v in cols_map.items() if k in df.columns}
-output = df[list(available.keys())].copy()
-output.columns = list(available.values())
-```
+### 4. Windows Startup Is Expected
+
+- setup.bat 會建立通知排程與登入後自啟
+- 若 Windows 不允許 onlogon scheduled task，腳本會 fallback 到 Startup 資料夾
 
 ---
 
-## External Dependencies & Integration Points
+## Project Conventions
 
-### API Limits & Retry Logic
-- **Finviz**：每天 ~1 次爬取，爬 3 頁（60 檔採樣），無明顯速率限制
-- **Yahoo Finance**：最多查 40 檔，每筆 0.5s 延遲（可在 config 調整）
-- **重試機制**：`retry_on_failure()` 用指數退避，3 次失敗才放棄
+### 1. Config First
 
-### Google Sheets Service Account
-- 必需 `credentials.json`（服務帳號 key）在專案根目錄
-- 試算表名稱必須叫 `Alpha_Sniper_Daily_Report`
-- 該帳號必須被分享 edit 權限到目標試算表
+- 所有門檻、模式切換、資料源選擇優先看 config.py
+- 不要把業務數字硬寫進流程檔
 
-### Finviz Library (mariostoev v2.0.0)
-- **Performance table**：當日漲幅、量能等
-- **Overview table**：產業、市值、股價等
-- 兩表合併得完整 DataFrame（位置：`scrape_finviz_screener()` 第 480 行）
+### 2. Preserve The Short Operator Flow
 
----
+- README 應該維持最短操作路徑
+- 不要把已經自動化的東西重新寫成手動步驟給使用者執行
+- 睡前摘要、早晨 recap、Windows 自啟若已設定好，README 應描述為現況，不要再強調手動指令
 
-## Common Modifications
+### 3. No Fake AI Outputs
 
-### Add New Filter Track
-1. `config.py` 新增篩選參數（如 `NEW_FILTER_MIN_X = 10.0`）
-2. 複製 `filter_sheet1/2/3()` 其一，改邏輯+欄位對應
-3. `main()` 第 990 行新增呼叫
-4. `GoogleSheetsUploader.upload_daily_report()` 新增 sheet4 參數
+- 不要把本地排序結果假裝成 AI 決策 CSV
+- API 決策失敗時應回傳 disabled / no rows，而不是寫出假決策檔
 
-### Adjust Signal Strength Formula
-編輯 `scrape_finviz_screener()` 第 550 行排序邏輯（目前 change×2 + vol×3），改變權重係數。
+### 4. Minimal Scope
 
-### Change GSheets Output Format
-編輯 `upload_full_data()` 和 `upload_daily_report()` 的欄位對應（`cols_map` dict）。
+- 修改時優先最小變更
+- 不要順手改 unrelated strategy / backtest 邏輯
+
+### 5. Git Rules
+
+- 若使用者明確要求 commit / push，先完成必要驗證，再依功能分組提交
+- commit message 預設使用中文，內容要能看出變更主題
+- 若同一次工作包含多個明顯獨立主題，優先做多個小 commit、最後一次 push
+- 若使用者沒有明確要求，不要自動 commit 或 push
 
 ---
 
-## Key Files Quick Reference
+## Key Files
 
-| 檔案 | 行數 | 職責 |
-|------|------|------|
-| `main.py` | 1002 | 核心邏輯，三軌篩選 + GSheets 上傳 |
-| `config.py` | 80 | 所有可調參數，無業務邏輯 |
-| `run_daily.bat` | 14 | Windows 排程執行入口 |
-| `requirements.txt` | 14 | 依賴：pandas, finviz>=2.0, yfinance, gspread |
-| `.github/copilot-instructions.md` | 本檔 | AI agent 指導 |
-
----
-
-## Testing & Validation
-
-**無正式單元測試**。驗證方式：
-1. 執行 `python main.py`，檢查 terminal 摘要（5 檔 Top + 三軌結果）
-2. 檢查 GSheets `全量數據` tab 有無 40 檔完整資料
-3. 檢查 `YYYY-MM-DD` tab 有無精選 Top 3（順序應符合評級 A→B→C）
+- README.md: 使用者操作手冊，應以簡單明瞭為優先
+- config.py: 中央設定
+- run_daily.bat: 日更主入口
+- setup.bat: Windows 排程與自啟配置
+- scripts/record_ai_decision.py: 決策歸檔
+- scripts/run_intraday_execution_engine.py: 盤中 engine 啟動器
+- scripts/run_discord_trade_bot.py: Discord 成交回報 bot
+- ai_trading/intraday_execution_engine.py: 盤中訊號核心
+- ai_trading/position_state.py: 持倉與成交 ledger
+- Alpha-Sniper-Protocol-v8.md: 提供給網頁 AI 的決策 prompt
 
 ---
 
-## Known Limitations & Future Considerations
+## Validation
 
-- **單一指數**：目前綁定 S&P 500 (`idx_sp500`)，要擴充到 Russell 2000 需改 `SELECTED_INDICES`
-- **XQ 整合**：刻意不整合 XQ 腳本，兩套工具獨立（便於雙重確認）
-- **IPO 偵測**：無免費資料源，未實裝 IPO 預熱軌道
-- **績效統計**：無回測、勝率統計，工具定位是「掃描+推薦」而非風控
+修改後優先驗證：
 
+1. Python 檔是否有語法或 Pylance 錯誤
+2. run_daily.bat 是否仍能更新 repo_outputs/ai_ready/latest/ 與 repo_outputs/ai_trading/latest/
+3. python .\scripts\run_intraday_execution_engine.py --dry-run --top-n 3 是否可執行
+4. Discord Bot 環境變數是否可被 config.py 正確讀到
+5. 若有更新 README，內容是否仍符合最短操作路徑
+
+---
+
+## Current Direction
+
+- 目前基礎工作流已完成
+- 後續若再做，應以優化與強化為主，不是回頭補基本能力
+- 不要把專案方向拉回舊版 scanner-only 或 GSheets-only
