@@ -19,6 +19,7 @@ XQ 選股清單更新腳本
 import os
 import sys
 import shutil
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 import argparse
@@ -124,6 +125,7 @@ PICK_LOG_FILE = BACKTEST_OUTPUT_DIR / "xq_pick_log.csv"
 DAILY_PICKS_DIR = BACKTEST_OUTPUT_DIR / "daily_xq_picks"
 TOP_PICKS_PER_FILE = 10
 AI_XQ_TARGET_FILE = "xq_short_term_updated.csv"
+AI_XQ_MANIFEST_FILE = "xq_short_term_manifest.json"
 
 COLUMN_RENAME_MAP = {
     "序號": "index",
@@ -708,6 +710,43 @@ def export_ai_ready_xq_file(source_df: pd.DataFrame) -> Path | None:
     return target
 
 
+def write_ai_ready_xq_manifest(source_file: Path, exported_file: Path, row_count: int) -> Path | None:
+    if not AI_READY_OUTPUT_ENABLED:
+        return None
+
+    latest_dir = exported_file.parent
+    manifest_path = latest_dir / AI_XQ_MANIFEST_FILE
+    source_mtime = datetime.fromtimestamp(source_file.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+    manifest = {
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'source_file': source_file.name,
+        'source_path': str(source_file),
+        'source_modified_at': source_mtime,
+        'export_file': exported_file.name,
+        'row_count': int(row_count),
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+    return manifest_path
+
+
+def _candidate_csv_files() -> list[Path]:
+    return sorted(
+        [file for file in XQ_EXPORTS_DIR.glob('*.csv') if '_updated' not in file.stem],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _is_file_modified_today(file_path: Path, now_dt: datetime | None = None) -> bool:
+    ref_dt = now_dt or datetime.now()
+    file_dt = datetime.fromtimestamp(file_path.stat().st_mtime)
+    return file_dt.date() == ref_dt.date()
+
+
+def _describe_file_mtime(file_path: Path) -> str:
+    return datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def update_csv_with_history(file_path, ticker_column=None):
     """
     更新 CSV 檔案,新增歷史價格數據
@@ -830,6 +869,16 @@ def main():
         type=str,
         help='指定 XQ_exports 資料夾路徑 (預設自動尋找)'
     )
+    parser.add_argument(
+        '--all-files',
+        action='store_true',
+        help='處理 XQ_exports 內所有 CSV（預設只處理最新一份）'
+    )
+    parser.add_argument(
+        '--allow-stale',
+        action='store_true',
+        help='允許使用非今日匯出的 XQ CSV（預設禁止，避免舊資料覆蓋今日 bundle）'
+    )
     
     args = parser.parse_args()
     
@@ -871,22 +920,29 @@ def main():
                 results.append(result)
         else:
             print(f"❌ 找不到檔案: {file_path}")
+            return 2
     else:
-        # 處理所有 CSV 檔案
-        csv_files = list(XQ_EXPORTS_DIR.glob("*.csv"))
-        
+        csv_files = _candidate_csv_files()
+
         if not csv_files:
             print(f"❌ 沒有找到任何 CSV 檔案")
-            return
-        
-        print(f"📂 找到 {len(csv_files)} 個 CSV 檔案\n")
-        
-        for csv_file in csv_files:
-            # 跳過已更新的檔案
-            if '_updated' in csv_file.stem:
-                print(f"⏭️ 跳過: {csv_file.name} (已更新)")
-                continue
+            return 2
 
+        if args.all_files:
+            selected_files = csv_files
+            print(f"📂 找到 {len(selected_files)} 個 CSV 檔案，將全部處理\n")
+        else:
+            latest_file = csv_files[0]
+            if not args.allow_stale and not _is_file_modified_today(latest_file):
+                print(f"❌ 偵測到最新 XQ 匯出不是今天的檔案：{latest_file.name}")
+                print(f"   最後修改時間：{_describe_file_mtime(latest_file)}")
+                print("   為避免舊 XQ 資料被重新包進今日 ai_ready_bundle，已中止本次流程。")
+                print("   若你確定要沿用舊檔，請手動執行：python .\\scripts\\update_xq_with_history.py --allow-stale")
+                return 3
+            selected_files = [latest_file]
+            print(f"📂 自動模式只處理最新 XQ 匯出：{latest_file.name} | mtime={_describe_file_mtime(latest_file)}\n")
+
+        for csv_file in selected_files:
             result = update_csv_with_history(csv_file, args.ticker_column)
             if result:
                 results.append(result)
@@ -894,6 +950,8 @@ def main():
     if results:
         pick_snapshots = []
         best_ai_xq_df = None
+        best_source_name = None
+        best_source_path = None
         best_score_count = -1
 
         print("\n===== 每檔短炒分數 Top 5 =====")
@@ -907,6 +965,8 @@ def main():
             if score_count > best_score_count:
                 best_score_count = score_count
                 best_ai_xq_df = df
+                best_source_name = source_name
+                best_source_path = XQ_EXPORTS_DIR / source_name
 
             snapshot = build_top_picks_snapshot(df, ticker_column, source_name)
             if len(snapshot) > 0:
@@ -921,12 +981,20 @@ def main():
 
         ai_target = export_ai_ready_xq_file(best_ai_xq_df)
         if ai_target is not None:
+            manifest_path = None
+            if best_source_path is not None and best_source_path.exists():
+                manifest_path = write_ai_ready_xq_manifest(best_source_path, ai_target, len(best_ai_xq_df))
             print("\n===== AI 五檔快捷輸出已更新 =====")
             print(f"XQ 檔案: {ai_target}")
+            if best_source_name:
+                print(f"來源 XQ: {best_source_name}")
+            if manifest_path is not None:
+                print(f"XQ manifest: {manifest_path}")
     
     print(f"\n✅ 全部完成!\n")
+    return 0
 
 
 if __name__ == "__main__":
     with keep_system_awake():
-        main()
+        raise SystemExit(main())

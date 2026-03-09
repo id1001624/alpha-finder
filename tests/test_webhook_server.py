@@ -18,6 +18,7 @@ def test_webhook_rejects_invalid_secret(tmp_path, monkeypatch):
     init_signal_store(db_path)
     monkeypatch.setattr(server, "SIGNAL_STORE_PATH", db_path)
     monkeypatch.setattr(server, "TV_WEBHOOK_SECRET", "abc123")
+    monkeypatch.setattr(server, "TV_WEBHOOK_PASSPHRASE", "abc123")
 
     client = TestClient(server.app)
     payload = {"symbol": "AAPL", "ts": "2026-02-26T10:00:00Z", "timeframe": "1D", "event": "update"}
@@ -30,6 +31,7 @@ def test_webhook_missing_required_field(tmp_path, monkeypatch):
     init_signal_store(db_path)
     monkeypatch.setattr(server, "SIGNAL_STORE_PATH", db_path)
     monkeypatch.setattr(server, "TV_WEBHOOK_SECRET", "abc123")
+    monkeypatch.setattr(server, "TV_WEBHOOK_PASSPHRASE", "abc123")
 
     client = TestClient(server.app)
     body = json.dumps({"symbol": "AAPL", "timeframe": "1D", "event": "update"}).encode("utf-8")
@@ -47,6 +49,7 @@ def test_webhook_success_writes_signal(tmp_path, monkeypatch):
     init_signal_store(db_path)
     monkeypatch.setattr(server, "SIGNAL_STORE_PATH", db_path)
     monkeypatch.setattr(server, "TV_WEBHOOK_SECRET", "abc123")
+    monkeypatch.setattr(server, "TV_WEBHOOK_PASSPHRASE", "abc123")
 
     client = TestClient(server.app)
     payload = {
@@ -80,3 +83,48 @@ def test_webhook_success_writes_signal(tmp_path, monkeypatch):
     )
     assert "AAPL" in latest
     assert latest["AAPL"].sqzmom_color == "green"
+
+
+def test_webhook_accepts_native_tradingview_passphrase(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "signals.db")
+    init_signal_store(db_path)
+    monkeypatch.setattr(server, "SIGNAL_STORE_PATH", db_path)
+    monkeypatch.setattr(server, "TV_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(server, "TV_WEBHOOK_PASSPHRASE", "tv-pass")
+
+    client = TestClient(server.app)
+    payload = {
+        "symbol": "MSFT",
+        "ts": "2026-02-26T10:00:00Z",
+        "timeframe": "1D",
+        "event": "entry",
+        "passphrase": "tv-pass",
+    }
+    response = client.post("/tv/webhook", json=payload)
+    assert response.status_code == 200
+
+    latest = get_latest_signals(
+        db_path,
+        asof=datetime(2026, 2, 26, 11, 0, tzinfo=timezone.utc),
+        max_age_minutes=240,
+        require_same_day=True,
+    )
+    assert "MSFT" in latest
+
+
+def test_webhook_accepts_query_passphrase(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "signals.db")
+    init_signal_store(db_path)
+    monkeypatch.setattr(server, "SIGNAL_STORE_PATH", db_path)
+    monkeypatch.setattr(server, "TV_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(server, "TV_WEBHOOK_PASSPHRASE", "tv-pass")
+
+    client = TestClient(server.app)
+    payload = {
+        "symbol": "NVDA",
+        "ts": "2026-02-26T10:00:00Z",
+        "timeframe": "1D",
+        "event": "entry",
+    }
+    response = client.post("/tv/webhook?passphrase=tv-pass", json=payload)
+    assert response.status_code == 200

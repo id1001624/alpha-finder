@@ -17,23 +17,21 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import pandas as pd
+import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
+from config import DISCORD_WEBHOOK_URL, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
 from signal_store import get_latest_signals
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
@@ -43,6 +41,7 @@ DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "la
 ALERT_DIR = BACKTEST_DIR / "alerts"
 ALERT_LOG_CSV = ALERT_DIR / "alert_log.csv"
 ALERT_MESSAGE_TXT = ALERT_DIR / "latest_alert_message.txt"
+AI_DECISION_LOG_CSV = BACKTEST_DIR / "ai_decision_log.csv"
 
 REQUIRED_COLS = [
     "decision_date",
@@ -52,6 +51,11 @@ REQUIRED_COLS = [
     "risk_level",
     "tech_status",
     "decision_tag",
+    "reason_summary",
+    "catalyst_summary",
+    "catalyst_type",
+    "catalyst_sentiment",
+    "source_ref",
 ]
 
 
@@ -116,6 +120,103 @@ def _fmt_tv_line(ticker: str, tv_map: Dict[str, object]) -> str:
     return f"TV:vwap={vwap},sqz={sqz}/{sqzv}"
 
 
+def _clip_text(value: object, limit: int = 120) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _sanitize_webhook_url(value: str) -> str:
+    cleaned = str(value or "").strip().strip('"').strip("'").strip()
+    cleaned = cleaned.strip("[]")
+    cleaned = cleaned.strip("<>")
+    return cleaned
+
+
+def _load_previous_top1(current_date: str) -> str:
+    if not AI_DECISION_LOG_CSV.exists():
+        return ""
+    try:
+        history = pd.read_csv(AI_DECISION_LOG_CSV, encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError, pd.errors.EmptyDataError):
+        return ""
+
+    if "decision_date" not in history.columns or "ticker" not in history.columns or "rank" not in history.columns:
+        return ""
+
+    history = history.copy()
+    history["decision_date"] = history["decision_date"].astype(str).str.strip()
+    history["ticker"] = history["ticker"].astype(str).str.strip().str.upper()
+    history["rank"] = pd.to_numeric(history["rank"], errors="coerce")
+    history = history[(history["decision_date"] != current_date) & (history["rank"] == 1)].copy()
+    if len(history) == 0:
+        return ""
+    history = history.sort_values(["decision_date"], ascending=[False])
+    return str(history.iloc[0].get("ticker", "")).strip().upper()
+
+
+def _build_bedtime_message(df: pd.DataFrame, tv_map: Dict[str, object], title_date: str) -> str:
+    selected = df.head(3).copy()
+    top1 = selected.iloc[0] if len(selected) > 0 else None
+    prev_top1 = _load_previous_top1(title_date)
+    changed = "NA"
+    if top1 is not None:
+        changed = "是" if prev_top1 and str(top1.get("ticker", "")).upper() != prev_top1 else "否"
+
+    lines = [
+        f"[Alpha Finder] 睡前摘要 {title_date}",
+        "",
+    ]
+
+    if top1 is not None:
+        lines.extend(
+            [
+                f"Top 1: {top1.get('ticker', 'NA')} | tag={top1.get('decision_tag', 'NA')} | risk={top1.get('risk_level', 'NA')} | Top1是否改變={changed}",
+                f"盤中確認: {_fmt_tv_line(str(top1.get('ticker', '')), tv_map)}",
+                f"主催化: {_clip_text(top1.get('catalyst_summary') or top1.get('catalyst_type') or '待確認', 140)}",
+                f"失效條件: {_clip_text(top1.get('reason_summary') or '待確認', 140)}",
+                "",
+                "Top 3:",
+            ]
+        )
+        for _, row in selected.iterrows():
+            lines.append(
+                f"- {row.get('rank', 'NA')}. {row.get('ticker', 'NA')} | {row.get('decision_tag', 'NA')} | {_clip_text(row.get('reason_summary'), 90)}"
+            )
+    else:
+        lines.append("No candidates available.")
+
+    lines.append("")
+    lines.append("用途: 睡前只看這版，隔天先盯 Top 1 與 Top 3。")
+    return "\n".join(lines)
+
+
+def _build_morning_message(df: pd.DataFrame, tv_map: Dict[str, object], title_date: str) -> str:
+    selected = df.head(3).copy()
+    top1 = selected.iloc[0] if len(selected) > 0 else None
+    lines = [
+        f"[Alpha Finder] Overnight Recap {title_date}",
+        "",
+    ]
+    if top1 is not None:
+        lines.append(
+            f"今日先看: {top1.get('ticker', 'NA')} | tag={top1.get('decision_tag', 'NA')} | {_fmt_tv_line(str(top1.get('ticker', '')), tv_map)}"
+        )
+        lines.append(f"原因: {_clip_text(top1.get('catalyst_summary') or top1.get('reason_summary'), 160)}")
+        lines.append("")
+        lines.append("候選觀察:")
+        for _, row in selected.iterrows():
+            lines.append(
+                f"- {row.get('rank', 'NA')}. {row.get('ticker', 'NA')} | risk={row.get('risk_level', 'NA')} | {_clip_text(row.get('reason_summary'), 90)}"
+            )
+    else:
+        lines.append("No candidates available.")
+    lines.append("")
+    lines.append("用途: 早上只回答三件事: Top1 是誰、理由有沒有變、先打開哪檔。")
+    return "\n".join(lines)
+
+
 def _build_message(df: pd.DataFrame, tv_map: Dict[str, object], top_n: int, tags: set[str], title_date: str) -> str:
     selected = df[df["decision_tag"].isin(tags)].copy()
     selected = selected.head(top_n)
@@ -145,26 +246,25 @@ def _build_message(df: pd.DataFrame, tv_map: Dict[str, object], top_n: int, tags
     return "\n".join(lines)
 
 
+def _render_message(df: pd.DataFrame, tv_map: Dict[str, object], top_n: int, tags: set[str], title_date: str, mode: str) -> str:
+    selected = df[df["decision_tag"].isin(tags)].copy().sort_values(["rank", "ticker"], ascending=[True, True])
+    if mode == "bedtime":
+        return _build_bedtime_message(selected, tv_map, title_date)
+    if mode == "morning":
+        return _build_morning_message(selected, tv_map, title_date)
+    return _build_message(selected, tv_map, top_n=top_n, tags=tags, title_date=title_date)
+
+
 def _post_json(url: str, payload: dict, headers: Optional[dict] = None, timeout: int = 15) -> tuple[bool, str]:
-    data = json.dumps(payload).encode("utf-8")
-    req_headers = {"Content-Type": "application/json"}
+    req_headers = {"Content-Type": "application/json", "User-Agent": "AlphaFinder/1.0"}
     if headers:
         req_headers.update(headers)
-
-    req = Request(url=url, data=data, headers=req_headers, method="POST")
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return True, f"{resp.status} {body[:200]}"
-    except HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")
-        except (OSError, ValueError, UnicodeDecodeError):
-            detail = str(exc)
-        return False, f"HTTP {exc.code}: {detail[:300]}"
-    except URLError as exc:
-        return False, f"URL error: {exc}"
-    except (TimeoutError, OSError, ValueError) as exc:
+        response = requests.post(url, json=payload, headers=req_headers, timeout=timeout)
+        if response.ok:
+            return True, f"{response.status_code} {response.text[:200]}"
+        return False, f"HTTP {response.status_code}: {response.text[:300]}"
+    except requests.RequestException as exc:
         return False, str(exc)
 
 
@@ -235,6 +335,7 @@ def main() -> int:
     parser.add_argument("--top-n", type=int, default=5, help="Top N rows to send")
     parser.add_argument("--tags", default="keep,watch", help="Comma separated tags to include, e.g. keep or keep,watch")
     parser.add_argument("--channel", default="discord", choices=["discord", "line", "both"], help="Notification channel")
+    parser.add_argument("--mode", default="full", choices=["full", "bedtime", "morning"], help="Discord/LINE message style")
     parser.add_argument("--dry-run", action="store_true", help="Print message only, do not send")
     args = parser.parse_args()
 
@@ -260,7 +361,14 @@ def main() -> int:
         decision_date = str(df["decision_date"].dropna().iloc[0])
 
     tv_map = _load_tv_map()
-    message = _build_message(df=df, tv_map=tv_map, top_n=max(1, int(args.top_n)), tags=tags, title_date=decision_date)
+    message = _render_message(
+        df=df,
+        tv_map=tv_map,
+        top_n=max(1, int(args.top_n)),
+        tags=tags,
+        title_date=decision_date,
+        mode=str(args.mode),
+    )
 
     ALERT_DIR.mkdir(parents=True, exist_ok=True)
     ALERT_MESSAGE_TXT.write_text(message, encoding="utf-8")
@@ -269,13 +377,16 @@ def main() -> int:
     print(message)
 
     sent_channels: List[str] = []
+    send_failed = False
     if not args.dry_run:
         if args.channel in {"discord", "both"}:
-            discord_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+            discord_url = _sanitize_webhook_url(os.getenv("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL))
             ok, detail = _send_discord(message, discord_url)
             print(f"[DISCORD] ok={ok} detail={detail}")
             if ok:
                 sent_channels.append("discord")
+            else:
+                send_failed = True
 
         if args.channel in {"line", "both"}:
             line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -284,6 +395,8 @@ def main() -> int:
             print(f"[LINE] ok={ok} detail={detail}")
             if ok:
                 sent_channels.append("line")
+            else:
+                send_failed = True
     else:
         sent_channels.append("dry_run")
 
@@ -307,12 +420,12 @@ def main() -> int:
                 }
             )
 
-    if log_rows:
+    if log_rows and not args.dry_run:
         _append_alert_log(log_rows)
         print(f"[ALERT_LOG] appended {len(log_rows)} rows -> {ALERT_LOG_CSV}")
 
     print(f"[ALERT_MSG] {ALERT_MESSAGE_TXT}")
-    return 0
+    return 4 if send_failed else 0
 
 
 if __name__ == "__main__":

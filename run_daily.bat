@@ -69,5 +69,12 @@ if not "%PIPE_EXIT_CODE%" == "0" (
 
 echo [%date% %time%] 掃描完成 OK >> "%LOG_FILE%"
 
+echo [%date% %time%] 步驟：同步 unified B bundle（Dropbox / local copy）開始 >> "%LOG_FILE%"
+"%PYTHON_EXE%" scripts\upload_ai_ready_to_dropbox.py >> "%LOG_FILE%" 2>&1
+set "DROPBOX_EXIT_CODE=%errorlevel%"
+if not "%DROPBOX_EXIT_CODE%" == "0" (
+    echo [%date% %time%] 警示：Dropbox 同步失敗（不中斷主流程） >> "%LOG_FILE%"
+)
+
 del /f /q "%LOCK_FILE%" > nul 2>&1
 exit /b %EXIT_CODE%

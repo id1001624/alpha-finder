@@ -1,6 +1,32 @@
 # Alpha Finder 配置文件
 import os
 
+try:
+    import winreg
+except ImportError:  # pragma: no cover - Windows only helper
+    winreg = None
+
+
+def _getenv(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+
+    if winreg is not None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+                reg_value, _ = winreg.QueryValueEx(key, name)
+                if reg_value not in (None, ""):
+                    return str(reg_value)
+        except OSError:
+            pass
+
+    return default
+
+
+def _getenv_bool(name: str, default: str = "false") -> bool:
+    return _getenv(name, default).strip().lower() == "true"
+
 # ============ 市場和指數配置 ============
 # 🎯 根據投資策略選擇要監控的市場/指數
 # 💡 建議: 使用單個指數達到最佳效果，避免過度限制搜尋結果
@@ -211,16 +237,52 @@ NOTIFICATION_ENABLED = False
 NOTIFICATION_EMAIL = "your-email@gmail.com"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
+DISCORD_WEBHOOK_URL = _getenv("DISCORD_WEBHOOK_URL", "")
+
+# ============ Dropbox 上傳設定（選用）============
+DROPBOX_UPLOAD_ENABLED = _getenv_bool("DROPBOX_UPLOAD_ENABLED", "false")
+DROPBOX_ACCESS_TOKEN = _getenv("DROPBOX_ACCESS_TOKEN", "")
+DROPBOX_UPLOAD_ROOT = _getenv("DROPBOX_UPLOAD_ROOT", "/Apps/AlphaFinder")
+DROPBOX_COPY_DIR = _getenv("DROPBOX_COPY_DIR", "")
+DROPBOX_CREATE_SHARED_LINK = _getenv_bool("DROPBOX_CREATE_SHARED_LINK", "false")
 
 # ============ TradingView Webhook 訊號設定 ============
 USE_TRADINGVIEW_SIGNALS = True
-TV_WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
-SIGNAL_STORE_PATH = os.getenv("SIGNAL_STORE_PATH", "signals.db")
-SIGNAL_MAX_AGE_MINUTES = int(os.getenv("SIGNAL_MAX_AGE_MINUTES", "240"))
-SIGNAL_REQUIRE_SAME_DAY = os.getenv("SIGNAL_REQUIRE_SAME_DAY", "true").lower() == "true"
-ALLOW_PLAIN_TEXT_WEBHOOK = os.getenv("ALLOW_PLAIN_TEXT_WEBHOOK", "false").lower() == "true"
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
-WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8000"))
+TV_WEBHOOK_SECRET = _getenv("TV_WEBHOOK_SECRET", "")
+TV_WEBHOOK_PASSPHRASE = _getenv("TV_WEBHOOK_PASSPHRASE", TV_WEBHOOK_SECRET)
+SIGNAL_STORE_PATH = _getenv("SIGNAL_STORE_PATH", "signals.db")
+SIGNAL_MAX_AGE_MINUTES = int(_getenv("SIGNAL_MAX_AGE_MINUTES", "240"))
+SIGNAL_REQUIRE_SAME_DAY = _getenv("SIGNAL_REQUIRE_SAME_DAY", "true").lower() == "true"
+ALLOW_PLAIN_TEXT_WEBHOOK = _getenv_bool("ALLOW_PLAIN_TEXT_WEBHOOK", "false")
+WEBHOOK_HOST = _getenv("WEBHOOK_HOST", "0.0.0.0")
+WEBHOOK_PORT = int(_getenv("WEBHOOK_PORT", "8000"))
+TV_AUTO_EXECUTION_ALERTS_ENABLED = _getenv_bool("TV_AUTO_EXECUTION_ALERTS_ENABLED", "true")
+TV_EXECUTION_ALERTS_TOP_N = int(_getenv("TV_EXECUTION_ALERTS_TOP_N", "5"))
+
+# ============ Repo 內建盤中 execution engine ============
+INTRADAY_ENGINE_ENABLED = _getenv_bool("INTRADAY_ENGINE_ENABLED", "true")
+INTRADAY_DATA_PROVIDER = _getenv("INTRADAY_DATA_PROVIDER", "auto").lower()  # auto | finnhub | yfinance
+INTRADAY_INTERVAL = _getenv("INTRADAY_INTERVAL", "5m")
+INTRADAY_PERIOD = _getenv("INTRADAY_PERIOD", "5d")
+INTRADAY_PREPOST = _getenv_bool("INTRADAY_PREPOST", "false")
+INTRADAY_FINNHUB_TIMEOUT_SEC = float(_getenv("INTRADAY_FINNHUB_TIMEOUT_SEC", "10.0"))
+INTRADAY_TOP_N = int(_getenv("INTRADAY_TOP_N", "5"))
+INTRADAY_MAX_SYMBOLS = int(_getenv("INTRADAY_MAX_SYMBOLS", "8"))
+INTRADAY_POLL_SECONDS = int(_getenv("INTRADAY_POLL_SECONDS", "300"))
+INTRADAY_STOP_LOSS_PCT = float(_getenv("INTRADAY_STOP_LOSS_PCT", "-3.0"))
+INTRADAY_TAKE_PROFIT_PCT = float(_getenv("INTRADAY_TAKE_PROFIT_PCT", "6.0"))
+INTRADAY_MIN_ADD_PROFIT_PCT = float(_getenv("INTRADAY_MIN_ADD_PROFIT_PCT", "1.5"))
+INTRADAY_MAX_ADD_COUNT = int(_getenv("INTRADAY_MAX_ADD_COUNT", "2"))
+INTRADAY_ENTRY_SIZE_FRACTION = float(_getenv("INTRADAY_ENTRY_SIZE_FRACTION", "0.33"))
+INTRADAY_ADD_SIZE_FRACTION = float(_getenv("INTRADAY_ADD_SIZE_FRACTION", "0.25"))
+INTRADAY_REDUCE_SIZE_FRACTION = float(_getenv("INTRADAY_REDUCE_SIZE_FRACTION", "0.5"))
+
+# ============ Discord Bot（回報成交 / 查詢部位）============
+DISCORD_BOT_ENABLED = _getenv_bool("DISCORD_BOT_ENABLED", "false")
+DISCORD_BOT_TOKEN = _getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_BOT_PREFIX = _getenv("DISCORD_BOT_PREFIX", "!")
+DISCORD_BOT_ALLOWED_CHANNEL_IDS = _getenv("DISCORD_BOT_ALLOWED_CHANNEL_IDS", "")
+DISCORD_BOT_SYNC_GUILD_ID = _getenv("DISCORD_BOT_SYNC_GUILD_ID", "")
 
 # ============ Demo / TV 補圖清單設定 ============
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
