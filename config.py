@@ -239,17 +239,6 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 DISCORD_WEBHOOK_URL = _getenv("DISCORD_WEBHOOK_URL", "")
 
-# ============ Dropbox 上傳設定（選用）============
-DROPBOX_UPLOAD_ENABLED = _getenv_bool("DROPBOX_UPLOAD_ENABLED", "false")
-DROPBOX_ACCESS_TOKEN = _getenv("DROPBOX_ACCESS_TOKEN", "")
-DROPBOX_APP_KEY = _getenv("DROPBOX_APP_KEY", _getenv("APP_KEY", ""))
-DROPBOX_APP_SECRET = _getenv("DROPBOX_APP_SECRET", _getenv("APP_SECRET", ""))
-DROPBOX_REFRESH_TOKEN = _getenv("DROPBOX_REFRESH_TOKEN", _getenv("REFRESH_TOKEN", ""))
-DROPBOX_REDIRECT_URI = _getenv("DROPBOX_REDIRECT_URI", _getenv("REDIRECT_URI", "http://localhost"))
-DROPBOX_UPLOAD_ROOT = _getenv("DROPBOX_UPLOAD_ROOT", "/Apps/AlphaFinder")
-DROPBOX_COPY_DIR = _getenv("DROPBOX_COPY_DIR", "")
-DROPBOX_CREATE_SHARED_LINK = _getenv_bool("DROPBOX_CREATE_SHARED_LINK", "false")
-
 # ============ TradingView Webhook 訊號設定 ============
 USE_TRADINGVIEW_SIGNALS = True
 TV_WEBHOOK_SECRET = _getenv("TV_WEBHOOK_SECRET", "")
