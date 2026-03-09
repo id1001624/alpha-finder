@@ -112,6 +112,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 ### 5. Git Rules
 
+- 使用者說告一段落就自動做commit+push動作
 - 若使用者明確要求 commit / push，先完成必要驗證，再依功能分組提交
 - commit message 預設使用中文，內容要能看出變更主題
 - 若同一次工作包含多個明顯獨立主題，優先做多個小 commit、最後一次 push
