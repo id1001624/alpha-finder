@@ -80,6 +80,8 @@ def main() -> int:
 
         result = run_intraday_execution_engine(top_n=max(1, int(args.top_n)), dry_run=args.dry_run)
         print(result.get("message") or result)
+        if result.get("discord_ok") is not None:
+            print(f"[DISCORD] ok={result.get('discord_ok')} detail={result.get('discord_detail', '')}")
         if not args.loop:
             return 0 if result.get("ok") else 1
         time.sleep(max(30, int(args.poll_seconds)))

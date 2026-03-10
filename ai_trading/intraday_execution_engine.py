@@ -617,13 +617,15 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         _save_state(state)
 
     message = ""
+    discord_ok = None
+    discord_detail = ""
     if action_rows:
         lines = [f"[Alpha Finder] Repo Intraday Engine {now_ts}", ""]
         lines.extend(_format_user_line(row) for row in action_rows)
         lines.extend(["", "提醒: 這是系統計算出的執行建議，不是自動下單。實際成交請用 Discord Bot 回報。"])
         message = "\n".join(lines)
         if not dry_run:
-            _send_discord(message)
+            discord_ok, discord_detail = _send_discord(message)
 
     return {
         "ok": True,
@@ -632,4 +634,6 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         "action_count": len(action_rows),
         "snapshot_file": str(SNAPSHOT_FILE),
         "message": message,
+        "discord_ok": discord_ok,
+        "discord_detail": discord_detail,
     }
