@@ -112,9 +112,11 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 ### 5. Git Rules
 
+- commit 與 push 規則除了本檔外，還必須同步遵守 `.github/prompts/GitRules.prompt.md`
+- commit message 預設採用帶 type 前綴的格式，例如：`feat(project): 新增 cloud_state 同步`
 - 使用者說告一段落就自動做commit+push動作
 - 若使用者明確要求 commit / push，先完成必要驗證，再依功能分組提交
-- commit message 預設使用中文，內容要能看出變更主題
+- commit message 主旨預設使用繁體中文，內容要能看出變更主題
 - 若同一次工作包含多個明顯獨立主題，優先做多個小 commit、最後一次 push
 - 若使用者沒有明確要求，不要自動 commit 或 push
 

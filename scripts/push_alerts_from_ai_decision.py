@@ -31,6 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from cloud_state import CLOUD_AI_DECISION_LATEST
 from config import DISCORD_WEBHOOK_URL, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
 from signal_store import get_latest_signals
 
@@ -62,6 +63,14 @@ REQUIRED_COLS = [
 
 def _find_latest_decision_csv() -> Optional[Path]:
     found: List[tuple[float, Path]] = []
+    static_candidates = [CLOUD_AI_DECISION_LATEST, BACKTEST_DIR / "ai_decision_latest.csv"]
+    for file in static_candidates:
+        if not file.exists():
+            continue
+        try:
+            found.append((file.stat().st_mtime, file))
+        except OSError:
+            continue
     for folder in [INBOX_DIR, AI_READY_LATEST_DIR, DAILY_REFRESH_LATEST_DIR]:
         if not folder.exists():
             continue

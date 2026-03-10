@@ -6,6 +6,8 @@ from typing import Optional, Tuple
 
 import pandas as pd
 
+from cloud_state import CLOUD_POSITIONS_LATEST, preferred_runtime_path, sync_positions_latest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
@@ -49,7 +51,8 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
 
 
-def load_positions(path: Path = POSITIONS_FILE) -> pd.DataFrame:
+def load_positions(path: Path | None = None) -> pd.DataFrame:
+    path = preferred_runtime_path(CLOUD_POSITIONS_LATEST, POSITIONS_FILE) if path is None else path
     df = _safe_read_csv(path)
     if len(df) == 0:
         return pd.DataFrame(columns=POSITION_FIELDS)
@@ -79,6 +82,8 @@ def save_positions(df: pd.DataFrame, path: Path = POSITIONS_FILE) -> Path:
     out = out[POSITION_FIELDS].copy()
     out = out[pd.to_numeric(out["quantity"], errors="coerce").fillna(0.0) > 0].copy()
     out.to_csv(path, index=False, encoding="utf-8-sig")
+    if Path(path) == POSITIONS_FILE:
+        sync_positions_latest(POSITIONS_FILE)
     return path
 
 

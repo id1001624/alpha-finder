@@ -108,7 +108,11 @@ python .\scripts\record_ai_decision.py --auto-latest
 - 也有對應的 bedtime recap 與 morning recap workflows
 - 排程採用偏移分鐘，不用整點附近的 0,5,10
 - workflow 會跑在 default branch 最新 commit，不會讀你本機未提交檔案
-- 若你要讓雲端監控也吃到最新持倉與決策，`ai_decision_latest.csv`、`positions_latest.csv` 等 runtime 檔案就必須同步到 repo 或外部存放
+- GitHub Actions 優先讀 `cloud_state/` 內同步過去的 runtime 檔案，而不是直接讀被 ignore 的 `repo_outputs/`
+- 目前同步目標是 `ai_decision_latest.csv`、`positions_latest.csv`，以及有資料時的 `execution_trade_latest.csv`
+- `scripts/record_ai_decision.py` 會在成功寫出最新決策後同步 `cloud_state/ai_decision_latest.csv`
+- Discord bot 在 `/buy`、`/add`、`/sell` 成功寫入持倉後，會同步 `cloud_state/positions_latest.csv`
+- 這些同步目前只更新工作目錄，不會在每次成交後自動 commit/push；若未來要真正即時雲端同步，應改成外部存放
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
 
 所以 README 不再列這些手動執行指令，避免你混淆。

@@ -10,6 +10,8 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from cloud_state import CLOUD_AI_DECISION_LATEST, CLOUD_EXECUTION_LATEST, preferred_runtime_path, sync_execution_latest
+
 from config import (
     DISCORD_WEBHOOK_URL,
     FINNHUB_API_KEY,
@@ -35,7 +37,7 @@ from .position_state import POSITIONS_FILE, get_position, load_positions
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
-AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"
+AI_DECISION_LATEST = preferred_runtime_path(CLOUD_AI_DECISION_LATEST, BACKTEST_DIR / "ai_decision_latest.csv")
 ALERT_DIR = BACKTEST_DIR / "alerts"
 INTRADAY_DIR = BACKTEST_DIR / "intraday"
 STATE_FILE = ALERT_DIR / "intraday_engine_state.json"
@@ -195,6 +197,7 @@ def _write_execution_outputs(rows: List[dict]) -> None:
 
     latest_df = _dedupe_and_sort_execution_df(new_df)
     latest_df.to_csv(EXECUTION_LATEST, index=False, encoding="utf-8-sig")
+    sync_execution_latest(EXECUTION_LATEST)
 
     for execution_date, daily_df in latest_df.groupby("execution_date", dropna=False):
         if not execution_date:
