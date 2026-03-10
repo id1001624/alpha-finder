@@ -14,6 +14,7 @@ set "BEDTIME_TIME=22:15"
 set "MORNING_TIME=07:15"
 set "ENABLE_LOCAL_RECAP_TASKS=false"
 set "ENABLE_LOCAL_ENGINE_TASKS=false"
+set "ENABLE_LOCAL_BOT_AUTOSTART=false"
 set "ENGINE_START_TIME=21:22"
 set "ENGINE_REPEAT_MINUTES=5"
 set "ENGINE_DURATION=07:50"
@@ -50,11 +51,16 @@ if /i "%ENABLE_LOCAL_ENGINE_TASKS%" == "true" (
     if exist "%ENGINE_STARTUP_FILE%" del /f /q "%ENGINE_STARTUP_FILE%" > nul 2>&1
 )
 
-call :ensure_logon_autostart "%BOT_TASK%" "%BASE_DIR%\run_discord_trade_bot.bat" %BOT_DELAY% "%BOT_STARTUP_FILE%"
-if errorlevel 1 exit /b 1
+if /i "%ENABLE_LOCAL_BOT_AUTOSTART%" == "true" (
+    call :ensure_logon_autostart "%BOT_TASK%" "%BASE_DIR%\run_discord_trade_bot.bat" %BOT_DELAY% "%BOT_STARTUP_FILE%"
+    if errorlevel 1 exit /b 1
+) else (
+    schtasks /delete /tn "%BOT_TASK%" /f > nul 2>&1
+    if exist "%BOT_STARTUP_FILE%" del /f /q "%BOT_STARTUP_FILE%" > nul 2>&1
+)
 
 echo.
-echo [完成] 已建立四個排程：
+echo [完成] 已同步本機排程與自啟設定：
 if /i "%ENABLE_LOCAL_RECAP_TASKS%" == "true" (
     echo - %BEDTIME_TASK% 每日 %BEDTIME_TIME%
     echo - %MORNING_TASK% 每日 %MORNING_TIME%
@@ -67,7 +73,11 @@ if /i "%ENABLE_LOCAL_ENGINE_TASKS%" == "true" (
 ) else (
     echo - %ENGINE_TASK% 已停用，改由 GitHub Actions 處理盤中 engine
 )
-echo - %BOT_TASK% 使用者登入後 %BOT_DELAY% 啟動，若排程權限不足則改寫入 Startup
+if /i "%ENABLE_LOCAL_BOT_AUTOSTART%" == "true" (
+    echo - %BOT_TASK% 使用者登入後 %BOT_DELAY% 啟動，若排程權限不足則改寫入 Startup
+) else (
+    echo - %BOT_TASK% 已停用，本機 bot 不再自啟，正式主路徑改由雲端主機 systemd 服務處理
+)
 echo.
 echo 查詢指令：
 echo schtasks /query /tn "%BEDTIME_TASK%" /fo list /v
