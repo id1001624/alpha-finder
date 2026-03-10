@@ -17,6 +17,9 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       INTRADAY_ACTIVE_TIMEZONE: Asia/Taipei
+      TURSO_ENABLED: "true"
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
 
     steps:
       - name: Checkout

@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -16,6 +18,7 @@ from config import (
     DISCORD_BOT_SYNC_GUILD_ID,
     DISCORD_BOT_TOKEN,
 )
+from turso_state import load_recent_execution_log, load_recent_trade_ledger
 
 
 def _parse_allowed_channel_ids(raw: str) -> set[int]:
@@ -50,14 +53,48 @@ def _help_text() -> str:
         "/add ticker quantity price [note]\n"
         "/sell ticker quantity price [note]\n"
         "/positions\n"
-        "/position ticker\n\n"
+        "/position ticker\n"
+        "/trades [ticker] [limit]\n"
+        "/executions [ticker] [limit]\n\n"
         "也保留文字指令相容:\n"
         f"{DISCORD_BOT_PREFIX}buy AAPL 100 188.2\n"
         f"{DISCORD_BOT_PREFIX}add AAPL 50 190.1\n"
         f"{DISCORD_BOT_PREFIX}sell AAPL 80 196.5\n"
         f"{DISCORD_BOT_PREFIX}positions\n"
-        f"{DISCORD_BOT_PREFIX}position AAPL"
+        f"{DISCORD_BOT_PREFIX}position AAPL\n"
+        f"{DISCORD_BOT_PREFIX}trades AAPL 5\n"
+        f"{DISCORD_BOT_PREFIX}executions AAPL 5"
     )
+
+
+def _format_recent_trades(ticker: str = "", limit: int = 5) -> str:
+    df = load_recent_trade_ledger(limit=limit, ticker=ticker)
+    ticker_label = str(ticker or "").strip().upper()
+    title = f"最近成交 {ticker_label}:" if ticker_label else "最近成交:"
+    if len(df) == 0:
+        return f"{title}\n目前查不到 Turso 成交紀錄。"
+    lines = [title]
+    for _, row in df.iterrows():
+        lines.append(
+            f"- {row.get('recorded_at', '')} | {row.get('ticker', '')} | {str(row.get('side', '')).upper()} | qty={float(row.get('quantity', 0.0)):g} | price={float(row.get('price', 0.0)):.2f} | after={float(row.get('after_qty', 0.0)):g}"
+        )
+    return "\n".join(lines)
+
+
+def _format_recent_executions(ticker: str = "", limit: int = 5) -> str:
+    df = load_recent_execution_log(limit=limit, ticker=ticker)
+    ticker_label = str(ticker or "").strip().upper()
+    title = f"最近 execution {ticker_label}:" if ticker_label else "最近 execution:"
+    if len(df) == 0:
+        return f"{title}\n目前查不到 Turso execution 紀錄。"
+    lines = [title]
+    for _, row in df.iterrows():
+        close_value = pd.to_numeric(row.get("close"), errors="coerce")
+        close_text = "NA" if pd.isna(close_value) else f"{float(close_value):.2f}"
+        lines.append(
+            f"- {row.get('execution_date', '')} {row.get('execution_time', '')} | {row.get('ticker', '')} | {str(row.get('action', '')).upper()} | rank={int(pd.to_numeric(row.get('rank'), errors='coerce') or 0)} | close={close_text} | tf={row.get('timeframe', '') or 'NA'}"
+        )
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -143,6 +180,22 @@ def main() -> int:
         await ctx.send(
             f"{record['ticker']} | qty={float(record['quantity']):g} | avg={float(record['avg_cost']):.2f} | realized={float(record['realized_pnl']):.2f}"
         )
+
+    @bot.hybrid_command(name="trades", description="查詢最近成交紀錄（Turso）")
+    @app_commands.describe(ticker="可選，股票代號，例如 AAPL", limit="最多幾筆，預設 5")
+    async def trades(ctx, ticker: str = "", limit: int = 5):
+        if not await _guard_channel(ctx):
+            return
+        limit_value = max(1, min(int(limit), 20))
+        await ctx.send(_format_recent_trades(ticker=ticker, limit=limit_value))
+
+    @bot.hybrid_command(name="executions", description="查詢最近 execution 歷史（Turso）")
+    @app_commands.describe(ticker="可選，股票代號，例如 AAPL", limit="最多幾筆，預設 5")
+    async def executions(ctx, ticker: str = "", limit: int = 5):
+        if not await _guard_channel(ctx):
+            return
+        limit_value = max(1, min(int(limit), 20))
+        await ctx.send(_format_recent_executions(ticker=ticker, limit=limit_value))
 
     async def _record_trade(ctx, side: str, ticker: str, quantity: float, price: float, note: str = ""):
         if not await _guard_channel(ctx):

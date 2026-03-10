@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import DISCORD_WEBHOOK_URL, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
 from signal_store import get_latest_signals
+from turso_state import append_execution_log_rows, sync_execution_latest
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"
@@ -282,6 +283,8 @@ def _write_execution_outputs(rows: List[dict]) -> None:
 
     latest_df = _dedupe_and_sort_execution_df(new_df)
     latest_df.to_csv(EXECUTION_LATEST, index=False, encoding="utf-8-sig")
+    sync_execution_latest(EXECUTION_LATEST)
+    append_execution_log_rows(rows)
 
     for execution_date, daily_df in latest_df.groupby("execution_date", dropna=False):
         if not execution_date:

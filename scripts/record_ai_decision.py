@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from cloud_state import sync_ai_decision_latest
+from turso_state import sync_ai_decision_latest as sync_ai_decision_latest_to_turso
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 DAILY_AI_DIR = BACKTEST_DIR / "daily_ai_decisions"
@@ -285,6 +286,7 @@ def main() -> None:
     print(f"每日 CSV: {DAILY_AI_DIR / (decision_date + '_ai_decision.csv')}")
     print(f"最新 CSV: {LATEST_CSV_FILE}")
     print(f"cloud_state: {sync_ai_decision_latest(LATEST_CSV_FILE) or '未同步'}")
+    print(f"turso_state: {sync_ai_decision_latest_to_turso(LATEST_CSV_FILE) or '未同步'}")
 
 
 if __name__ == "__main__":

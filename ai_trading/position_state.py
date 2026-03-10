@@ -7,6 +7,12 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from cloud_state import CLOUD_POSITIONS_LATEST, preferred_runtime_path, sync_positions_latest
+from turso_state import (
+    STATE_KEY_POSITIONS_LATEST,
+    append_trade_ledger_row as append_trade_ledger_row_to_turso,
+    load_runtime_df_with_fallback,
+    sync_positions_latest as sync_positions_latest_to_turso,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -52,8 +58,11 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
 
 
 def load_positions(path: Path | None = None) -> pd.DataFrame:
-    path = preferred_runtime_path(CLOUD_POSITIONS_LATEST, POSITIONS_FILE) if path is None else path
-    df = _safe_read_csv(path)
+    if path is None:
+        preferred_path = preferred_runtime_path(CLOUD_POSITIONS_LATEST, POSITIONS_FILE)
+        df, _ = load_runtime_df_with_fallback(STATE_KEY_POSITIONS_LATEST, [preferred_path, POSITIONS_FILE])
+    else:
+        df = _safe_read_csv(path)
     if len(df) == 0:
         return pd.DataFrame(columns=POSITION_FIELDS)
     out = df.copy()
@@ -84,6 +93,7 @@ def save_positions(df: pd.DataFrame, path: Path = POSITIONS_FILE) -> Path:
     out.to_csv(path, index=False, encoding="utf-8-sig")
     if Path(path) == POSITIONS_FILE:
         sync_positions_latest(POSITIONS_FILE)
+        sync_positions_latest_to_turso(POSITIONS_FILE)
     return path
 
 
@@ -92,6 +102,8 @@ def append_trade_ledger(row: dict, path: Path = TRADE_LEDGER_FILE) -> Path:
     exists = path.exists()
     out = pd.DataFrame([row], columns=TRADE_LEDGER_FIELDS)
     out.to_csv(path, mode="a", header=not exists, index=False, encoding="utf-8-sig")
+    if Path(path) == TRADE_LEDGER_FILE:
+        append_trade_ledger_row_to_turso(row)
     return path
 
 

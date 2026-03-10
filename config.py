@@ -239,6 +239,11 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 DISCORD_WEBHOOK_URL = _getenv("DISCORD_WEBHOOK_URL", "")
 
+# ============ Turso 雲端最新狀態同步（選用）============
+TURSO_ENABLED = _getenv_bool("TURSO_ENABLED", "false")
+TURSO_DATABASE_URL = _getenv("TURSO_DATABASE_URL", "")
+TURSO_AUTH_TOKEN = _getenv("TURSO_AUTH_TOKEN", "")
+
 # ============ TradingView Webhook 訊號設定 ============
 USE_TRADINGVIEW_SIGNALS = True
 TV_WEBHOOK_SECRET = _getenv("TV_WEBHOOK_SECRET", "")
