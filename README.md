@@ -36,6 +36,14 @@ Alpha Finder 現在已經是一條完整的研究到執行追蹤流程。
 python .\scripts\record_ai_decision.py --auto-latest
 ```
 
+如果同一天你讓 AI 重生一份新版 ai_decision，想用新版整份取代舊版，改用：
+
+```powershell
+python .\scripts\record_ai_decision.py --auto-latest --replace-date
+```
+
+這會先把 ai_decision_log.csv 中同一個 decision_date 的舊列刪掉，再寫入新版，避免殘留舊 ticker。
+
 做完後，盤中提醒與 Discord 回報成交就是這條線的後半段。
 
 ## Discord 怎麼用
@@ -118,30 +126,11 @@ python .\scripts\record_ai_decision.py --auto-latest
 - 更新雲端 bot 程式時，直接執行 `deploy\redeploy_discord_bot.ps1`
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
 
-本機排程現在只視為備援，不是正式主路徑：
-
-- 如果你重跑 `setup.bat`，預設不會再建立本機 intraday engine 夜間排程
-- 本機 22:15 與 07:15 recap 排程也預設停用
-- 本機 Discord bot 自啟現在也預設停用，避免和 Oracle Cloud 上的正式 bot 雙開
-
-本機 recap 排程：
-
-- 既然雲端 recap 已上線，本機 22:15 與 07:15 排程可以刪除，避免重複發送
-- `setup.bat` 現在預設會停用這兩個本機 recap 排程
-- 若你真的想保留本機備援，再把 `setup.bat` 內的 `ENABLE_LOCAL_RECAP_TASKS` 改成 `true`
-
-所以 README 不再列這些手動執行指令，避免你混淆。
-
 如果你改了 token、頻道 ID 或其他設定，只要重跑一次：
 
 ```powershell
 .\setup.bat
 ```
-
-你現在晚上是否需要再開著電腦：
-
-- `engine` 與 `bedtime/morning recap` 不需要，本機關機也沒關係
-- `Discord bot` 現在跑在 Oracle Cloud VM，上述 Windows 電腦關機也不影響 slash commands
 
 更新 bot 是什麼意思：
 
@@ -166,8 +155,40 @@ python .\scripts\record_ai_decision.py --auto-latest
 
 預設是 AI_RESEARCH_MODE='web'。
 
+你如果現在就在這個路徑：
+
+```powershell
+(.venv) PS C:\Users\w6359\OneDrive\文件\alpha-finder>
+```
+
+直接用這個指令切換：
+
+- 切到 web：`./switch_ai_research_mode.ps1 web`
+- 切到 api：`./switch_ai_research_mode.ps1 api`
+- 查看目前模式：`./switch_ai_research_mode.ps1 status`
+
+這個腳本會同時處理：
+
+- `AI_RESEARCH_MODE`
+- `CATALYST_DETECTOR_ENABLED`
+
+也就是說：
+
+- `web` 會設成 `AI_RESEARCH_MODE=web` 並關掉 `CATALYST_DETECTOR_ENABLED`
+- `api` 會設成 `AI_RESEARCH_MODE=api` 並打開 `CATALYST_DETECTOR_ENABLED`
+
+切完後直接跑：
+
+```powershell
+.\run_daily.bat
+```
+
+就會用你剛切好的模式往下跑。
+
 - web：你把 bundle 丟給網頁 AI，然後把回傳的 ai_decision_YYYY-MM-DD.csv 放進 inbox
 - api：系統自己走 Tavily + Gemini 備援流程
+
+如果 web AI 第一次輸出有錯、你又重生同一天的新版本，第二次歸檔建議加 `--replace-date`，把當天整份決策完整覆蓋。
 
 兩種模式最後都要回到同一份決策契約：
 

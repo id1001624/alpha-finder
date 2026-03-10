@@ -197,15 +197,15 @@ AI_DECISION_LOW_VOL = float(os.getenv("AI_DECISION_LOW_VOL", "1.3"))
 AI_DECISION_OVERHEAT_GAIN = float(os.getenv("AI_DECISION_OVERHEAT_GAIN", "12.0"))
 
 # ============ AI Catalyst Detector（Tavily + Gemini Flash）===========
-AI_RESEARCH_MODE = os.getenv("AI_RESEARCH_MODE", "web").lower()  # web | api
-CATALYST_DETECTOR_ENABLED = os.getenv("CATALYST_DETECTOR_ENABLED", "false").lower() == "true"
+AI_RESEARCH_MODE = _getenv("AI_RESEARCH_MODE", "web").lower()  # web | api
+CATALYST_DETECTOR_ENABLED = _getenv_bool("CATALYST_DETECTOR_ENABLED", "false")
 CATALYST_TOP_K = int(os.getenv("CATALYST_TOP_K", "12"))
 CATALYST_TAVILY_MAX_RESULTS = int(os.getenv("CATALYST_TAVILY_MAX_RESULTS", "4"))
 CATALYST_HTTP_TIMEOUT_SEC = float(os.getenv("CATALYST_HTTP_TIMEOUT_SEC", "15.0"))
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", os.getenv("TAVILY_API", ""))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GEMINI_API", ""))
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+TAVILY_API_KEY = _getenv("TAVILY_API_KEY", _getenv("TAVILY_API", ""))
+GEMINI_API_KEY = _getenv("GEMINI_API_KEY", _getenv("GEMINI_API", ""))
+GEMINI_MODEL = _getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ============ Scanner Profile（條件組）===========
 SCANNER_PROFILE = os.getenv("SCANNER_PROFILE", "balanced").lower()  # balanced | monster_v1

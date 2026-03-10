@@ -223,8 +223,7 @@ def main() -> int:
     research_mode = str(getattr(app_config, 'AI_RESEARCH_MODE', 'web')).strip().lower()
     if research_mode not in {'web', 'api'}:
         research_mode = 'web'
-    detector_env = str(os.getenv('CATALYST_DETECTOR_ENABLED', '')).strip().lower()
-    api_detector_enabled = research_mode == 'api' and detector_env != 'false'
+    api_detector_enabled = research_mode == 'api' and bool(getattr(app_config, 'CATALYST_DETECTOR_ENABLED', False))
 
     gemini_model = str(getattr(app_config, 'GEMINI_MODEL', 'gemini-2.0-flash'))
     api_meta = {'enabled': False, 'rows': 0, 'reason': 'mode_web' if research_mode != 'api' else 'detector_disabled'}
