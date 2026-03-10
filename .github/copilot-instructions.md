@@ -85,9 +85,9 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 - `intraday monitor`、`bedtime recap`、`morning recap` 已經是雲端正式主路徑
 - 本機 Windows 排程現在只應描述為備援，不是預設夜間運作模型
-- `setup.bat` 應預設停用本機 recap 與本機 intraday engine 排程
+- `setup.bat` 應預設停用本機 recap、本機 intraday engine 排程，以及本機 Discord bot 自啟
 - `cloud_state/` 已退場，不應再被當成正式 runtime 路徑描述
-- Discord Bot 仍可能用本機登入自啟或 Startup fallback，直到未來搬去雲端 host
+- Discord Bot 正式主路徑已搬到 Oracle Cloud Ubuntu 的 systemd 服務；本機 bot 只能描述為緊急備援
 
 ---
 
@@ -134,6 +134,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 - config.py: 中央設定
 - run_daily.bat: 日更主入口
 - setup.bat: Windows 排程與自啟配置
+- deploy/redeploy_discord_bot.ps1: 一鍵把最新 bot 程式重新部署到 Oracle Cloud VM
 - scripts/record_ai_decision.py: 決策歸檔
 - scripts/run_intraday_execution_engine.py: 盤中 engine 啟動器
 - scripts/run_discord_trade_bot.py: Discord 成交回報 bot

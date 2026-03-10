@@ -2,6 +2,8 @@
 
 這份文件的目標是把 Discord bot 從本機常駐改成 Linux 雲端主機常駐，讓整套系統夜間不再依賴這台 Windows 電腦。
 
+目前正式主機已切到 Oracle Cloud Ubuntu，systemd service 名稱是 `alpha-finder-discord-bot.service`。
+
 ## 建議主機
 
 - Ubuntu 22.04 或 24.04 小型 VPS
@@ -26,6 +28,32 @@
 9. 執行 `sudo systemctl enable --now alpha-finder-discord-bot`
 10. 用 `sudo systemctl status alpha-finder-discord-bot` 確認服務在線
 
+## 日常更新 bot
+
+當你修改 bot 相關程式後，不需要重新手動 SSH 一輪。現在本機直接執行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\redeploy_discord_bot.ps1
+```
+
+這個腳本會：
+
+1. 以目前 repo 的 `HEAD` 重新打包部署內容
+2. 上傳到 Oracle VM 的 `/opt/alpha-finder`
+3. 視需要重跑 `pip install -r requirements.txt`
+4. 重啟 `alpha-finder-discord-bot.service`
+5. 回傳 `systemctl status` 與最新 bot log
+
+注意：這裡的 `HEAD` 指的是目前已提交的 git 版本。如果你剛改完 bot 程式但還沒 commit，先 commit 再 redeploy，才會把那些更新送上 Oracle VM。
+
+如果你同時有更新 `DISCORD_BOT_TOKEN`、Turso 連線或其他 bot 環境變數，就改用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\redeploy_discord_bot.ps1 -SyncEnv
+```
+
+若只是純 Python 程式改動、`requirements.txt` 沒變，也可以加上 `-SkipPipInstall` 加快更新。
+
 ## 完成 cutover 後的本機清理
 
 在確認雲端 bot 已經穩定上線後，再移除本機 Startup 自啟：
@@ -35,6 +63,8 @@ Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\AlphaFin
 ```
 
 如果本機還有手動開的 bot 視窗，也一併關掉。
+
+另外，`setup.bat` 現在預設不會再重建本機 bot 自啟；除非你真的要做緊急備援，否則不需要把它打開。
 
 ## 什麼時候算真的完成
 

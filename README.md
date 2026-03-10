@@ -115,13 +115,14 @@ python .\scripts\record_ai_decision.py --auto-latest
 - 本機 CSV 現在主要保留給 backtest、人工檢查與最後備援，不再需要 `cloud_state/`
 - Turso 註冊與設定步驟看 `docs/turso_setup.md`
 - Discord bot 雲端主機部署步驟看 `docs/discord_bot_cloud_host.md`
+- 更新雲端 bot 程式時，直接執行 `deploy\redeploy_discord_bot.ps1`
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
 
 本機排程現在只視為備援，不是正式主路徑：
 
 - 如果你重跑 `setup.bat`，預設不會再建立本機 intraday engine 夜間排程
 - 本機 22:15 與 07:15 recap 排程也預設停用
-- 只有 Discord bot 仍可能以本機自啟方式存在，因為 slash commands 需要一個常駐 bot process
+- 本機 Discord bot 自啟現在也預設停用，避免和 Oracle Cloud 上的正式 bot 雙開
 
 本機 recap 排程：
 
@@ -140,7 +141,15 @@ python .\scripts\record_ai_decision.py --auto-latest
 你現在晚上是否需要再開著電腦：
 
 - `engine` 與 `bedtime/morning recap` 不需要，本機關機也沒關係
-- `Discord bot` 如果還是跑在你這台電腦上，那台電腦關掉時 bot 就不在線
+- `Discord bot` 現在跑在 Oracle Cloud VM，上述 Windows 電腦關機也不影響 slash commands
+
+更新 bot 是什麼意思：
+
+- 指把 repo 目前最新的 bot 程式重新部署到 Oracle Cloud VM
+- 內容包含：上傳最新程式、必要時重裝依賴、重啟 `alpha-finder-discord-bot.service`
+- 這個腳本部署的是目前 git `HEAD`；如果你要把最新修改一起帶上去，先 commit
+- 若你有改 bot 程式或 README 旁邊提到的部署資產，就用 `powershell -ExecutionPolicy Bypass -File .\deploy\redeploy_discord_bot.ps1`
+- 若你連環境變數也一起改了，再加上 `-SyncEnv`
 
 ## 關鍵輸出檔
 
@@ -184,6 +193,8 @@ python .\scripts\record_ai_decision.py --auto-latest
 - 盤中分鐘級訊號引擎已完成
 - Discord Bot 回報成交已完成
 - engine 與 recap 雲端排程已完成
-- Discord Bot 仍是常駐服務，尚未完全雲端化
+- Discord Bot 已雲端化並由 Oracle Cloud systemd 常駐
+
+所以目前已經是可線上完成追蹤、查詢、回報與持倉同步的完整版本。
 
 下一階段若還要做，只會是優化項，不是基礎缺口。
