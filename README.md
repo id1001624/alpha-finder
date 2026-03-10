@@ -92,9 +92,24 @@ python .\scripts\record_ai_decision.py --auto-latest
 
 盤中執行時段：
 
-- 預設只在本機時間 21:20 到 05:10 之間跑 loop
-- 超出時段會自動 idle，不抓資料、不推 Discord
-- 預設每 5 分鐘輪詢一次，超出時段則改成較低頻率待命
+- 預設 active window 是本機時間 21:20 到 05:10
+- 超出時段會自動略過，不抓資料、不推 Discord
+- 盤中 engine 預設每 5 分鐘喚醒一次、跑完就退出
+
+目前本機排程改成一次性喚醒，不再靠你手動留著監控終端視窗：
+
+- `run_intraday_execution_engine.bat` 每次只跑一輪後退出
+- `setup.bat` 會建立 Windows 排程，預設從 21:22 開始，每 5 分鐘喚醒一次
+- 若超出盤中時段，腳本會自動略過
+
+如果你不想讓本機整晚開著，也可以改用 GitHub Actions：
+
+- repo 內有獨立的 intraday monitor workflow
+- 也有對應的 bedtime recap 與 morning recap workflows
+- 排程採用偏移分鐘，不用整點附近的 0,5,10
+- workflow 會跑在 default branch 最新 commit，不會讀你本機未提交檔案
+- 若你要讓雲端監控也吃到最新持倉與決策，`ai_decision_latest.csv`、`positions_latest.csv` 等 runtime 檔案就必須同步到 repo 或外部存放
+- Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
 
 所以 README 不再列這些手動執行指令，避免你混淆。
 

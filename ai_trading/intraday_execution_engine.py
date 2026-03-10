@@ -327,7 +327,61 @@ def _fetch_intraday_bars_from_finnhub(ticker: str, period: str, interval: str) -
     return out.sort_values(["Datetime"]).reset_index(drop=True)
 
 
+def _fetch_intraday_bars_from_yahoo_chart(ticker: str, period: str, interval: str, prepost: bool) -> pd.DataFrame:
+    try:
+        response = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+            params={
+                "range": period,
+                "interval": interval,
+                "includePrePost": str(bool(prepost)).lower(),
+                "events": "div,splits",
+            },
+            headers={"User-Agent": "AlphaFinder/1.0"},
+            timeout=max(10.0, float(INTRADAY_FINNHUB_TIMEOUT_SEC)),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return pd.DataFrame()
+
+    chart = (payload.get("chart") or {})
+    result_list = chart.get("result") or []
+    if not result_list:
+        return pd.DataFrame()
+
+    result = result_list[0]
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quotes = indicators.get("quote") or []
+    if not timestamps or not quotes:
+        return pd.DataFrame()
+
+    quote = quotes[0] or {}
+    try:
+        out = pd.DataFrame(
+            {
+                "Datetime": pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None),
+                "Open": quote.get("open", []),
+                "High": quote.get("high", []),
+                "Low": quote.get("low", []),
+                "Close": quote.get("close", []),
+                "Volume": quote.get("volume", []),
+            }
+        )
+    except (TypeError, ValueError):
+        return pd.DataFrame()
+
+    if len(out) == 0:
+        return out
+    out = out.dropna(subset=["Datetime", "Open", "High", "Low", "Close"]).copy()
+    return out.sort_values(["Datetime"]).reset_index(drop=True)
+
+
 def _fetch_intraday_bars_from_yfinance(ticker: str, period: str, interval: str, prepost: bool) -> pd.DataFrame:
+    chart_bars = _fetch_intraday_bars_from_yahoo_chart(ticker, period, interval, prepost)
+    if len(chart_bars) > 0:
+        return chart_bars
     try:
         hist = yf.Ticker(ticker).history(period=period, interval=interval, prepost=prepost, auto_adjust=False)
     except (OSError, ValueError, RuntimeError, sqlite3.Error, TypeError, KeyError, AttributeError):

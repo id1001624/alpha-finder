@@ -41,6 +41,7 @@ DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "la
 ALERT_DIR = BACKTEST_DIR / "alerts"
 ALERT_LOG_CSV = ALERT_DIR / "alert_log.csv"
 ALERT_MESSAGE_TXT = ALERT_DIR / "latest_alert_message.txt"
+ALERT_MARKER_DIR = ALERT_DIR / "markers"
 AI_DECISION_LOG_CSV = BACKTEST_DIR / "ai_decision_log.csv"
 
 REQUIRED_COLS = [
@@ -134,6 +135,41 @@ def _sanitize_webhook_url(value: str) -> str:
     return cleaned
 
 
+def _marker_file_for(decision_date: str, mode: str, channel: str) -> Path:
+    safe_date = str(decision_date or "unknown").strip().replace("/", "-")
+    safe_mode = str(mode or "full").strip().lower()
+    safe_channel = str(channel or "unknown").strip().lower()
+    return ALERT_MARKER_DIR / f"{safe_date}_{safe_mode}_{safe_channel}.json"
+
+
+def _already_sent(decision_date: str, mode: str, channel: str, source_csv: Path) -> bool:
+    if mode not in {"bedtime", "morning"}:
+        return False
+    marker_file = _marker_file_for(decision_date, mode, channel)
+    if not marker_file.exists():
+        return False
+    try:
+        marker = pd.read_json(marker_file, typ="series")
+    except (ValueError, OSError):
+        return False
+    return str(marker.get("source_csv", "")).strip() == str(source_csv)
+
+
+def _write_sent_marker(decision_date: str, mode: str, channel: str, source_csv: Path) -> None:
+    if mode not in {"bedtime", "morning"}:
+        return
+    ALERT_MARKER_DIR.mkdir(parents=True, exist_ok=True)
+    marker_file = _marker_file_for(decision_date, mode, channel)
+    payload = {
+        "decision_date": decision_date,
+        "mode": mode,
+        "channel": channel,
+        "source_csv": str(source_csv),
+        "sent_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    marker_file.write_text(pd.Series(payload).to_json(force_ascii=False, indent=2), encoding="utf-8")
+
+
 def _load_previous_top1(current_date: str) -> str:
     if not AI_DECISION_LOG_CSV.exists():
         return ""
@@ -175,7 +211,7 @@ def _build_bedtime_message(df: pd.DataFrame, tv_map: Dict[str, object], title_da
                 f"Top 1: {top1.get('ticker', 'NA')} | tag={top1.get('decision_tag', 'NA')} | risk={top1.get('risk_level', 'NA')} | Top1是否改變={changed}",
                 f"盤中確認: {_fmt_tv_line(str(top1.get('ticker', '')), tv_map)}",
                 f"主催化: {_clip_text(top1.get('catalyst_summary') or top1.get('catalyst_type') or '待確認', 140)}",
-                f"失效條件: {_clip_text(top1.get('reason_summary') or '待確認', 140)}",
+                f"決策摘要: {_clip_text(top1.get('reason_summary') or '待確認', 140)}",
                 "",
                 "Top 3:",
             ]
@@ -380,23 +416,31 @@ def main() -> int:
     send_failed = False
     if not args.dry_run:
         if args.channel in {"discord", "both"}:
-            discord_url = _sanitize_webhook_url(os.getenv("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL))
-            ok, detail = _send_discord(message, discord_url)
-            print(f"[DISCORD] ok={ok} detail={detail}")
-            if ok:
-                sent_channels.append("discord")
+            if _already_sent(decision_date, args.mode, "discord", csv_path):
+                print(f"[SKIP] discord {args.mode} already sent for {decision_date} -> {csv_path}")
             else:
-                send_failed = True
+                discord_url = _sanitize_webhook_url(os.getenv("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL))
+                ok, detail = _send_discord(message, discord_url)
+                print(f"[DISCORD] ok={ok} detail={detail}")
+                if ok:
+                    sent_channels.append("discord")
+                    _write_sent_marker(decision_date, args.mode, "discord", csv_path)
+                else:
+                    send_failed = True
 
         if args.channel in {"line", "both"}:
-            line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
-            line_to = os.getenv("LINE_TO_USER_ID", "").strip()
-            ok, detail = _send_line(message, line_token, line_to)
-            print(f"[LINE] ok={ok} detail={detail}")
-            if ok:
-                sent_channels.append("line")
+            if _already_sent(decision_date, args.mode, "line", csv_path):
+                print(f"[SKIP] line {args.mode} already sent for {decision_date} -> {csv_path}")
             else:
-                send_failed = True
+                line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+                line_to = os.getenv("LINE_TO_USER_ID", "").strip()
+                ok, detail = _send_line(message, line_token, line_to)
+                print(f"[LINE] ok={ok} detail={detail}")
+                if ok:
+                    sent_channels.append("line")
+                    _write_sent_marker(decision_date, args.mode, "line", csv_path)
+                else:
+                    send_failed = True
     else:
         sent_channels.append("dry_run")
 

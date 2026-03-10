@@ -1,0 +1,37 @@
+name: Intraday Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 13-21 * * 1-5'
+
+concurrency:
+  group: intraday-monitor
+  cancel-in-progress: false
+
+jobs:
+  intraday-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      INTRADAY_ACTIVE_TIMEZONE: Asia/Taipei
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run intraday engine once
+        run: |
+          python scripts/run_intraday_execution_engine.py --respect-active-window
