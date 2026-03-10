@@ -1,5 +1,5 @@
-# 本檔只是示例，不含秘密資料。
-# 依你的環境複製成私人腳本後再執行，或直接使用 deploy/redeploy_discord_bot.ps1 的參數。
+# Example only. Do not store secrets in this file.
+# Copy to a private script if needed, or call deploy/redeploy_discord_bot.ps1 directly.
 
 pwsh -File .\deploy\redeploy_discord_bot.ps1 `
   -RemoteHost "ubuntu@161.33.150.3" `

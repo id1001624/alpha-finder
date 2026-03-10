@@ -20,16 +20,17 @@ function Require-Command {
     param([string]$Name)
 
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "缺少必要指令: $Name"
+        throw "Missing required command: $Name"
     }
 }
 
 function Invoke-Ssh {
     param([string]$CommandText)
 
-    & ssh -i $SshKeyPath $RemoteHost $CommandText
+    $normalizedCommand = $CommandText -replace "`r`n", "`n"
+    & ssh -i $SshKeyPath $RemoteHost $normalizedCommand
     if ($LASTEXITCODE -ne 0) {
-        throw "SSH 指令失敗。"
+        throw "SSH command failed."
     }
 }
 
@@ -38,36 +39,36 @@ Require-Command ssh
 Require-Command scp
 
 if (-not (Test-Path $SshKeyPath)) {
-    throw "找不到 SSH key: $SshKeyPath"
+    throw "SSH key not found: $SshKeyPath"
 }
 
 if (-not (Test-Path $serviceFile)) {
-    throw "找不到 service 檔: $serviceFile"
+    throw "Service file not found: $serviceFile"
 }
 
 Push-Location $repoRoot
 try {
     $gitStatus = & git status --short
     if ($LASTEXITCODE -ne 0) {
-        throw "git status 失敗。"
+        throw "git status failed."
     }
     if (-not [string]::IsNullOrWhiteSpace(($gitStatus | Out-String))) {
-        Write-Warning "目前工作樹有未提交變更；redeploy 只會部署 git HEAD 內已提交的內容。"
+        Write-Warning "Working tree has uncommitted changes; redeploy only ships committed git HEAD."
     }
 
     & git archive --format=tar --output=$tempArchive HEAD
     if ($LASTEXITCODE -ne 0) {
-        throw "git archive 失敗。"
+        throw "git archive failed."
     }
 
     & scp -i $SshKeyPath $tempArchive "${RemoteHost}:/tmp/alpha-finder-deploy.tar"
     if ($LASTEXITCODE -ne 0) {
-        throw "上傳部署封包失敗。"
+        throw "Failed to upload deployment archive."
     }
 
     & scp -i $SshKeyPath $serviceFile "${RemoteHost}:/tmp/alpha-finder-discord-bot.service"
     if ($LASTEXITCODE -ne 0) {
-        throw "上傳 systemd service 檔失敗。"
+        throw "Failed to upload systemd service file."
     }
 
     if ($SyncEnv) {
@@ -81,7 +82,7 @@ try {
             if (-not [string]::IsNullOrWhiteSpace($value)) {
                 continue
             }
-            throw "缺少必要環境變數: $name"
+            throw "Missing required environment variable: $name"
         }
 
         $envText = @"
@@ -101,7 +102,7 @@ FINNHUB_API_KEY=$($env:FINNHUB_API_KEY)
 
         & scp -i $SshKeyPath $tempEnvFile "${RemoteHost}:/tmp/discord-bot.env"
         if ($LASTEXITCODE -ne 0) {
-            throw "上傳遠端 env 檔失敗。"
+            throw "Failed to upload remote env file."
         }
     }
 
