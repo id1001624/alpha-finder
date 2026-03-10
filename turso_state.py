@@ -16,6 +16,7 @@ from config import TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, TURSO_ENABLED
 STATE_KEY_AI_DECISION_LATEST = "ai_decision_latest"
 STATE_KEY_POSITIONS_LATEST = "positions_latest"
 STATE_KEY_EXECUTION_LATEST = "execution_trade_latest"
+STATE_KEY_INTRADAY_HEARTBEAT = "intraday_engine_heartbeat"
 STATE_SOURCE_PREFIX = "turso://runtime_state_latest/"
 TRADE_LEDGER_SOURCE_PREFIX = "turso://position_trade_log/"
 EXECUTION_LOG_SOURCE_PREFIX = "turso://execution_trade_log/"

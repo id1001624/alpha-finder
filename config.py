@@ -10,14 +10,14 @@ except ImportError:  # pragma: no cover - Windows only helper
 def _getenv(name: str, default: str = "") -> str:
     value = os.getenv(name)
     if value not in (None, ""):
-        return value
+        return str(value).replace("\ufeff", "").strip()
 
     if winreg is not None:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
                 reg_value, _ = winreg.QueryValueEx(key, name)
                 if reg_value not in (None, ""):
-                    return str(reg_value)
+                    return str(reg_value).replace("\ufeff", "").strip()
         except OSError:
             pass
 
@@ -136,7 +136,7 @@ WEEKLY_REPORT_MAX_SYMBOLS = int(os.getenv("WEEKLY_REPORT_MAX_SYMBOLS", "80"))
 # Finnhub 免費 API (60 call/min) - 財報日期 + 分析師目標價
 # 註冊: https://finnhub.io/register
 # 使用環境變數：FINNHUB_API_KEY
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+FINNHUB_API_KEY = _getenv("FINNHUB_API_KEY", "")
 
 # ============ 彩票股設定 (Track F) ============
 LOTTERY_MIN_GAIN = 10.0        # 單日漲幅 >10%
@@ -271,6 +271,8 @@ INTRADAY_TOP_N = int(_getenv("INTRADAY_TOP_N", "5"))
 INTRADAY_MAX_SYMBOLS = int(_getenv("INTRADAY_MAX_SYMBOLS", "8"))
 INTRADAY_POLL_SECONDS = int(_getenv("INTRADAY_POLL_SECONDS", "300"))
 INTRADAY_IDLE_POLL_SECONDS = int(_getenv("INTRADAY_IDLE_POLL_SECONDS", "900"))
+INTRADAY_HEARTBEAT_ENABLED = _getenv_bool("INTRADAY_HEARTBEAT_ENABLED", "true")
+INTRADAY_HEARTBEAT_INTERVAL_MINUTES = int(_getenv("INTRADAY_HEARTBEAT_INTERVAL_MINUTES", "30"))
 INTRADAY_STOP_LOSS_PCT = float(_getenv("INTRADAY_STOP_LOSS_PCT", "-3.0"))
 INTRADAY_TAKE_PROFIT_PCT = float(_getenv("INTRADAY_TAKE_PROFIT_PCT", "6.0"))
 INTRADAY_MIN_ADD_PROFIT_PCT = float(_getenv("INTRADAY_MIN_ADD_PROFIT_PCT", "1.5"))

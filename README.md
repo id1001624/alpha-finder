@@ -110,6 +110,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - 預設 active window 是本機時間 21:20 到 05:10
 - 超出時段會自動略過，不抓資料、不推 Discord
 - 盤中 engine 預設每 5 分鐘喚醒一次、跑完就退出
+- 若該輪沒有新的 entry/add/take profit/stop loss 訊號，現在也會每 30 分鐘送一則 heartbeat，表示監控仍在線
 
 現在的正式主流程是 GitHub Actions 雲端排程加上 Turso 狀態儲存，不是本機夜間排程：
 
@@ -125,6 +126,13 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - Discord bot 雲端主機部署步驟看 `docs/discord_bot_cloud_host.md`
 - 更新雲端 bot 程式時，直接執行 `deploy\redeploy_discord_bot.ps1`
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
+
+監控 heartbeat 補充：
+
+- heartbeat 預設已開啟
+- 預設每 30 分鐘最多送一則
+- 只有在該輪沒有新的盤中執行建議時才送 heartbeat，避免和真正告警混在一起刷版
+- 可用環境變數調整：`INTRADAY_HEARTBEAT_ENABLED=true|false`、`INTRADAY_HEARTBEAT_INTERVAL_MINUTES=30`
 
 如果你改了 token、頻道 ID 或其他設定，只要重跑一次：
 
@@ -201,6 +209,22 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - repo_outputs/backtest/ai_decision_log.csv
 - repo_outputs/backtest/execution_trade_log.csv
 - repo_outputs/backtest/weekly_reports/weekly_report_latest.md
+
+## 怎麼測通知正常
+
+你要驗證盤中監控能不能通知，可以用這兩步：
+
+1. 先看本機 dry-run 有沒有算出訊號
+
+```powershell
+c:/Users/w6359/OneDrive/文件/alpha-finder/.venv/Scripts/python.exe .\scripts\run_intraday_execution_engine.py --top-n 3 --dry-run
+```
+
+1. 再到 GitHub Actions 手動觸發 `Intraday Monitor`
+
+- 如果有新的 action signal，Discord 會收到真正的 engine 告警
+- 如果沒有新的 action signal，但 heartbeat 到期，Discord 會收到 heartbeat
+- workflow log 內現在也會印出 `[DISCORD] ok=True detail=...`，可直接確認是否送出成功
 
 ## 專案現況
 

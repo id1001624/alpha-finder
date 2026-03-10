@@ -12,8 +12,11 @@ import yfinance as yf
 
 from turso_state import (
     STATE_KEY_AI_DECISION_LATEST,
+    STATE_KEY_INTRADAY_HEARTBEAT,
     append_execution_log_rows,
+    load_runtime_df,
     load_runtime_df_with_fallback,
+    sync_runtime_df,
     sync_execution_latest as sync_execution_latest_to_turso,
 )
 
@@ -25,6 +28,8 @@ from config import (
     INTRADAY_ENGINE_ENABLED,
     INTRADAY_ENTRY_SIZE_FRACTION,
     INTRADAY_FINNHUB_TIMEOUT_SEC,
+    INTRADAY_HEARTBEAT_ENABLED,
+    INTRADAY_HEARTBEAT_INTERVAL_MINUTES,
     INTRADAY_INTERVAL,
     INTRADAY_MAX_ADD_COUNT,
     INTRADAY_MAX_SYMBOLS,
@@ -51,6 +56,7 @@ ACTION_LOG_FILE = INTRADAY_DIR / "intraday_action_log.csv"
 EXECUTION_LOG = BACKTEST_DIR / "execution_trade_log.csv"
 EXECUTION_LATEST = BACKTEST_DIR / "execution_trade_latest.csv"
 EXECUTION_DAILY_DIR = BACKTEST_DIR / "daily_execution_trades"
+HEARTBEAT_STATE_FILE = ALERT_DIR / "intraday_heartbeat_state.json"
 
 EXECUTION_LOG_FIELDS = [
     "recorded_at",
@@ -149,6 +155,51 @@ def _load_state() -> Dict[str, str]:
 def _save_state(state: Dict[str, str]) -> None:
     ALERT_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_heartbeat_state() -> dict:
+    df, _ = load_runtime_df(STATE_KEY_INTRADAY_HEARTBEAT)
+    if len(df) > 0:
+        row = df.iloc[0].to_dict()
+        return {str(key): row.get(key, "") for key in row.keys()}
+    if not HEARTBEAT_STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(HEARTBEAT_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _save_heartbeat_state(payload: dict) -> None:
+    ALERT_DIR.mkdir(parents=True, exist_ok=True)
+    HEARTBEAT_STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    sync_runtime_df(STATE_KEY_INTRADAY_HEARTBEAT, pd.DataFrame([payload]), source_name="intraday_engine")
+
+
+def _should_send_heartbeat(now_ts: str, interval_minutes: int) -> bool:
+    if interval_minutes <= 0:
+        return True
+    heartbeat_state = _load_heartbeat_state()
+    last_sent_at = str(heartbeat_state.get("last_sent_at", "")).strip()
+    if not last_sent_at:
+        return True
+    now_dt = pd.to_datetime(now_ts, errors="coerce")
+    last_dt = pd.to_datetime(last_sent_at, errors="coerce")
+    if pd.isna(now_dt) or pd.isna(last_dt):
+        return True
+    elapsed = (now_dt - last_dt).total_seconds() / 60.0
+    return elapsed >= max(1, int(interval_minutes))
+
+
+def _build_heartbeat_message(now_ts: str, watch_count: int, snapshot_count: int, top_n: int) -> str:
+    lines = [
+        f"[Alpha Finder] Intraday Heartbeat {now_ts}",
+        "",
+        f"watch_count={watch_count} | snapshot_count={snapshot_count} | action_count=0",
+        f"provider={INTRADAY_DATA_PROVIDER} | interval={INTRADAY_INTERVAL} | top_n={top_n}",
+        "狀態：盤中監控在線，這一輪沒有新的執行建議。",
+    ]
+    return "\n".join(lines)
 
 
 def _position_effect(action: str) -> str:
@@ -626,6 +677,20 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         message = "\n".join(lines)
         if not dry_run:
             discord_ok, discord_detail = _send_discord(message)
+    elif not dry_run and INTRADAY_HEARTBEAT_ENABLED and _should_send_heartbeat(now_ts, INTRADAY_HEARTBEAT_INTERVAL_MINUTES):
+        message = _build_heartbeat_message(now_ts, len(watch_df), len(snapshot_rows), top_n or INTRADAY_TOP_N)
+        discord_ok, discord_detail = _send_discord(message)
+        if discord_ok:
+            _save_heartbeat_state(
+                {
+                    "last_sent_at": now_ts,
+                    "watch_count": len(watch_df),
+                    "snapshot_count": len(snapshot_rows),
+                    "action_count": 0,
+                    "provider": str(INTRADAY_DATA_PROVIDER or ""),
+                    "interval": str(INTRADAY_INTERVAL or ""),
+                }
+            )
 
     return {
         "ok": True,
