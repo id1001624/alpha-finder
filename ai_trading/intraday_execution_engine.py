@@ -101,7 +101,7 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
 
 
 def _sanitize_webhook_url(value: str) -> str:
-    cleaned = str(value or "").strip().strip('"').strip("'").strip()
+    cleaned = str(value or "").replace("\ufeff", "").strip().strip('"').strip("'").strip()
     cleaned = cleaned.strip("[]")
     cleaned = cleaned.strip("<>")
     return cleaned
