@@ -113,7 +113,14 @@ python .\scripts\record_ai_decision.py --auto-latest
 - `scripts/record_ai_decision.py` 會在成功寫出最新決策後同步 `cloud_state/ai_decision_latest.csv`
 - Discord bot 在 `/buy`、`/add`、`/sell` 成功寫入持倉後，會同步 `cloud_state/positions_latest.csv`
 - 這些同步目前只更新工作目錄，不會在每次成交後自動 commit/push；若未來要真正即時雲端同步，應改成外部存放
+- 若你要手動把最新 `cloud_state/` 推上 GitHub，可直接執行 `sync_cloud_state_to_git.bat`
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
+
+本機 recap 排程：
+
+- 既然雲端 recap 已上線，本機 22:15 與 07:15 排程可以刪除，避免重複發送
+- `setup.bat` 現在預設會停用這兩個本機 recap 排程
+- 若你真的想保留本機備援，再把 `setup.bat` 內的 `ENABLE_LOCAL_RECAP_TASKS` 改成 `true`
 
 所以 README 不再列這些手動執行指令，避免你混淆。
 
