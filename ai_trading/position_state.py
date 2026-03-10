@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 
 import pandas as pd
 
-from cloud_state import CLOUD_POSITIONS_LATEST, preferred_runtime_path, sync_positions_latest
 from turso_state import (
     STATE_KEY_POSITIONS_LATEST,
     append_trade_ledger_row as append_trade_ledger_row_to_turso,
@@ -59,8 +58,7 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
 
 def load_positions(path: Path | None = None) -> pd.DataFrame:
     if path is None:
-        preferred_path = preferred_runtime_path(CLOUD_POSITIONS_LATEST, POSITIONS_FILE)
-        df, _ = load_runtime_df_with_fallback(STATE_KEY_POSITIONS_LATEST, [preferred_path, POSITIONS_FILE])
+        df, _ = load_runtime_df_with_fallback(STATE_KEY_POSITIONS_LATEST, [POSITIONS_FILE])
     else:
         df = _safe_read_csv(path)
     if len(df) == 0:
@@ -92,7 +90,6 @@ def save_positions(df: pd.DataFrame, path: Path = POSITIONS_FILE) -> Path:
     out = out[pd.to_numeric(out["quantity"], errors="coerce").fillna(0.0) > 0].copy()
     out.to_csv(path, index=False, encoding="utf-8-sig")
     if Path(path) == POSITIONS_FILE:
-        sync_positions_latest(POSITIONS_FILE)
         sync_positions_latest_to_turso(POSITIONS_FILE)
     return path
 

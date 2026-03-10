@@ -10,7 +10,6 @@ import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cloud_state import CLOUD_AI_DECISION_LATEST, CLOUD_EXECUTION_LATEST, CLOUD_POSITIONS_LATEST
 from ai_trading.position_state import TRADE_LEDGER_FILE
 from turso_state import (
     sync_ai_decision_latest,
@@ -27,10 +26,6 @@ POSITIONS_LATEST = BACKTEST_DIR / "positions_latest.csv"
 EXECUTION_LATEST = BACKTEST_DIR / "execution_trade_latest.csv"
 EXECUTION_DAILY_DIR = BACKTEST_DIR / "daily_execution_trades"
 TRADE_LEDGER_LATEST = BACKTEST_DIR / "position_trade_log.csv"
-
-
-def _choose_source(primary: Path, fallback: Path) -> Path:
-    return primary if primary.exists() else fallback
 
 
 def _sync_execution_history() -> str | None:
@@ -54,9 +49,9 @@ def main() -> int:
 
     print(f"turso_status: {turso_status()}")
 
-    decision_source = _choose_source(AI_DECISION_LATEST, CLOUD_AI_DECISION_LATEST)
-    positions_source = _choose_source(POSITIONS_LATEST, CLOUD_POSITIONS_LATEST)
-    execution_source = _choose_source(EXECUTION_LATEST, CLOUD_EXECUTION_LATEST)
+    decision_source = AI_DECISION_LATEST
+    positions_source = POSITIONS_LATEST
+    execution_source = EXECUTION_LATEST
 
     decision_target = sync_ai_decision_latest(decision_source)
     positions_target = sync_positions_latest(positions_source)

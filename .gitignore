@@ -43,11 +43,6 @@ repo_outputs/
 *.jpg
 *.jpeg
 *.html
-!cloud_state/
-!cloud_state/README.md
-!cloud_state/ai_decision_latest.csv
-!cloud_state/positions_latest.csv
-!cloud_state/execution_trade_latest.csv
 
 # 敏感資訊
 credentials.json

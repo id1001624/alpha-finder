@@ -13,6 +13,7 @@ set "BOT_STARTUP_FILE=%STARTUP_DIR%\AlphaFinder_Discord_TradeBot.cmd"
 set "BEDTIME_TIME=22:15"
 set "MORNING_TIME=07:15"
 set "ENABLE_LOCAL_RECAP_TASKS=false"
+set "ENABLE_LOCAL_ENGINE_TASKS=false"
 set "ENGINE_START_TIME=21:22"
 set "ENGINE_REPEAT_MINUTES=5"
 set "ENGINE_DURATION=07:50"
@@ -37,12 +38,17 @@ if /i "%ENABLE_LOCAL_RECAP_TASKS%" == "true" (
     schtasks /delete /tn "%MORNING_TASK%" /f > nul 2>&1
 )
 
-schtasks /create /tn "%ENGINE_TASK%" /tr "\"%BASE_DIR%\run_intraday_execution_engine.bat\"" /sc daily /st %ENGINE_START_TIME% /ri %ENGINE_REPEAT_MINUTES% /du %ENGINE_DURATION% /it /f
-if errorlevel 1 (
-    echo [失敗] 建立盤中 engine 重複排程失敗。
-    exit /b 1
+if /i "%ENABLE_LOCAL_ENGINE_TASKS%" == "true" (
+    schtasks /create /tn "%ENGINE_TASK%" /tr "\"%BASE_DIR%\run_intraday_execution_engine.bat\"" /sc daily /st %ENGINE_START_TIME% /ri %ENGINE_REPEAT_MINUTES% /du %ENGINE_DURATION% /it /f
+    if errorlevel 1 (
+        echo [失敗] 建立盤中 engine 重複排程失敗。
+        exit /b 1
+    )
+    if exist "%ENGINE_STARTUP_FILE%" del /f /q "%ENGINE_STARTUP_FILE%" > nul 2>&1
+) else (
+    schtasks /delete /tn "%ENGINE_TASK%" /f > nul 2>&1
+    if exist "%ENGINE_STARTUP_FILE%" del /f /q "%ENGINE_STARTUP_FILE%" > nul 2>&1
 )
-if exist "%ENGINE_STARTUP_FILE%" del /f /q "%ENGINE_STARTUP_FILE%" > nul 2>&1
 
 call :ensure_logon_autostart "%BOT_TASK%" "%BASE_DIR%\run_discord_trade_bot.bat" %BOT_DELAY% "%BOT_STARTUP_FILE%"
 if errorlevel 1 exit /b 1
@@ -56,7 +62,11 @@ if /i "%ENABLE_LOCAL_RECAP_TASKS%" == "true" (
     echo - %BEDTIME_TASK% 已停用，改由 GitHub Actions 處理睡前摘要
     echo - %MORNING_TASK% 已停用，改由 GitHub Actions 處理早晨 recap
 )
-echo - %ENGINE_TASK% 每日 %ENGINE_START_TIME% 開始，每 %ENGINE_REPEAT_MINUTES% 分鐘喚醒一次，持續 %ENGINE_DURATION%
+if /i "%ENABLE_LOCAL_ENGINE_TASKS%" == "true" (
+    echo - %ENGINE_TASK% 每日 %ENGINE_START_TIME% 開始，每 %ENGINE_REPEAT_MINUTES% 分鐘喚醒一次，持續 %ENGINE_DURATION%
+) else (
+    echo - %ENGINE_TASK% 已停用，改由 GitHub Actions 處理盤中 engine
+)
 echo - %BOT_TASK% 使用者登入後 %BOT_DELAY% 啟動，若排程權限不足則改寫入 Startup
 echo.
 echo 查詢指令：

@@ -1,6 +1,6 @@
 # Turso 設定說明
 
-Alpha Finder 現在支援把最新 runtime state 寫到 Turso，讓 GitHub Actions 與未來雲端 Discord Bot 直接讀取，不再依賴 git push 後的 cloud_state。
+Alpha Finder 現在支援把最新 runtime state 寫到 Turso，讓 GitHub Actions 與未來雲端 Discord Bot 直接讀取，不再依賴 repo 內的中介狀態檔。
 
 ## 目前會同步哪些資料
 
@@ -14,7 +14,7 @@ Alpha Finder 現在支援把最新 runtime state 寫到 Turso，讓 GitHub Actio
 
 ## 你需要在 Turso 做什麼
 
-1. 到 https://turso.tech 註冊帳號
+1. 到 <https://turso.tech> 註冊帳號
 2. 建立一個 database，例如 alpha-finder-state
 3. 在 Turso 建立一個 auth token
 4. 記下兩個值：
@@ -56,7 +56,7 @@ workflow 內已預留這兩個 env；設完之後，雲端 recap 與 intraday mo
 python .\scripts\sync_turso_state.py
 ```
 
-這會把目前本機或 cloud_state 可取得的 latest state 推到 Turso。
+這會把目前本機可取得的 latest state 推到 Turso。
 也會把 `position_trade_log.csv` 與 `execution_trade_log.csv` 一併匯入 Turso。
 
 ## 讀寫優先順序
@@ -64,14 +64,12 @@ python .\scripts\sync_turso_state.py
 目前程式的 latest state 讀取順序是：
 
 1. Turso
-2. cloud_state
-3. repo_outputs/backtest 下的本機 CSV
+2. repo_outputs/backtest 下的本機 CSV
 
 寫入則是：
 
 1. 先照舊寫本機 CSV
-2. 同步到 cloud_state
-3. 若 Turso 已設定完成，再同步到 Turso
+2. 若 Turso 已設定完成，再同步到 Turso
 
 ## 目前還沒搬過去的東西
 

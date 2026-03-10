@@ -48,11 +48,12 @@ run_daily.bat
 - 盤中主流程已經不是依賴手動 TradingView alert 維護
 - ai_trading/intraday_execution_engine.py 自己抓分鐘資料並計算 Dynamic AVWAP + SQZMOM
 - scripts/run_discord_trade_bot.py 是真實成交回報入口
-- watchlist 核心來源是 repo_outputs/backtest/ai_decision_latest.csv
+- engine / recap 正式排程已經以 GitHub Actions 為主，不應再把本機夜間 Windows 排程描述成主流程
+- watchlist、持倉、成交與 execution history 現在優先讀 Turso，最後才 fallback 到本機 CSV
 
 ### 4. Discord Is The User Surface
 
-- 使用者平常在 Discord 用 /buy、/add、/sell、/positions
+- 使用者平常在 Discord 用 /buy、/add、/sell、/positions、/trades、/executions
 - slash commands 是主介面
 - prefix commands 只是相容保留，不是主操作方式
 
@@ -80,10 +81,13 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 - auto 會優先用 Finnhub 免費分鐘資料
 - 拿不到或不相容時 fallback 到 yfinance
 
-### 4. Windows Startup Is Expected
+### 4. Cloud-First Runtime
 
-- setup.bat 會建立通知排程與登入後自啟
-- 若 Windows 不允許 onlogon scheduled task，腳本會 fallback 到 Startup 資料夾
+- `intraday monitor`、`bedtime recap`、`morning recap` 已經是雲端正式主路徑
+- 本機 Windows 排程現在只應描述為備援，不是預設夜間運作模型
+- `setup.bat` 應預設停用本機 recap 與本機 intraday engine 排程
+- `cloud_state/` 已退場，不應再被當成正式 runtime 路徑描述
+- Discord Bot 仍可能用本機登入自啟或 Startup fallback，直到未來搬去雲端 host
 
 ---
 
@@ -98,7 +102,9 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 - README 應該維持最短操作路徑
 - 不要把已經自動化的東西重新寫成手動步驟給使用者執行
-- 睡前摘要、早晨 recap、Windows 自啟若已設定好，README 應描述為現況，不要再強調手動指令
+- 睡前摘要與早晨 recap 應描述為雲端既有能力，不要再寫成使用者夜間要靠本機排程維持
+- 若 README 提到 Windows 排程，應明確標示為備援，而不是正式主流程
+- 若 Turso 已是正式狀態源，README 不應再把 `cloud_state/` 描述為必要備援層
 
 ### 3. No Fake AI Outputs
 
@@ -113,7 +119,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 ### 5. Git Rules
 
 - commit 與 push 規則除了本檔外，還必須同步遵守 `.github/prompts/GitRules.prompt.md`
-- commit message 預設採用帶 type 前綴的格式，例如：`feat(project): 新增 cloud_state 同步`
+- commit message 預設採用帶 type 前綴的格式，例如：`feat(project): 新增 Turso 同步`
 - 使用者說告一段落就自動做commit+push動作
 - 若使用者明確要求 commit / push，先完成必要驗證，再依功能分組提交
 - commit message 主旨預設使用繁體中文，內容要能看出變更主題
@@ -133,6 +139,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 - scripts/run_discord_trade_bot.py: Discord 成交回報 bot
 - ai_trading/intraday_execution_engine.py: 盤中訊號核心
 - ai_trading/position_state.py: 持倉與成交 ledger
+- turso_state.py: Turso 雲端 latest state / ledger / execution history 同步與查詢
 - Alpha-Sniper-Protocol.md: 提供給網頁 AI 的決策 prompt
 
 ---

@@ -25,7 +25,6 @@ import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cloud_state import sync_ai_decision_latest
 from turso_state import sync_ai_decision_latest as sync_ai_decision_latest_to_turso
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
@@ -238,7 +237,7 @@ def copy_daily_and_latest(df: pd.DataFrame, decision_date: str) -> None:
     export_df = df[REQUIRED_COLUMNS].copy()
     export_df.to_csv(daily_csv, index=False, encoding="utf-8-sig")
     export_df.to_csv(LATEST_CSV_FILE, index=False, encoding="utf-8-sig")
-    sync_ai_decision_latest(LATEST_CSV_FILE)
+    sync_ai_decision_latest_to_turso(LATEST_CSV_FILE)
 
 
 def main() -> None:
@@ -285,7 +284,6 @@ def main() -> None:
     print(f"主檔: {MASTER_LOG_FILE}")
     print(f"每日 CSV: {DAILY_AI_DIR / (decision_date + '_ai_decision.csv')}")
     print(f"最新 CSV: {LATEST_CSV_FILE}")
-    print(f"cloud_state: {sync_ai_decision_latest(LATEST_CSV_FILE) or '未同步'}")
     print(f"turso_state: {sync_ai_decision_latest_to_turso(LATEST_CSV_FILE) or '未同步'}")
 
 

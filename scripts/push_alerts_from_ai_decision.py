@@ -31,7 +31,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cloud_state import CLOUD_AI_DECISION_LATEST
 from config import DISCORD_WEBHOOK_URL, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
 from signal_store import get_latest_signals
 from turso_state import STATE_KEY_AI_DECISION_LATEST, load_runtime_df_with_fallback
@@ -64,7 +63,7 @@ REQUIRED_COLS = [
 
 def _find_latest_decision_csv() -> Optional[Path]:
     found: List[tuple[float, Path]] = []
-    static_candidates = [CLOUD_AI_DECISION_LATEST, BACKTEST_DIR / "ai_decision_latest.csv"]
+    static_candidates = [BACKTEST_DIR / "ai_decision_latest.csv"]
     for file in static_candidates:
         if not file.exists():
             continue
@@ -89,7 +88,7 @@ def _find_latest_decision_csv() -> Optional[Path]:
 def _load_latest_decision_df() -> tuple[pd.DataFrame, str | None]:
     df, source = load_runtime_df_with_fallback(
         STATE_KEY_AI_DECISION_LATEST,
-        [CLOUD_AI_DECISION_LATEST, BACKTEST_DIR / "ai_decision_latest.csv"],
+        [BACKTEST_DIR / "ai_decision_latest.csv"],
     )
     if source is not None:
         return df, source
@@ -404,7 +403,7 @@ def main() -> int:
     if args.auto_latest or csv_path is None:
         df, source_id = _load_latest_decision_df()
         if source_id is None:
-            print("No ai_decision latest state found in Turso / cloud_state / inbox / ai_ready/latest / daily_refresh/latest")
+            print("No ai_decision latest state found in Turso / backtest latest / inbox / ai_ready/latest / daily_refresh/latest")
             return 1
     else:
         if not csv_path.exists():

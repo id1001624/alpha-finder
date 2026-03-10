@@ -1,0 +1,18 @@
+[Unit]
+Description=Alpha Finder Discord Trade Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alphafinder
+WorkingDirectory=/opt/alpha-finder
+EnvironmentFile=/etc/alpha-finder/discord-bot.env
+ExecStart=/opt/alpha-finder/.venv/bin/python /opt/alpha-finder/scripts/run_discord_trade_bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/alpha-finder/discord-bot.log
+StandardError=append:/var/log/alpha-finder/discord-bot.log
+
+[Install]
+WantedBy=multi-user.target

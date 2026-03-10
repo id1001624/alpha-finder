@@ -10,12 +10,11 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-from cloud_state import CLOUD_AI_DECISION_LATEST, preferred_runtime_path, sync_execution_latest
 from turso_state import (
     STATE_KEY_AI_DECISION_LATEST,
     append_execution_log_rows,
-    sync_execution_latest as sync_execution_latest_to_turso,
     load_runtime_df_with_fallback,
+    sync_execution_latest as sync_execution_latest_to_turso,
 )
 
 from config import (
@@ -124,8 +123,7 @@ def _http_post_json(url: str, payload: dict) -> tuple[bool, str]:
 
 
 def _load_decision_df() -> pd.DataFrame:
-    preferred_path = preferred_runtime_path(CLOUD_AI_DECISION_LATEST, AI_DECISION_LATEST)
-    df, _ = load_runtime_df_with_fallback(STATE_KEY_AI_DECISION_LATEST, [preferred_path, AI_DECISION_LATEST])
+    df, _ = load_runtime_df_with_fallback(STATE_KEY_AI_DECISION_LATEST, [AI_DECISION_LATEST])
     if len(df) == 0 or "ticker" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
@@ -204,7 +202,6 @@ def _write_execution_outputs(rows: List[dict]) -> None:
 
     latest_df = _dedupe_and_sort_execution_df(new_df)
     latest_df.to_csv(EXECUTION_LATEST, index=False, encoding="utf-8-sig")
-    sync_execution_latest(EXECUTION_LATEST)
     sync_execution_latest_to_turso(EXECUTION_LATEST)
     append_execution_log_rows(rows)
 

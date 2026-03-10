@@ -53,6 +53,11 @@ python .\scripts\record_ai_decision.py --auto-latest
 - /add
 - /sell
 
+這兩個新查詢指令的用途：
+
+- `/trades`: 查你透過 Discord 回報過的真實成交紀錄，來源是 Turso 的 `position_trade_log`
+- `/executions`: 查 engine 或 TradingView execution 流程產生的執行歷史，來源是 Turso 的 `execution_trade_log`
+
 推薦實際用法：
 
 1. 先看目前部位
@@ -98,28 +103,25 @@ python .\scripts\record_ai_decision.py --auto-latest
 - 超出時段會自動略過，不抓資料、不推 Discord
 - 盤中 engine 預設每 5 分鐘喚醒一次、跑完就退出
 
-目前本機排程改成一次性喚醒，不再靠你手動留著監控終端視窗：
-
-- `run_intraday_execution_engine.bat` 每次只跑一輪後退出
-- `setup.bat` 會建立 Windows 排程，預設從 21:22 開始，每 5 分鐘喚醒一次
-- 若超出盤中時段，腳本會自動略過
-
-如果你不想讓本機整晚開著，也可以改用 GitHub Actions：
+現在的正式主流程是 GitHub Actions 雲端排程加上 Turso 狀態儲存，不是本機夜間排程：
 
 - repo 內有獨立的 intraday monitor workflow
 - 也有對應的 bedtime recap 與 morning recap workflows
 - 排程採用偏移分鐘，不用整點附近的 0,5,10
 - workflow 會跑在 default branch 最新 commit，不會讀你本機未提交檔案
-- GitHub Actions 現在會優先讀 Turso latest state；若 Turso 沒設好，才 fallback 到 `cloud_state/`，最後才回本機 CSV
-- 目前同步目標是 `ai_decision_latest.csv`、`positions_latest.csv`，以及有資料時的 `execution_trade_latest.csv`
-- `scripts/record_ai_decision.py` 會在成功寫出最新決策後同步 `cloud_state/ai_decision_latest.csv`
-- Discord bot 在 `/buy`、`/add`、`/sell` 成功寫入持倉後，會同步 `cloud_state/positions_latest.csv`
-- 若 Turso 已啟用，Discord bot 新增的 `position_trade_log.csv` 成交紀錄也會同步寫進 Turso，讓交易歷史不只留在本機
-- 若已設定 `TURSO_ENABLED=true`、`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`，上述 latest state 也會同步到 Turso
-- `cloud_state/` 現在變成 fallback，不再是雲端主來源
-- 若你要手動把最新 `cloud_state/` 推上 GitHub，可直接執行 `sync_cloud_state_to_git.bat`
+- GitHub Actions 與 Discord bot 現在都優先讀 Turso
+- 目前同步目標是 `ai_decision_latest.csv`、`positions_latest.csv`、`execution_trade_latest.csv`、`position_trade_log.csv`、`execution_trade_log.csv`
+- 若已設定 `TURSO_ENABLED=true`、`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`，最新決策、持倉、成交與 execution 歷史都會同步到 Turso
+- 本機 CSV 現在主要保留給 backtest、人工檢查與最後備援，不再需要 `cloud_state/`
 - Turso 註冊與設定步驟看 `docs/turso_setup.md`
+- Discord bot 雲端主機部署步驟看 `docs/discord_bot_cloud_host.md`
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
+
+本機排程現在只視為備援，不是正式主路徑：
+
+- 如果你重跑 `setup.bat`，預設不會再建立本機 intraday engine 夜間排程
+- 本機 22:15 與 07:15 recap 排程也預設停用
+- 只有 Discord bot 仍可能以本機自啟方式存在，因為 slash commands 需要一個常駐 bot process
 
 本機 recap 排程：
 
@@ -134,6 +136,11 @@ python .\scripts\record_ai_decision.py --auto-latest
 ```powershell
 .\setup.bat
 ```
+
+你現在晚上是否需要再開著電腦：
+
+- `engine` 與 `bedtime/morning recap` 不需要，本機關機也沒關係
+- `Discord bot` 如果還是跑在你這台電腦上，那台電腦關掉時 bot 就不在線
 
 ## 關鍵輸出檔
 
@@ -176,6 +183,7 @@ python .\scripts\record_ai_decision.py --auto-latest
 - XQ 新鮮度防呆已完成
 - 盤中分鐘級訊號引擎已完成
 - Discord Bot 回報成交已完成
-- Windows 自啟與排程已完成
+- engine 與 recap 雲端排程已完成
+- Discord Bot 仍是常駐服務，尚未完全雲端化
 
 下一階段若還要做，只會是優化項，不是基礎缺口。
