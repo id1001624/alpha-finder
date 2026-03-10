@@ -9,6 +9,7 @@
 範例：
 python scripts/record_ai_decision.py --csv-file "repo_outputs/backtest/inbox/ai_decision_2026-03-04.csv"
 python scripts/record_ai_decision.py --auto-latest
+python scripts/record_ai_decision.py --auto-latest --replace-date
 """
 
 from __future__ import annotations
@@ -219,9 +220,14 @@ def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
     return out
 
 
-def append_to_master_log(df: pd.DataFrame) -> None:
+def append_to_master_log(df: pd.DataFrame, replace_date: bool = False) -> None:
+    incoming_dates = set(df["decision_date"].astype(str).tolist())
+
     if MASTER_LOG_FILE.exists():
         existing = pd.read_csv(MASTER_LOG_FILE)
+        if replace_date:
+            existing_dates = existing["decision_date"].astype(str)
+            existing = existing[~existing_dates.isin(incoming_dates)].copy()
         merged = pd.concat([existing, df], ignore_index=True)
         merged = merged.drop_duplicates(subset=["decision_date", "ticker"], keep="last")
         merged = merged.sort_values(["decision_date", "rank"], ascending=[False, True])
@@ -245,6 +251,11 @@ def main() -> None:
     parser.add_argument("--csv-file", default="", help="ai_decision_YYYY-MM-DD.csv 路徑")
     parser.add_argument("--auto-latest", action="store_true", help="自動搜尋最新 ai_decision_*.csv")
     parser.add_argument("--date", default="", help="可選，強制指定 decision_date（YYYY-MM-DD）")
+    parser.add_argument(
+        "--replace-date",
+        action="store_true",
+        help="匯入前先刪除 ai_decision_log.csv 中相同 decision_date 的舊資料，再寫入新版",
+    )
 
     args = parser.parse_args()
 
@@ -276,11 +287,12 @@ def main() -> None:
         print("CSV 沒有可用的決策資料（ticker/rank）")
         return
 
-    append_to_master_log(norm_df)
+    append_to_master_log(norm_df, replace_date=args.replace_date)
     copy_daily_and_latest(norm_df, decision_date)
 
     print("\n=== AI 決策已記錄 ===")
     print(f"來源 CSV: {csv_file}")
+    print(f"replace_date: {'true' if args.replace_date else 'false'}")
     print(f"主檔: {MASTER_LOG_FILE}")
     print(f"每日 CSV: {DAILY_AI_DIR / (decision_date + '_ai_decision.csv')}")
     print(f"最新 CSV: {LATEST_CSV_FILE}")
