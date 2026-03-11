@@ -13,10 +13,17 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app_logging import install_builtin_print_logging
+
 PYTHON_EXE = PROJECT_ROOT / '.venv' / 'Scripts' / 'python.exe'
 BUILD_SCRIPT = PROJECT_ROOT / 'scripts' / 'build_ai_trading_dataset.py'
 AI_TRADING_DIR = PROJECT_ROOT / 'repo_outputs' / 'ai_trading'
 COMPARE_BASE_DIR = AI_TRADING_DIR / 'profile_compare'
+
+install_builtin_print_logging()
 
 
 def _latest_ai_trading_run() -> Path | None:
@@ -58,7 +65,7 @@ def _run_one_profile(profile: str, research_mode: str, enable_catalyst: bool, st
     env['AI_BUILD_RUN_STAMP'] = run_stamp
 
     cmd = [str(PYTHON_EXE), str(BUILD_SCRIPT)]
-    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, capture_output=True, text=True, check=False)
 
     latest_run = _latest_ai_trading_run()
     if latest_run is None:

@@ -22,15 +22,31 @@ import os
 import sys
 import time
 import pandas as pd
+import requests
 import yfinance as yf
+
+from app_logging import install_builtin_print_logging
+
+
+install_builtin_print_logging()
 
 # 載入 SSL 修復
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from main import _fix_ssl_cert_path
     _fix_ssl_cert_path()
-except Exception:
+except (ImportError, ModuleNotFoundError, OSError, PermissionError):
     pass
+
+RUNTIME_DATA_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    requests.RequestException,
+)
 
 from config import (
     SELECTED_INDICES, MAX_STOCKS_TO_PROCESS,
@@ -67,7 +83,7 @@ def check_index_membership(ticker: str) -> dict:
             if ticker in tickers_in_idx:
                 return {'in_index': True, 'index': idx}
         return {'in_index': False, 'index': None}
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS as e:
         return {'in_index': 'error', 'index': str(e)}
 
 
@@ -94,7 +110,7 @@ def check_yfinance_data(ticker: str) -> dict:
                 dates = cal['Earnings Date']
                 if len(dates) > 0:
                     earnings_date = str(dates[0])
-        except Exception:
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError):
             pass
 
         return {
@@ -108,7 +124,7 @@ def check_yfinance_data(ticker: str) -> dict:
             'industry': industry,
             'earnings_date_yf': earnings_date,
         }
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS as e:
         return {'error': str(e)}
 
 
@@ -118,7 +134,6 @@ def check_finnhub_earnings(ticker: str) -> dict:
         return {'finnhub': 'no_api_key'}
 
     try:
-        import requests
         url = "https://finnhub.io/api/v1/calendar/earnings"
         params = {
             'from': '2026-02-20',
@@ -140,7 +155,7 @@ def check_finnhub_earnings(ticker: str) -> dict:
                 }
             return {'finnhub': 'no_data'}
         return {'finnhub': f'error_{r.status_code}'}
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS as e:
         return {'finnhub': f'error_{e}'}
 
 
@@ -151,8 +166,6 @@ def simulate_filters(data: dict) -> dict:
     mcap = data.get('market_cap', 0)
     avg_vol = data.get('avg_volume', 0)
     num_analysts = data.get('num_analysts', 0)
-    target_price = data.get('target_price', None)
-
     # 過濾器 1: Finviz 基本條件（geo_usa + sh_avgvol_o500）
     results['F1_avg_vol_500k'] = avg_vol >= 500_000
 
@@ -192,14 +205,14 @@ def run_backtest():
     print("  用已知爆發股驗證篩選漏洞".center(60))
     print("=" * 70)
 
-    print(f"\n當前設定：")
+    print("\n當前設定：")
     print(f"  指數範圍: {SELECTED_INDICES}")
     print(f"  最大處理數: {MAX_STOCKS_TO_PROCESS}")
     print(f"  財報股保留名額: {EARNINGS_RESERVED_SLOTS}")
     print(f"  財報補強市值門檻: ${EARNINGS_MIN_MCAP/1e9:.1f}B")
     print(f"  財報補強量能門檻: {EARNINGS_MIN_VOLUME/1e3:.0f}k")
     print(f"  補強上限: {MAX_EARNINGS_MERGE}")
-    print(f"  步驟 2.2: 已移除分析師硬截斷（僅保留無效資料清除）")
+    print("  步驟 2.2: 已移除分析師硬截斷（僅保留無效資料清除）")
     print(f"  Finnhub API: {'✅ 已設定' if FINNHUB_API_KEY else '❌ 未設定'}")
 
     all_results = []
@@ -210,7 +223,7 @@ def run_backtest():
         print(f"{'─' * 60}")
 
         # 1. 檢查 yfinance 資料
-        print(f"  [1] 查詢 yfinance 資料...", end=' ')
+        print("  [1] 查詢 yfinance 資料...", end=' ')
         yf_data = check_yfinance_data(ticker)
         if 'error' in yf_data:
             print(f"[X] {yf_data['error']}")
@@ -226,7 +239,7 @@ def run_backtest():
         print(f"    yfinance 財報日: {yf_data.get('earnings_date_yf', 'N/A')}")
 
         # 2. 檢查 Finnhub
-        print(f"  [2] 查詢 Finnhub...", end=' ')
+        print("  [2] 查詢 Finnhub...", end=' ')
         fh_data = check_finnhub_earnings(ticker)
         if 'finnhub_date' in fh_data:
             print(f"[OK] 日期: {fh_data['finnhub_date']} {fh_data.get('finnhub_hour', '')}")
@@ -234,7 +247,7 @@ def run_backtest():
             print(f"[!] {fh_data.get('finnhub', 'N/A')}")
 
         # 3. 模擬過濾器
-        print(f"  [3] 模擬過濾器...")
+        print("  [3] 模擬過濾器...")
         filter_results = simulate_filters(yf_data)
 
         for key, val in filter_results.items():
@@ -244,9 +257,9 @@ def run_backtest():
             print(f"    {status} {key}: {val}")
 
         if filter_results['would_survive']:
-            print(f"  \n  ✅ 結論: 此股票能通過所有過濾器")
+            print("  \n  ✅ 結論: 此股票能通過所有過濾器")
         else:
-            print(f"  \n  ❌ 結論: 此股票被以下過濾器殺掉:")
+            print("  \n  ❌ 結論: 此股票被以下過濾器殺掉:")
             for reason in filter_results['killed_by']:
                 print(f"    → {reason}")
 
@@ -274,15 +287,12 @@ def run_backtest():
         print("  無回測結果")
         return
 
-    missed = df[df['Status'].str.contains('❌')]
-    caught = df[df['Status'].str.contains('✅')]
-
     print(f"\n  總共回測: {len(df)} 檔")
     print(f"  ✅ 能通過過濾器: {df['Would_Survive'].sum()} 檔")
     print(f"  ❌ 被過濾器殺掉: {(~df['Would_Survive']).sum()} 檔")
 
     # 過濾器殺傷力分析
-    print(f"\n  ── 各過濾器殺傷力 ──")
+    print("\n  ── 各過濾器殺傷力 ──")
     killed_reasons = {}
     for _, row in df.iterrows():
         if row['Killed_By']:
@@ -295,26 +305,25 @@ def run_backtest():
         print(f"    {reason}: 殺掉 {count} 檔 ({pct:.0f}%)")
 
     # 建議修改
-    print(f"\n  ── 建議修改 ──")
+    print("\n  ── 建議修改 ──")
 
     analysts_killed = sum(1 for _, r in df.iterrows() if 'F4' in r.get('Killed_By', ''))
     if analysts_killed > 0:
         # 找出被殺的股票的分析師數分布
         killed_analysts = df[df['Killed_By'].str.contains('F4', na=False)]['Num_Analysts']
         if len(killed_analysts) > 0:
-            max_killed = killed_analysts.max()
-            print(f"    1. 分析師門檻 10 → 建議改為 3")
+            print("    1. 分析師門檻 10 → 建議改為 3")
             print(f"       被殺的股票分析師數: {killed_analysts.tolist()}")
             print(f"       改為 3 可救回 {analysts_killed} 檔")
 
     mcap_killed = sum(1 for _, r in df.iterrows() if 'F3' in r.get('Killed_By', ''))
     if mcap_killed > 0:
-        print(f"    2. Finnhub 補強市值門檻 1B → 建議改為 500M")
+        print("    2. Finnhub 補強市值門檻 1B → 建議改為 500M")
         print(f"       可多補抓 {mcap_killed} 檔中小型財報股")
 
-    print(f"\n    3. 全量數據應包含所有通過 yfinance 補充的股票")
-    print(f"       不應在上傳前再用分析師數過濾")
-    print(f"       分析師過濾應只用於「預測情報」軌道")
+    print("\n    3. 全量數據應包含所有通過 yfinance 補充的股票")
+    print("       不應在上傳前再用分析師數過濾")
+    print("       分析師過濾應只用於「預測情報」軌道")
 
     # 輸出 CSV
     csv_path = os.path.join(os.path.dirname(__file__), 'backtest_results.csv')

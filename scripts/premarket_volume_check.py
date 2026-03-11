@@ -14,13 +14,25 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+from pathlib import Path
+import sys
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 
+RUNTIME_DATA_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app_logging import install_builtin_print_logging
+
 NY_TZ = ZoneInfo("America/New_York")
+
+install_builtin_print_logging()
 
 
 def parse_symbols(symbols_raw: str) -> List[str]:
@@ -63,7 +75,7 @@ def get_daily_volume_baseline(ticker: str) -> Tuple[Optional[int], Optional[int]
         avg5_volume = int(hist["Volume"].tail(5).mean())
         last_close = float(hist["Close"].iloc[-1])
         return yday_volume, avg5_volume, last_close
-    except Exception:
+    except RUNTIME_DATA_ERRORS:
         return None, None, None
 
 
@@ -94,7 +106,7 @@ def get_yf_premarket_volume(ticker: str) -> Optional[int]:
             return None
 
         return int(premarket_df["Volume"].fillna(0).sum())
-    except Exception:
+    except RUNTIME_DATA_ERRORS:
         return None
 
 

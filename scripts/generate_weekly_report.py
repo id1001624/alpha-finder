@@ -25,6 +25,15 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app_logging import install_builtin_print_logging
+
+
+install_builtin_print_logging()
+
 
 def _fix_ssl_cert_path():
     try:
@@ -56,10 +65,6 @@ _fix_ssl_cert_path()
 
 import pandas as pd
 import yfinance as yf
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 DEFAULT_PICK_LOG_FILE = BACKTEST_DIR / "xq_pick_log.csv"
