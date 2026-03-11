@@ -1017,7 +1017,12 @@ def _build_conflict_news_lines(conflict_news: List[dict]) -> List[str]:
     return lines
 
 
-def _build_ai_summary_lines(ai_summary: dict, plan_label: str = "開盤先做") -> List[str]:
+def _build_ai_summary_lines(
+    ai_summary: dict,
+    plan_label: str = "開盤先做",
+    focus_label: str = "焦點",
+    risk_first: bool = False,
+) -> List[str]:
     if not ai_summary:
         return []
     lines: List[str] = []
@@ -1028,11 +1033,19 @@ def _build_ai_summary_lines(ai_summary: dict, plan_label: str = "開盤先做") 
     if summary:
         lines.append(summary)
     focus_items = ai_summary.get("focus", []) if isinstance(ai_summary.get("focus", []), list) else []
-    if focus_items:
-        lines.append(f"焦點: {' | '.join(str(item).strip() for item in focus_items if str(item).strip())}")
     risk_items = ai_summary.get("risk_flags", []) if isinstance(ai_summary.get("risk_flags", []), list) else []
-    if risk_items:
-        lines.append(f"風險: {' | '.join(str(item).strip() for item in risk_items if str(item).strip())}")
+    summary_sections: List[str] = []
+    if risk_first:
+        if risk_items:
+            summary_sections.append(f"風險: {' | '.join(str(item).strip() for item in risk_items if str(item).strip())}")
+        if focus_items:
+            summary_sections.append(f"{focus_label}: {' | '.join(str(item).strip() for item in focus_items if str(item).strip())}")
+    else:
+        if focus_items:
+            summary_sections.append(f"{focus_label}: {' | '.join(str(item).strip() for item in focus_items if str(item).strip())}")
+        if risk_items:
+            summary_sections.append(f"風險: {' | '.join(str(item).strip() for item in risk_items if str(item).strip())}")
+    lines.extend(summary_sections)
     plan_items = ai_summary.get("opening_plan", []) if isinstance(ai_summary.get("opening_plan", []), list) else []
     if plan_items:
         lines.append(f"{plan_label}:")
@@ -1173,7 +1186,12 @@ def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
         lines.append(f"昨晚計畫: {' | '.join(str(item).strip() for item in reference_plan if str(item).strip())}")
         lines.append("")
 
-    ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="現在先做")
+    ai_lines = _build_ai_summary_lines(
+        recap_context.get("ai_summary", {}),
+        plan_label="現在先做",
+        focus_label="劇本驗證",
+        risk_first=True,
+    )
     if ai_lines:
         lines.extend(ai_lines)
     else:
