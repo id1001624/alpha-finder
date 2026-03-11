@@ -944,12 +944,15 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         mode_instruction = "Focus on what changed before sleep and which names change tomorrow's first action."
     elif mode == "morning":
         mode_instruction = (
-            "Frame only the pre-open plan before any opening print. "
+            "This is the overnight recap. The operator was asleep and needs to know what happened. "
+            "First, summarize any material overnight changes: earnings, after-hours moves, news catalysts, or execution events that occurred while asleep. "
+            "Second, re-evaluate the bedtime plan in light of overnight facts — what still holds, what is invalidated, what is new. "
+            "Third, produce a concrete pre-market plan for the coming session. "
             "Do not claim that any opening validation has already happened. "
-            "Prioritize existing position risk and the few names that can change the first 5 to 15 minutes. "
-            "Use risk_flags for names that must be checked first at the open. "
-            "Use opening_plan for executable if-then instructions, not broad commentary or a long watchlist. "
-            "If prior_bedtime_plan or prior_bedtime_risk_flags exists, carry those items forward unless the new facts clearly override them."
+            "Use focus for the few names whose overnight change demands attention. "
+            "Use risk_flags for positions or watchlist names where overnight news created new risk. "
+            "Use opening_plan for executable if-then instructions for the open, not broad commentary. "
+            "If prior_bedtime_plan or prior_bedtime_risk_flags exists, carry those items forward unless overnight facts clearly override them."
         )
     else:
         mode_instruction = (
@@ -1314,7 +1317,7 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     del _df
     del _tv_map
     lines = [
-        f"[Alpha Finder] 盤前結論卡 {title_date}",
+        f"[Alpha Finder] 隔夜結論卡 {title_date}",
         "",
     ]
 
@@ -1323,11 +1326,11 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
         lines.extend(_build_reference_lines(prior_bedtime_lines, "延續昨晚待驗證"))
         lines.append("")
 
-    ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="盤前先看")
+    ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="今日盤前計畫")
     if ai_lines:
         lines.extend(ai_lines)
     else:
-        lines.extend(_build_recap_fallback_lines(recap_context, plan_label="盤前先看"))
+        lines.extend(_build_recap_fallback_lines(recap_context, plan_label="今日盤前計畫"))
     return "\n".join(lines)
 
 
