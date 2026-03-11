@@ -59,7 +59,7 @@ from config import (
     TAVILY_API_KEY,
 )
 from signal_store import get_latest_signals
-from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log, load_runtime_df_with_fallback
+from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log, load_runtime_df, load_runtime_df_with_fallback, sync_runtime_df
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 INBOX_DIR = BACKTEST_DIR / "inbox"
@@ -71,6 +71,8 @@ ALERT_MESSAGE_TXT = ALERT_DIR / "latest_alert_message.txt"
 ALERT_MARKER_DIR = ALERT_DIR / "markers"
 AI_DECISION_LOG_CSV = BACKTEST_DIR / "ai_decision_log.csv"
 EXECUTION_LOG_CSV = BACKTEST_DIR / "execution_trade_log.csv"
+MORNING_PLAN_STATE_KEY = "recap_morning_plan_latest"
+MORNING_PLAN_FILE = ALERT_DIR / "morning_plan_latest.json"
 
 REQUIRED_COLS = [
     "decision_date",
@@ -265,6 +267,73 @@ def _write_sent_marker(decision_date: str, mode: str, channel: str, source_csv: 
         "sent_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     marker_file.write_text(pd.Series(payload).to_json(force_ascii=False, indent=2), encoding="utf-8")
+
+
+def _serialize_lines(values: List[str]) -> str:
+    cleaned = [str(item).strip() for item in values if str(item or "").strip()]
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def _deserialize_lines(value: object) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return [raw]
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item or "").strip()]
+
+
+def _persist_morning_plan(decision_date: str, recap_context: dict, message: str, source_id: object) -> None:
+    ai_summary = recap_context.get("ai_summary", {}) if isinstance(recap_context, dict) else {}
+    opening_plan = ai_summary.get("opening_plan", []) if isinstance(ai_summary.get("opening_plan", []), list) else []
+    focus = ai_summary.get("focus", []) if isinstance(ai_summary.get("focus", []), list) else []
+    risk_flags = ai_summary.get("risk_flags", []) if isinstance(ai_summary.get("risk_flags", []), list) else []
+    payload = {
+        "decision_date": str(decision_date or "").strip(),
+        "mode": "morning",
+        "opening_plan_json": _serialize_lines(opening_plan),
+        "focus_json": _serialize_lines(focus),
+        "risk_flags_json": _serialize_lines(risk_flags),
+        "message": str(message or "").strip(),
+        "source_csv": str(source_id or "").strip(),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    ALERT_DIR.mkdir(parents=True, exist_ok=True)
+    MORNING_PLAN_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    sync_runtime_df(MORNING_PLAN_STATE_KEY, pd.DataFrame([payload]), source_name="recap_morning_plan")
+
+
+def _load_persisted_morning_plan(decision_date: str) -> dict:
+    target_date = str(decision_date or "").strip()
+    candidates: List[dict] = []
+    df, _ = load_runtime_df(MORNING_PLAN_STATE_KEY)
+    if len(df) > 0:
+        candidates.append(df.iloc[0].to_dict())
+    if MORNING_PLAN_FILE.exists():
+        try:
+            candidates.append(json.loads(MORNING_PLAN_FILE.read_text(encoding="utf-8")))
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("decision_date", "")).strip() != target_date:
+            continue
+        return {
+            "opening_plan": _deserialize_lines(item.get("opening_plan_json")),
+            "focus": _deserialize_lines(item.get("focus_json")),
+            "risk_flags": _deserialize_lines(item.get("risk_flags_json")),
+            "message": str(item.get("message", "")).strip(),
+            "source_csv": str(item.get("source_csv", "")).strip(),
+        }
+    return {}
 
 
 def _load_previous_top1(current_date: str) -> str:
@@ -863,13 +932,16 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
     now_dt = _utc_now_naive()
     opening_start_dt, opening_end_dt = _opening_window_bounds(now_dt)
     reference_context = _build_recap_context(df=df, tv_map=tv_map, title_date=title_date, mode="morning", end_dt=opening_start_dt)
+    persisted_morning = _load_persisted_morning_plan(title_date)
 
     positions_df = load_positions()
     execution_df = _load_execution_df(RECAP_EXECUTION_LOOKBACK_LIMIT)
     opening_window_df = _filter_execution_window(execution_df, opening_start_dt, opening_end_dt)
     opening_summaries = _summarize_execution_window(opening_window_df, positions_df, df)
     validation_rows = _build_opening_validation(reference_context, opening_summaries)
-    reference_plan = _extract_reference_plan(reference_context)
+    reference_plan = persisted_morning.get("opening_plan", []) if isinstance(persisted_morning, dict) else []
+    if not reference_plan:
+        reference_plan = _extract_reference_plan(reference_context)
 
     payload = {
         "mode": "opening",
@@ -884,6 +956,7 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
         "opening_validation": validation_rows,
         "positions": _position_payload(positions_df),
         "top_candidates": _top_candidate_payload(df, tv_map),
+        "reference_plan_source": "persisted_morning" if reference_plan and persisted_morning else "regenerated_morning",
     }
     payload["ai_summary"] = _generate_recap_ai_summary("opening", payload)
     payload["reference_context"] = reference_context
@@ -1318,6 +1391,9 @@ def main() -> int:
                     send_failed = True
     else:
         sent_channels.append("dry_run")
+
+    if str(args.mode) == "morning" and recap_context is not None and sent_channels and not args.dry_run:
+        _persist_morning_plan(decision_date, recap_context, message, source_id)
 
     log_df = df[df["decision_tag"].isin(tags)].head(max(1, int(args.top_n))).copy()
     log_rows: List[dict] = []
