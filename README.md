@@ -69,7 +69,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 - `/trades`: 查你透過 Discord 回報過的真實成交紀錄，來源是 Turso 的 `position_trade_log`
 - `/executions`: 查 engine 或 TradingView execution 流程產生的執行歷史，來源是 Turso 的 `execution_trade_log`
-- `/watchlist`: 把最新 ai_decision、你目前持倉、以及你保存或臨時輸入的關注股一起比較，只回傳最終排序、風險先處理與現在先做
+- `/watchlist`: 把最新 ai_decision、前 2 到 3 天遞減保留的 shadow watchlist、你目前持倉、以及你保存或臨時輸入的關注股一起比較，只回傳最終排序、風險先處理與現在先做
 - `/watchadd`: 把 ticker 加進你自己的保存關注股
 - `/watchremove`: 從你的保存關注股移除 ticker
 - `/watchsaved`: 看你目前保存的關注股清單
@@ -111,6 +111,18 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - 哪些先處理風險
 - 現在先做什麼
 
+畫面內的優先級標記：
+
+- `今天主監控`：今天最新 ai_decision 或你目前持倉，屬於第一輪直接要看的標的
+- `延續觀察`：不是今天主決策，但來自前幾天 ai_decision 的短線延續保留名單，代表還沒完全退出監控宇宙
+
+shadow watchlist 規則：
+
+- 預設只保留前 2 到 3 天的舊 ai_decision
+- D-1 預設保留 Top 5，D-2 與 D-3 預設只保留 Top 1
+- 這些舊標的每天都會做分數衰減，所以只會排在延續觀察，不會長期跟今天主決策同權重
+- 目的是避免昨天或前天的 AI 選股剛好晚一天才發動時，完全從盤中監控消失
+
 補充：
 
 - !buy、!sell 這類文字指令仍然能用，但平常直接用 slash commands 就好
@@ -120,7 +132,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 現在盤中 execution 已經不是靠你手動維護 TradingView alert。
 
-- watchlist 來源是 ai_decision_latest.csv
+- watchlist 來源是今天 ai_decision、遞減保留 2 到 3 天的 shadow ai_decision，以及目前持倉
 - engine 自己抓分鐘級 OHLCV
 - 自己算 Dynamic AVWAP + SQZMOM
 - 只輸出四種執行建議：適合買、可加碼、適合先賣一部分、適合全出

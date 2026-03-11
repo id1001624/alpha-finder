@@ -841,14 +841,18 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         mode_instruction = "Focus on what changed before sleep and which names change tomorrow's first action."
     elif mode == "morning":
         mode_instruction = (
-            "Frame the pre-open plan only. "
+            "Frame only the pre-open plan before any opening print. "
             "Do not claim that any opening validation has already happened. "
-            "Use this mode to narrow the pre-open watchlist and set the order of charts to open first."
+            "Prioritize existing position risk and the few names that can change the first 5 to 15 minutes. "
+            "Use risk_flags for names that must be checked first at the open. "
+            "Use opening_plan for executable if-then instructions, not broad commentary or a long watchlist."
         )
     else:
         mode_instruction = (
+            "Treat this as opening validation, not a fresh idea scan. "
             "Validate whether the prior opening plan was confirmed in the first minutes after the opening bell. "
-            "State clearly which plans were confirmed, which were invalidated, and what to do now. "
+            "Prioritize sell-risk and failed setups before upside continuation. "
+            "State clearly which plans are executable now, which are invalidated, and what to do in the next few minutes. "
             "If the first opening window has no clean validation yet, say that the plan is still unconfirmed and stay conservative."
         )
     prompt = (
@@ -859,7 +863,10 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         "Prefer synthesis over inventory. "
         "Do not output holdings lists, raw execution logs, Top 3 recaps, UTC windows, or raw news snippets. "
         "Avoid repeating the same ticker across focus, risk_flags, and opening_plan unless the repetition is necessary to prevent an action mistake. "
+        "For morning and opening modes, think in this order: risk first, plan validity second, upside opportunity last. "
         "Use focus for the few charts worth opening first, risk_flags for true risks, and opening_plan for concrete first actions. "
+        "Keep focus narrow and action-relevant, not a broad inventory. "
+        "Keep opening_plan imperative and executable, not analytical. "
         "If the mode is opening, opening_plan means what to do now in the next few minutes. "
         "If the mode is opening and opening_has_data is false, do not claim that last night's plan was confirmed. "
         "If the mode is opening and both sell-risk validation and buy-strength validation exist, prioritize sell-risk validation first. "
@@ -1075,7 +1082,7 @@ def _build_recap_fallback_lines(recap_context: dict, plan_label: str = "開盤�
 def _build_opening_fallback_lines(recap_context: dict) -> List[str]:
     validation_rows = recap_context.get("validation_rows", []) if isinstance(recap_context, dict) else []
     if not validation_rows:
-        return ["Gemini 暫時無回應，開盤首輪還沒有足夠的 execution 訊號可驗證昨晚計畫。"]
+        return ["Gemini 暫時無回應，開盤首輪還沒有足夠的 execution 訊號可驗證昨晚計畫；這在第一輪 opening workflow 屬正常情況。"]
 
     lines = ["Gemini 暫時無回應，改用開盤驗證摘要。"]
     focus_items = [f"{row.get('ticker', 'NA')}({row.get('validation_label', '待確認')})" for row in validation_rows[:3]]
@@ -1084,10 +1091,10 @@ def _build_opening_fallback_lines(recap_context: dict) -> List[str]:
         for row in validation_rows
         if str(row.get("validation_label", "")) in {"確認風險", "開盤失敗", "開盤雜訊", "反向轉強"}
     ][:3]
-    if focus_items:
-        lines.append(f"焦點: {' | '.join(focus_items)}")
     if risk_items:
         lines.append(f"風險: {' | '.join(risk_items)}")
+    if focus_items:
+        lines.append(f"劇本驗證: {' | '.join(focus_items)}")
     lines.append("現在先做:")
     for row in validation_rows[:3]:
         next_step = str(row.get("next_step", "")).strip()
