@@ -28,6 +28,7 @@ from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log,
 from .intraday_execution_engine import AI_DECISION_LATEST, SNAPSHOT_FILE, _classify_action, _fetch_intraday_bars
 from .intraday_indicators import add_intraday_indicators
 from .position_state import get_position, load_positions
+from .shadow_watchlist import build_decision_universe_df, load_shadow_decision_df
 
 
 ACTION_LABELS = {
@@ -180,8 +181,13 @@ def _load_decision_df() -> pd.DataFrame:
 
 
 def _load_decision_map() -> Dict[str, dict]:
-    out = _load_decision_df()
+    out = _load_decision_universe_df()
     return {str(row.get("ticker", "")).strip().upper(): row.to_dict() for _, row in out.iterrows() if str(row.get("ticker", "")).strip()}
+
+
+def _load_decision_universe_df() -> pd.DataFrame:
+    latest = _load_decision_df()
+    return build_decision_universe_df(latest)
 
 
 def _load_signal_map() -> Dict[str, object]:
@@ -336,10 +342,12 @@ def _tv_payload_for(ticker: str, signal_map: Dict[str, object]) -> dict:
 
 def _resolve_universe(saved_tickers: List[str], extra_tickers: List[str]) -> List[str]:
     decision_df = _load_decision_df()
+    shadow_df = load_shadow_decision_df(decision_df)
     positions_df = load_positions()
     decision_tickers = [str(value).strip().upper() for value in decision_df["ticker"].head(DEFAULT_AI_DECISION_TOP_N).tolist()] if len(decision_df) > 0 else []
+    shadow_tickers = [str(value).strip().upper() for value in shadow_df["ticker"].tolist()] if len(shadow_df) > 0 else []
     position_tickers = [str(value).strip().upper() for value in positions_df["ticker"].dropna().tolist()] if len(positions_df) > 0 else []
-    ordered = decision_tickers + position_tickers + saved_tickers + extra_tickers
+    ordered = decision_tickers + position_tickers + shadow_tickers + saved_tickers + extra_tickers
     out: List[str] = []
     for ticker in ordered:
         if not ticker or ticker in out:
@@ -362,6 +370,7 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
         position = get_position(positions_df, ticker)
         news = _tavily_search(f"{ticker} stock news premarket catalyst", max_results=max(1, min(int(CATALYST_TAVILY_MAX_RESULTS), 2)))
         has_position = bool(position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0)
+        monitor_priority = str(decision.get("monitor_priority") or ("今天主監控" if (has_position or ticker in extra_tickers or ticker in saved_tickers) else "今天主監控")).strip()
         items.append(
             {
                 "ticker": ticker,
@@ -372,6 +381,9 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
                     "risk_level": str(decision.get("risk_level", "")).strip(),
                     "reason_summary": _clip_text(decision.get("reason_summary") or "", 100),
                     "catalyst_summary": _clip_text(decision.get("catalyst_summary") or "", 100),
+                    "monitor_priority": monitor_priority,
+                    "shadow_age_days": int(pd.to_numeric(decision.get("shadow_age_days"), errors="coerce") if pd.notna(pd.to_numeric(decision.get("shadow_age_days"), errors="coerce")) else 0),
+                    "shadow_decay_score": float(pd.to_numeric(decision.get("shadow_decay_score"), errors="coerce") if pd.notna(pd.to_numeric(decision.get("shadow_decay_score"), errors="coerce")) else 0.0),
                 },
                 "position": {
                     "has_position": has_position,
@@ -394,6 +406,7 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
                     "ai_decision": bool(decision),
                     "open_position": has_position,
                 },
+                "monitor_priority": monitor_priority,
             }
         )
 
@@ -411,6 +424,7 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
         "Use only the provided facts. "
         "Do not invent news, prices, signals, or rankings. "
         "Combine current ai_decision candidates, open positions, and saved watchlist names into one clean ranking. "
+        "Each ticker also carries a monitor_priority of 今天主監控 or 延續觀察. Preserve that distinction in the final card. "
         "Do not mention whether a ticker came from ai_decision, positions, or watchlist. "
         "Do not mention raw news headlines, search process, data collection process, or comparison process. "
         "Only output the strongest actionable names. Omit weak or unclear names. "
@@ -474,6 +488,7 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
         decision = item.get("decision", {}) if isinstance(item.get("decision"), dict) else {}
         engine = item.get("engine", {}) if isinstance(item.get("engine"), dict) else {}
         news = item.get("news", []) if isinstance(item.get("news"), list) else []
+        monitor_priority = str(decision.get("monitor_priority") or item.get("monitor_priority") or "今天主監控").strip()
         action = str(engine.get("action", "")).strip().lower()
         score = 0.0
         if action == "add":
@@ -487,6 +502,7 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
         rank_value = int(pd.to_numeric(decision.get("rank"), errors="coerce") if pd.notna(pd.to_numeric(decision.get("rank"), errors="coerce")) else 9999)
         if rank_value < 9999:
             score += max(0, 20 - rank_value * 3)
+        score += float(pd.to_numeric(decision.get("shadow_decay_score"), errors="coerce") if pd.notna(pd.to_numeric(decision.get("shadow_decay_score"), errors="coerce")) else 0.0)
         score += min(len(news), 2) * 2
         if str(item.get("tv_signal", {}).get("event", "")).strip().lower() in {"entry", "add", "buy", "breakout"}:
             score += 8
@@ -494,7 +510,7 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
 
         if action in {"stop_loss", "take_profit"}:
             risk_flags.append(f"{ticker}: {engine.get('action_label', '先處理風險')}")
-            action_plan.append(f"先處理 {ticker}，{engine.get('reason') or '開盤前先看是否要降風險'}")
+            action_plan.append(f"{ticker}: {engine.get('reason') or '先處理風險'}")
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     priority_order = []
@@ -505,7 +521,7 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
             continue
         if str(engine.get("action", "")).strip().lower() not in {"add", "entry"}:
             continue
-        priority_order.append(f"{ticker}: {engine.get('action_label', '可觀察')}，{engine.get('reason') or '優先開圖確認'}")
+        priority_order.append(f"{ticker}: {monitor_priority}，{engine.get('action_label', '可觀察')}，{engine.get('reason') or '優先開圖確認'}")
         if len(priority_order) >= 5:
             break
 
@@ -514,7 +530,7 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
             ticker = str(item.get("ticker", "")).strip().upper()
             engine = item.get("engine", {}) if isinstance(item.get("engine"), dict) else {}
             if str(engine.get("action", "")).strip().lower() in {"stop_loss", "take_profit"}:
-                action_plan.append(f"先處理 {ticker}，{engine.get('reason') or '先看風險'}")
+                action_plan.append(f"{ticker}: {engine.get('reason') or '先看風險'}")
             elif str(engine.get("action", "")).strip().lower() in {"add", "entry"}:
                 action_plan.append(f"{ticker}: {engine.get('reason') or '優先開圖確認'}")
 
@@ -529,6 +545,35 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
     }
 
 
+def _priority_map(payload: dict) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for item in payload.get("items", []):
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        label = str(item.get("monitor_priority") or item.get("decision", {}).get("monitor_priority") or "今天主監控").strip()
+        out[ticker] = label or "今天主監控"
+    return out
+
+
+def _decorate_priority_item(text: str, priority_map: Dict[str, str]) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    for ticker, label in priority_map.items():
+        if not raw.startswith(ticker):
+            continue
+        remainder = raw[len(ticker):].lstrip()
+        if remainder.startswith(f"[{label}]"):
+            return raw
+        if remainder.startswith(":") or remainder.startswith("："):
+            return f"{ticker} [{label}]{remainder}"
+        if remainder:
+            return f"{ticker} [{label}]: {remainder}"
+        return f"{ticker} [{label}]"
+    return raw
+
+
 def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str] | None = None) -> str:
     saved = _parse_tickers(" ".join(saved_tickers or []), limit=MAX_TRACKED_TICKERS)
     extra = _parse_tickers(raw_tickers, limit=MAX_TRACKED_TICKERS)
@@ -538,6 +583,7 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
 
     payload = _build_watch_payload(tickers, saved, extra)
     summary = _gemini_watchlist_summary(payload) or _fallback_watchlist_summary(payload)
+    priority_map = _priority_map(payload)
 
     lines = [
         f"[Alpha Finder] 交易結論卡 {payload.get('generated_at', '')}",
@@ -549,9 +595,9 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
         lines.append(headline)
     if message_summary:
         lines.append(message_summary)
-    priority_order = summary.get("priority_order", []) if isinstance(summary.get("priority_order", []), list) else []
-    risk_flags = summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else []
-    action_plan = summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else []
+    priority_order = [_decorate_priority_item(item, priority_map) for item in (summary.get("priority_order", []) if isinstance(summary.get("priority_order", []), list) else [])]
+    risk_flags = [_decorate_priority_item(item, priority_map) for item in (summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else [])]
+    action_plan = [_decorate_priority_item(item, priority_map) for item in (summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else [])]
     if priority_order:
         lines.append("先看標的:")
         for idx, item in enumerate(priority_order, 1):

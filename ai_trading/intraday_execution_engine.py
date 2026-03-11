@@ -43,6 +43,7 @@ from config import (
 )
 from .intraday_indicators import add_intraday_indicators
 from .position_state import get_position, load_positions
+from .shadow_watchlist import load_shadow_decision_df
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -276,9 +277,15 @@ def _append_action_log(rows: List[dict]) -> None:
 
 def _load_watchlist(top_n: int) -> pd.DataFrame:
     decision_df = _load_decision_df()
+    shadow_df = load_shadow_decision_df(decision_df)
     positions_df = load_positions()
 
     watch = decision_df.head(max(1, top_n)).copy() if len(decision_df) > 0 else pd.DataFrame(columns=["ticker"])
+    if len(watch) > 0:
+        watch["monitor_priority"] = "今天主監控"
+        watch["shadow_age_days"] = 0
+    if len(shadow_df) > 0:
+        watch = pd.concat([watch, shadow_df], ignore_index=True)
     if len(positions_df) > 0:
         pos_rows = positions_df[["ticker"]].copy()
         pos_rows["decision_date"] = ""
@@ -288,6 +295,8 @@ def _load_watchlist(top_n: int) -> pd.DataFrame:
         pos_rows["tech_status"] = ""
         pos_rows["theme"] = ""
         pos_rows["reason_summary"] = "open position"
+        pos_rows["monitor_priority"] = "今天主監控"
+        pos_rows["shadow_age_days"] = 0
         watch = pd.concat([watch, pos_rows], ignore_index=True)
 
     if len(watch) == 0:
@@ -581,6 +590,8 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                 "ticker": ticker,
                 "rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") if pd.notna(pd.to_numeric(meta.get("rank"), errors="coerce")) else 0),
                 "decision_tag": str(meta.get("decision_tag", "")),
+                "monitor_priority": str(meta.get("monitor_priority", "今天主監控")),
+                "shadow_age_days": int(pd.to_numeric(meta.get("shadow_age_days"), errors="coerce") if pd.notna(pd.to_numeric(meta.get("shadow_age_days"), errors="coerce")) else 0),
                 "close": pd.to_numeric(latest.get("Close"), errors="coerce"),
                 "dynamic_avwap": pd.to_numeric(latest.get("dynamic_avwap"), errors="coerce"),
                 "sqzmom_hist": pd.to_numeric(latest.get("sqzmom_hist"), errors="coerce"),
