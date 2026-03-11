@@ -610,7 +610,7 @@ def load_recent_execution_log(limit: int = 5, ticker: str = "") -> pd.DataFrame:
     if ticker_value:
         return _load_query_df(
             """
-            SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag, close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe
+            SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag, close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe, reason_summary, signal_ts
             FROM execution_trade_log
             WHERE ticker = ?
             ORDER BY execution_date DESC, execution_time DESC, recorded_at DESC
@@ -620,7 +620,7 @@ def load_recent_execution_log(limit: int = 5, ticker: str = "") -> pd.DataFrame:
         )
     return _load_query_df(
         """
-        SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag, close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe
+        SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag, close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe, reason_summary, signal_ts
         FROM execution_trade_log
         ORDER BY execution_date DESC, execution_time DESC, recorded_at DESC
         LIMIT ?

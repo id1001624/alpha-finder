@@ -58,6 +58,9 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - /trades
 - /executions
 - /watchlist
+- /watchadd
+- /watchremove
+- /watchsaved
 - /buy
 - /add
 - /sell
@@ -66,7 +69,10 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 - `/trades`: 查你透過 Discord 回報過的真實成交紀錄，來源是 Turso 的 `position_trade_log`
 - `/executions`: 查 engine 或 TradingView execution 流程產生的執行歷史，來源是 Turso 的 `execution_trade_log`
-- `/watchlist`: 輸入你自己關注的 ticker 清單，盤前用 Tavily 新聞、最新 execution / TV 訊號與 Gemini 幫你整理風險、優先順序與先看哪幾檔
+- `/watchlist`: 把最新 ai_decision、你目前持倉、以及你保存或臨時輸入的關注股一起比較，只回傳最終排序、風險先處理與現在先做
+- `/watchadd`: 把 ticker 加進你自己的保存關注股
+- `/watchremove`: 從你的保存關注股移除 ticker
+- `/watchsaved`: 看你目前保存的關注股清單
 
 推薦實際用法：
 
@@ -86,17 +92,24 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 1. 系統之後會根據目前持倉與盤中訊號繼續提醒你
 
-如果你想臨時分析自己的關注股，不用改主 watchlist，直接：
+如果你想建立自己的保存關注股，直接：
+
+```text
+/watchadd AAPL NVDA TSLA
+/watchsaved
+```
+
+如果你想在當下再額外塞幾檔進去一起比，也可以直接：
 
 ```text
 /watchlist AAPL NVDA TSLA
 ```
 
-它會用最新可用的盤前新聞、engine 指標與 execution 脈絡，幫你整理：
+它會把這些 ticker 跟最新 ai_decision、目前持倉一起比較，只給你最終結果：
 
+- 哪些最值得優先看
 - 哪些先處理風險
-- 如果很多都偏多，誰最優先開圖或考慮
-- 盤前第一輪先做什麼
+- 現在先做什麼
 
 補充：
 

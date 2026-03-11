@@ -11,7 +11,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
-from ai_trading.watchlist_brief import build_watchlist_brief_message
+from ai_trading.watchlist_brief import (
+    add_saved_watchlist_tickers,
+    build_watchlist_brief_message,
+    format_saved_watchlist_message,
+    load_saved_watchlist,
+    remove_saved_watchlist_tickers,
+)
 from config import (
     DISCORD_BOT_ALLOWED_CHANNEL_IDS,
     DISCORD_BOT_ENABLED,
@@ -57,7 +63,10 @@ def _help_text() -> str:
         "/position ticker\n"
         "/trades [ticker] [limit]\n"
         "/executions [ticker] [limit]\n"
-        "/watchlist tickers\n\n"
+        "/watchlist [tickers]\n"
+        "/watchadd tickers\n"
+        "/watchremove tickers\n"
+        "/watchsaved\n\n"
         "也保留文字指令相容:\n"
         f"{DISCORD_BOT_PREFIX}buy AAPL 100 188.2\n"
         f"{DISCORD_BOT_PREFIX}add AAPL 50 190.1\n"
@@ -66,7 +75,10 @@ def _help_text() -> str:
         f"{DISCORD_BOT_PREFIX}position AAPL\n"
         f"{DISCORD_BOT_PREFIX}trades AAPL 5\n"
         f"{DISCORD_BOT_PREFIX}executions AAPL 5\n"
-        f"{DISCORD_BOT_PREFIX}watchlist AAPL NVDA TSLA"
+        f"{DISCORD_BOT_PREFIX}watchlist AAPL NVDA TSLA\n"
+        f"{DISCORD_BOT_PREFIX}watchadd AAPL NVDA\n"
+        f"{DISCORD_BOT_PREFIX}watchremove AAPL\n"
+        f"{DISCORD_BOT_PREFIX}watchsaved"
     )
 
 
@@ -87,6 +99,17 @@ def _split_chunks(text: str, limit: int = 1800) -> list[str]:
 async def _send_long_message(ctx, text: str) -> None:
     for chunk in _split_chunks(text):
         await ctx.send(chunk)
+
+
+def _ctx_user_id(ctx) -> int:
+    author = getattr(ctx, "author", None)
+    if author is not None and getattr(author, "id", None) is not None:
+        return int(author.id)
+    interaction = getattr(ctx, "interaction", None)
+    user = getattr(interaction, "user", None) if interaction is not None else None
+    if user is not None and getattr(user, "id", None) is not None:
+        return int(user.id)
+    return 0
 
 
 def _format_recent_trades(ticker: str = "", limit: int = 5) -> str:
@@ -219,19 +242,53 @@ def main() -> int:
         limit_value = max(1, min(int(limit), 20))
         await ctx.send(_format_recent_executions(ticker=ticker, limit=limit_value))
 
-    @bot.hybrid_command(name="watchlist", description="分析自選關注股，整理盤前新聞、engine 訊號與優先順序")
-    @app_commands.describe(tickers="以空白或逗號分隔股票代號，例如 AAPL NVDA TSLA")
-    async def watchlist(ctx, *, tickers: str):
+    @bot.hybrid_command(name="watchlist", description="整合 ai_decision、持倉與你的關注股，輸出乾淨的盤前排序")
+    @app_commands.describe(tickers="可選，額外加入的股票代號，例如 AAPL NVDA TSLA")
+    async def watchlist(ctx, *, tickers: str = ""):
         if not await _guard_channel(ctx):
             return
         if getattr(ctx, "interaction", None) is not None:
             await ctx.defer()
+        saved_tickers = load_saved_watchlist(_ctx_user_id(ctx))
         try:
-            message = build_watchlist_brief_message(tickers)
+            message = build_watchlist_brief_message(raw_tickers=tickers, saved_tickers=saved_tickers)
         except ValueError as exc:
             await ctx.send(f"指令失敗: {exc}")
             return
         await _send_long_message(ctx, message)
+
+    @bot.hybrid_command(name="watchadd", description="把股票加入你的保存關注清單")
+    @app_commands.describe(tickers="以空白或逗號分隔股票代號，例如 AAPL NVDA")
+    async def watchadd(ctx, *, tickers: str):
+        if not await _guard_channel(ctx):
+            return
+        try:
+            updated = add_saved_watchlist_tickers(_ctx_user_id(ctx), tickers)
+        except ValueError as exc:
+            await ctx.send(f"指令失敗: {exc}")
+            return
+        await ctx.send("已更新關注股:\n" + "\n".join(f"- {ticker}" for ticker in updated))
+
+    @bot.hybrid_command(name="watchremove", description="把股票從你的保存關注清單移除")
+    @app_commands.describe(tickers="以空白或逗號分隔股票代號，例如 AAPL NVDA")
+    async def watchremove(ctx, *, tickers: str):
+        if not await _guard_channel(ctx):
+            return
+        try:
+            updated = remove_saved_watchlist_tickers(_ctx_user_id(ctx), tickers)
+        except ValueError as exc:
+            await ctx.send(f"指令失敗: {exc}")
+            return
+        if not updated:
+            await ctx.send("你的保存關注股目前已清空。")
+            return
+        await ctx.send("移除後關注股:\n" + "\n".join(f"- {ticker}" for ticker in updated))
+
+    @bot.hybrid_command(name="watchsaved", description="查看你保存的關注股清單")
+    async def watchsaved(ctx):
+        if not await _guard_channel(ctx):
+            return
+        await ctx.send(format_saved_watchlist_message(_ctx_user_id(ctx)))
 
     async def _record_trade(ctx, side: str, ticker: str, quantity: float, price: float, note: str = ""):
         if not await _guard_channel(ctx):

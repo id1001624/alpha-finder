@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import re
+import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
@@ -24,7 +25,7 @@ from config import (
 from signal_store import get_latest_signals
 from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log, load_runtime_df_with_fallback
 
-from .intraday_execution_engine import AI_DECISION_LATEST, _classify_action, _fetch_intraday_bars
+from .intraday_execution_engine import AI_DECISION_LATEST, SNAPSHOT_FILE, _classify_action, _fetch_intraday_bars
 from .intraday_indicators import add_intraday_indicators
 from .position_state import get_position, load_positions
 
@@ -36,6 +37,10 @@ ACTION_LABELS = {
     "stop_loss": "先降風險",
     "": "待確認",
 }
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+WATCHLIST_STORE_PATH = PROJECT_ROOT / "repo_outputs" / "backtest" / "discord_watchlists.json"
+DEFAULT_AI_DECISION_TOP_N = 5
+MAX_TRACKED_TICKERS = 12
 
 
 def _clip_text(value: object, limit: int = 120) -> str:
@@ -71,7 +76,7 @@ def _extract_json_block(text: str) -> Dict[str, object]:
         return {}
 
 
-def _parse_tickers(raw: str, limit: int = 6) -> List[str]:
+def _parse_tickers(raw: str, limit: int = MAX_TRACKED_TICKERS) -> List[str]:
     parts = re.split(r"[\s,，;；]+", str(raw or "").strip().upper())
     out: List[str] = []
     for part in parts:
@@ -84,18 +89,98 @@ def _parse_tickers(raw: str, limit: int = 6) -> List[str]:
     return out
 
 
-def _load_decision_map() -> Dict[str, dict]:
+def _load_watchlist_store() -> dict:
+    if not WATCHLIST_STORE_PATH.exists():
+        return {"users": {}}
+    try:
+        data = json.loads(WATCHLIST_STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"users": {}}
+    if not isinstance(data, dict):
+        return {"users": {}}
+    users = data.get("users")
+    if not isinstance(users, dict):
+        data["users"] = {}
+    return data
+
+
+def _save_watchlist_store(data: dict) -> None:
+    WATCHLIST_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    WATCHLIST_STORE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_saved_watchlist(user_id: int | str) -> List[str]:
+    store = _load_watchlist_store()
+    entry = store.get("users", {}).get(str(user_id), {})
+    tickers = entry.get("tickers", []) if isinstance(entry, dict) else []
+    if not isinstance(tickers, list):
+        return []
+    return _parse_tickers(" ".join(str(item) for item in tickers), limit=MAX_TRACKED_TICKERS)
+
+
+def add_saved_watchlist_tickers(user_id: int | str, raw_tickers: str) -> List[str]:
+    additions = _parse_tickers(raw_tickers)
+    if not additions:
+        raise ValueError("請提供至少一個股票代號，例如 AAPL NVDA")
+    current = load_saved_watchlist(user_id)
+    merged = current[:]
+    for ticker in additions:
+        if ticker not in merged:
+            merged.append(ticker)
+    merged = merged[:MAX_TRACKED_TICKERS]
+    store = _load_watchlist_store()
+    store.setdefault("users", {})[str(user_id)] = {
+        "tickers": merged,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_watchlist_store(store)
+    return merged
+
+
+def remove_saved_watchlist_tickers(user_id: int | str, raw_tickers: str) -> List[str]:
+    removals = set(_parse_tickers(raw_tickers))
+    if not removals:
+        raise ValueError("請提供至少一個要移除的股票代號，例如 AAPL")
+    current = load_saved_watchlist(user_id)
+    remaining = [ticker for ticker in current if ticker not in removals]
+    store = _load_watchlist_store()
+    store.setdefault("users", {})[str(user_id)] = {
+        "tickers": remaining,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_watchlist_store(store)
+    return remaining
+
+
+def format_saved_watchlist_message(user_id: int | str) -> str:
+    tickers = load_saved_watchlist(user_id)
+    if not tickers:
+        return "你目前沒有保存的關注股。可用 /watchadd AAPL NVDA 新增。"
+    lines = ["你保存的關注股:"]
+    for ticker in tickers:
+        lines.append(f"- {ticker}")
+    return "\n".join(lines)
+
+
+def _load_decision_df() -> pd.DataFrame:
     df, _ = load_runtime_df_with_fallback(STATE_KEY_AI_DECISION_LATEST, [AI_DECISION_LATEST])
     if len(df) == 0 or "ticker" not in df.columns:
-        return {}
+        return pd.DataFrame()
     out = df.copy()
     for col in ["decision_date", "rank", "ticker", "decision_tag", "risk_level", "tech_status", "theme", "reason_summary", "catalyst_summary"]:
         if col not in out.columns:
             out[col] = ""
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
     out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
     out = out[out["ticker"] != ""].copy()
-    out = out.sort_values(["rank", "ticker"], ascending=[True, True], na_position="last")
+    out = out[out["decision_tag"].isin(["keep", "watch", "replace", "trim"]) | (out["decision_tag"] == "")]
+    out = out.sort_values(["rank", "ticker"], ascending=[True, True], na_position="last").reset_index(drop=True)
+    return out
+
+
+def _load_decision_map() -> Dict[str, dict]:
+    out = _load_decision_df()
     return {str(row.get("ticker", "")).strip().upper(): row.to_dict() for _, row in out.iterrows() if str(row.get("ticker", "")).strip()}
 
 
@@ -107,7 +192,7 @@ def _load_signal_map() -> Dict[str, object]:
             max_age_minutes=SIGNAL_MAX_AGE_MINUTES,
             require_same_day=SIGNAL_REQUIRE_SAME_DAY,
         )
-    except Exception:
+    except (OSError, ValueError, TypeError, sqlite3.Error, pd.errors.EmptyDataError):
         return {}
 
 
@@ -162,7 +247,41 @@ def _load_recent_execution_rows(ticker: str, limit: int = 3) -> List[dict]:
     return out
 
 
-def _build_engine_payload(ticker: str, positions_df: pd.DataFrame) -> dict:
+def _load_intraday_snapshot_map() -> Dict[str, dict]:
+    if not SNAPSHOT_FILE.exists():
+        return {}
+    try:
+        df = pd.read_csv(SNAPSHOT_FILE, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        df = pd.read_csv(SNAPSHOT_FILE)
+    except (OSError, pd.errors.EmptyDataError):
+        return {}
+    if len(df) == 0 or "ticker" not in df.columns:
+        return {}
+    out = df.copy()
+    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    return {str(row.get("ticker", "")).strip().upper(): row.to_dict() for _, row in out.iterrows() if str(row.get("ticker", "")).strip()}
+
+
+def _build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
+    action = str(snapshot_row.get("action", "")).strip().lower()
+    return {
+        "ticker": str(snapshot_row.get("ticker", "")).strip().upper(),
+        "has_data": True,
+        "action": action,
+        "action_label": ACTION_LABELS.get(action, "待確認"),
+        "size_fraction": _safe_float(snapshot_row.get("size_fraction"), 0.0),
+        "reason": _clip_text(snapshot_row.get("reason_summary") or "", 90),
+        "close": _safe_float(snapshot_row.get("close"), 0.0),
+        "dynamic_avwap": _safe_float(snapshot_row.get("dynamic_avwap"), 0.0),
+        "sqzmom_hist": _safe_float(snapshot_row.get("sqzmom_hist"), 0.0),
+        "sqzmom_color": str(snapshot_row.get("sqzmom_color", "")).strip(),
+        "sqz_release": bool(snapshot_row.get("sqz_release", False)),
+        "signal_ts": str(snapshot_row.get("signal_ts", "")).strip(),
+    }
+
+
+def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame) -> dict:
     bars = _fetch_intraday_bars(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, True)
     if len(bars) < 60:
         return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認"}
@@ -192,6 +311,13 @@ def _build_engine_payload(ticker: str, positions_df: pd.DataFrame) -> dict:
     }
 
 
+def _build_engine_payload(ticker: str, positions_df: pd.DataFrame, snapshot_map: Dict[str, dict]) -> dict:
+    snapshot_row = snapshot_map.get(ticker)
+    if snapshot_row is not None:
+        return _build_engine_payload_from_snapshot(snapshot_row)
+    return _build_engine_payload_live(ticker, positions_df)
+
+
 def _tv_payload_for(ticker: str, signal_map: Dict[str, object]) -> dict:
     event = signal_map.get(ticker)
     if not event:
@@ -208,16 +334,34 @@ def _tv_payload_for(ticker: str, signal_map: Dict[str, object]) -> dict:
     }
 
 
-def _build_watch_payload(tickers: List[str]) -> dict:
+def _resolve_universe(saved_tickers: List[str], extra_tickers: List[str]) -> List[str]:
+    decision_df = _load_decision_df()
+    positions_df = load_positions()
+    decision_tickers = [str(value).strip().upper() for value in decision_df["ticker"].head(DEFAULT_AI_DECISION_TOP_N).tolist()] if len(decision_df) > 0 else []
+    position_tickers = [str(value).strip().upper() for value in positions_df["ticker"].dropna().tolist()] if len(positions_df) > 0 else []
+    ordered = decision_tickers + position_tickers + saved_tickers + extra_tickers
+    out: List[str] = []
+    for ticker in ordered:
+        if not ticker or ticker in out:
+            continue
+        out.append(ticker)
+        if len(out) >= MAX_TRACKED_TICKERS:
+            break
+    return out
+
+
+def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tickers: List[str]) -> dict:
     decision_map = _load_decision_map()
     positions_df = load_positions()
     signal_map = _load_signal_map()
+    snapshot_map = _load_intraday_snapshot_map()
 
     items: List[dict] = []
     for ticker in tickers:
         decision = decision_map.get(ticker, {})
         position = get_position(positions_df, ticker)
-        news = _tavily_search(f"{ticker} stock news premarket catalyst", max_results=max(1, min(int(CATALYST_TAVILY_MAX_RESULTS), 3)))
+        news = _tavily_search(f"{ticker} stock news premarket catalyst", max_results=max(1, min(int(CATALYST_TAVILY_MAX_RESULTS), 2)))
+        has_position = bool(position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0)
         items.append(
             {
                 "ticker": ticker,
@@ -230,26 +374,31 @@ def _build_watch_payload(tickers: List[str]) -> dict:
                     "catalyst_summary": _clip_text(decision.get("catalyst_summary") or "", 100),
                 },
                 "position": {
-                    "has_position": bool(position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0),
+                    "has_position": has_position,
                     "quantity": _safe_float(position.get("quantity", 0.0), 0.0) if position is not None else 0.0,
                     "avg_cost": _safe_float(position.get("avg_cost", 0.0), 0.0) if position is not None else 0.0,
                 },
                 "tv_signal": _tv_payload_for(ticker, signal_map),
-                "engine": _build_engine_payload(ticker, positions_df),
+                "engine": _build_engine_payload(ticker, positions_df, snapshot_map),
                 "recent_execution": _load_recent_execution_rows(ticker, limit=3),
                 "news": [
                     {
-                        "title": _clip_text(item.get("title") or "", 100),
-                        "content": _clip_text(item.get("content") or "", 120),
+                        "title": _clip_text(item.get("title") or "", 90),
+                        "content": _clip_text(item.get("content") or "", 110),
                     }
-                    for item in news[:3]
+                    for item in news[:2]
                 ],
+                "source_flags": {
+                    "saved_watchlist": ticker in saved_tickers,
+                    "ad_hoc_watchlist": ticker in extra_tickers,
+                    "ai_decision": bool(decision),
+                    "open_position": has_position,
+                },
             }
         )
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "tickers": tickers,
         "items": items,
     }
 
@@ -261,6 +410,10 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
         "You are a premarket trading assistant for a human operator. "
         "Use only the provided facts. "
         "Do not invent news, prices, signals, or rankings. "
+        "Combine current ai_decision candidates, open positions, and saved watchlist names into one clean ranking. "
+        "Do not mention whether a ticker came from ai_decision, positions, or watchlist. "
+        "Do not mention raw news headlines. "
+        "Only output the strongest actionable names. Omit weak or unclear names. "
         "Risk control comes before fresh buying. "
         "If a ticker shows stop-loss, take-profit, or weak opening confirmation, prioritize that in risk_flags and action_plan before new long ideas. "
         "Only put clear buy candidates in priority_order. "
@@ -330,7 +483,7 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
         rank_value = int(pd.to_numeric(decision.get("rank"), errors="coerce") if pd.notna(pd.to_numeric(decision.get("rank"), errors="coerce")) else 9999)
         if rank_value < 9999:
             score += max(0, 20 - rank_value * 3)
-        score += min(len(news), 3) * 3
+        score += min(len(news), 2) * 2
         if str(item.get("tv_signal", {}).get("event", "")).strip().lower() in {"entry", "add", "buy", "breakout"}:
             score += 8
         scored.append((score, item))
@@ -344,6 +497,8 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
     for score, item in scored:
         ticker = str(item.get("ticker", "")).strip().upper()
         engine = item.get("engine", {}) if isinstance(item.get("engine"), dict) else {}
+        if score < 20:
+            continue
         if str(engine.get("action", "")).strip().lower() not in {"add", "entry"}:
             continue
         priority_order.append(f"{ticker}: {engine.get('action_label', '可觀察')}，{engine.get('reason') or '優先開圖確認'}")
@@ -354,10 +509,13 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
         for _, item in scored[:3]:
             ticker = str(item.get("ticker", "")).strip().upper()
             engine = item.get("engine", {}) if isinstance(item.get("engine"), dict) else {}
-            action_plan.append(f"{ticker}: {engine.get('reason') or '盤前先看訊號是否延續'}")
+            if str(engine.get("action", "")).strip().lower() in {"stop_loss", "take_profit"}:
+                action_plan.append(f"先處理 {ticker}，{engine.get('reason') or '先看風險'}")
+            elif str(engine.get("action", "")).strip().lower() in {"add", "entry"}:
+                action_plan.append(f"{ticker}: {engine.get('reason') or '優先開圖確認'}")
 
-    headline = "自選股盤前整理完成"
-    summary = "已根據 engine、近期 execution 與新聞整理出風險與優先順序。"
+    headline = "盤前整合排序完成"
+    summary = "已把強勢候選與風險股整合成單一排序，弱勢或不明確標的已省略。"
     return {
         "headline": headline,
         "summary": summary,
@@ -367,18 +525,18 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
     }
 
 
-def build_watchlist_brief_message(raw_tickers: str) -> str:
-    tickers = _parse_tickers(raw_tickers)
+def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str] | None = None) -> str:
+    saved = _parse_tickers(" ".join(saved_tickers or []), limit=MAX_TRACKED_TICKERS)
+    extra = _parse_tickers(raw_tickers, limit=MAX_TRACKED_TICKERS)
+    tickers = _resolve_universe(saved, extra)
     if not tickers:
-        raise ValueError("請提供至少一個股票代號，例如 AAPL NVDA TSLA")
+        raise ValueError("目前沒有可分析的股票。先用 /watchadd 新增關注股，或直接輸入 ticker。")
 
-    payload = _build_watch_payload(tickers)
+    payload = _build_watch_payload(tickers, saved, extra)
     summary = _gemini_watchlist_summary(payload) or _fallback_watchlist_summary(payload)
 
     lines = [
-        f"[Alpha Finder] 自選關注股盤前分析 {payload.get('generated_at', '')}",
-        "",
-        f"輸入: {' | '.join(tickers)}",
+        f"[Alpha Finder] 盤前整合排序 {payload.get('generated_at', '')}",
         "",
     ]
     headline = str(summary.get("headline", "")).strip()
@@ -391,15 +549,15 @@ def build_watchlist_brief_message(raw_tickers: str) -> str:
     risk_flags = summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else []
     action_plan = summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else []
     if priority_order:
-        lines.append("優先順序:")
-        for item in priority_order:
-            lines.append(f"- {item}")
+        lines.append("最強排序:")
+        for idx, item in enumerate(priority_order, 1):
+            lines.append(f"- {idx}. {item}")
     if risk_flags:
-        lines.append("風險:")
+        lines.append("風險先處理:")
         for item in risk_flags:
             lines.append(f"- {item}")
     if action_plan:
-        lines.append("盤前先做:")
+        lines.append("現在先做:")
         for item in action_plan:
             lines.append(f"- {item}")
     return "\n".join(lines)
