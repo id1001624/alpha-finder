@@ -452,11 +452,14 @@ def _summarize_execution_window(execution_df: pd.DataFrame, positions_df: pd.Dat
         for _, row in decision_df.iterrows()
         if str(row.get("ticker", "")).strip()
     }
+    tracked_tickers = set(position_map.keys()) | set(decision_map.keys())
 
     out: List[dict] = []
     grouped = execution_df.sort_values(["recorded_at_ts", "rank", "ticker"], ascending=[True, True, True]).groupby("ticker", sort=False)
     for ticker, group in grouped:
         if not ticker:
+            continue
+        if tracked_tickers and ticker not in tracked_tickers:
             continue
         ordered = group.copy().reset_index(drop=True)
         actions = [str(value).strip().lower() for value in ordered["action"].tolist() if str(value).strip()]

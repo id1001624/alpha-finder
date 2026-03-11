@@ -73,6 +73,8 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
     monkeypatch.setattr(execution_alerts, "SIGNAL_STORE_PATH", str(signal_db))
     monkeypatch.setattr(execution_alerts, "DISCORD_WEBHOOK_URL", "https://discord.invalid/webhook")
     monkeypatch.setattr(execution_alerts, "_http_post_json", lambda url, payload: (True, "ok"))
+    monkeypatch.setattr(execution_alerts, "sync_execution_latest", lambda path: None)
+    monkeypatch.setattr(execution_alerts, "append_execution_log_rows", lambda rows: None)
     monkeypatch.setattr(sys, "argv", ["push_tradingview_execution_alerts.py", "--top-n", "5"])
 
     assert execution_alerts.main() == 0
