@@ -56,13 +56,15 @@ from config import (
     RECAP_OPENING_RUN_GRACE_MINUTES,
     RECAP_TAVILY_ENABLED,
     RECAP_TAVILY_MAX_RESULTS,
+    RECAP_TRACKED_NEWS_ENABLED,
+    RECAP_TRACKED_NEWS_MAX_TICKERS,
     SIGNAL_MAX_AGE_MINUTES,
     SIGNAL_REQUIRE_SAME_DAY,
     SIGNAL_STORE_PATH,
     TAVILY_API_KEY,
 )
 from signal_store import get_latest_signals
-from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log, load_runtime_df, load_runtime_df_with_fallback, sync_runtime_df
+from turso_state import STATE_KEY_AI_DECISION_LATEST, STATE_KEY_INTRADAY_SNAPSHOT, load_recent_execution_log, load_runtime_df, load_runtime_df_with_fallback, sync_runtime_df
 
 logger = get_logger(__name__)
 
@@ -76,6 +78,8 @@ ALERT_MESSAGE_TXT = ALERT_DIR / "latest_alert_message.txt"
 ALERT_MARKER_DIR = ALERT_DIR / "markers"
 AI_DECISION_LOG_CSV = BACKTEST_DIR / "ai_decision_log.csv"
 EXECUTION_LOG_CSV = BACKTEST_DIR / "execution_trade_log.csv"
+BEDTIME_PLAN_STATE_KEY = "recap_bedtime_plan_latest"
+BEDTIME_PLAN_FILE = ALERT_DIR / "bedtime_plan_latest.json"
 MORNING_PLAN_STATE_KEY = "recap_morning_plan_latest"
 MORNING_PLAN_FILE = ALERT_DIR / "morning_plan_latest.json"
 
@@ -294,14 +298,38 @@ def _deserialize_lines(value: object) -> List[str]:
     return [str(item).strip() for item in parsed if str(item or "").strip()]
 
 
-def _persist_morning_plan(decision_date: str, recap_context: dict, message: str, source_id: object) -> None:
+def _plan_storage_for(mode: str) -> tuple[str, Path]:
+    normalized = str(mode or "").strip().lower()
+    if normalized == "bedtime":
+        return BEDTIME_PLAN_STATE_KEY, BEDTIME_PLAN_FILE
+    return MORNING_PLAN_STATE_KEY, MORNING_PLAN_FILE
+
+
+def _merge_lines(*groups: List[str], limit: int = 5) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(_clip_text(text, 90))
+            if len(out) >= max(1, int(limit)):
+                return out
+    return out
+
+
+def _persist_recap_plan(mode: str, decision_date: str, recap_context: dict, message: str, source_id: object) -> None:
+    state_key, plan_file = _plan_storage_for(mode)
+    normalized = str(mode or "").strip().lower()
     ai_summary = recap_context.get("ai_summary", {}) if isinstance(recap_context, dict) else {}
     opening_plan = ai_summary.get("opening_plan", []) if isinstance(ai_summary.get("opening_plan", []), list) else []
     focus = ai_summary.get("focus", []) if isinstance(ai_summary.get("focus", []), list) else []
     risk_flags = ai_summary.get("risk_flags", []) if isinstance(ai_summary.get("risk_flags", []), list) else []
     payload = {
         "decision_date": str(decision_date or "").strip(),
-        "mode": "morning",
+        "mode": normalized,
         "opening_plan_json": _serialize_lines(opening_plan),
         "focus_json": _serialize_lines(focus),
         "risk_flags_json": _serialize_lines(risk_flags),
@@ -310,24 +338,36 @@ def _persist_morning_plan(decision_date: str, recap_context: dict, message: str,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     ALERT_DIR.mkdir(parents=True, exist_ok=True)
-    MORNING_PLAN_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    sync_runtime_df(MORNING_PLAN_STATE_KEY, pd.DataFrame([payload]), source_name="recap_morning_plan")
+    plan_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    sync_runtime_df(state_key, pd.DataFrame([payload]), source_name=f"recap_{normalized}_plan")
 
 
-def _load_persisted_morning_plan(decision_date: str) -> dict:
+def _persist_bedtime_plan(decision_date: str, recap_context: dict, message: str, source_id: object) -> None:
+    _persist_recap_plan("bedtime", decision_date, recap_context, message, source_id)
+
+
+def _persist_morning_plan(decision_date: str, recap_context: dict, message: str, source_id: object) -> None:
+    _persist_recap_plan("morning", decision_date, recap_context, message, source_id)
+
+
+def _load_persisted_recap_plan(mode: str, decision_date: str) -> dict:
     target_date = str(decision_date or "").strip()
+    state_key, plan_file = _plan_storage_for(mode)
+    normalized = str(mode or "").strip().lower()
     candidates: List[dict] = []
-    df, _ = load_runtime_df(MORNING_PLAN_STATE_KEY)
+    df, _ = load_runtime_df(state_key)
     if len(df) > 0:
         candidates.append(df.iloc[0].to_dict())
-    if MORNING_PLAN_FILE.exists():
+    if plan_file.exists():
         try:
-            candidates.append(json.loads(MORNING_PLAN_FILE.read_text(encoding="utf-8")))
+            candidates.append(json.loads(plan_file.read_text(encoding="utf-8")))
         except (OSError, ValueError, json.JSONDecodeError):
             pass
 
     for item in candidates:
         if not isinstance(item, dict):
+            continue
+        if str(item.get("mode", "")).strip().lower() != normalized:
             continue
         if str(item.get("decision_date", "")).strip() != target_date:
             continue
@@ -339,6 +379,14 @@ def _load_persisted_morning_plan(decision_date: str) -> dict:
             "source_csv": str(item.get("source_csv", "")).strip(),
         }
     return {}
+
+
+def _load_persisted_bedtime_plan(decision_date: str) -> dict:
+    return _load_persisted_recap_plan("bedtime", decision_date)
+
+
+def _load_persisted_morning_plan(decision_date: str) -> dict:
+    return _load_persisted_recap_plan("morning", decision_date)
 
 
 def _load_previous_top1(current_date: str) -> str:
@@ -678,6 +726,56 @@ def _fetch_conflict_news(execution_summaries: List[dict]) -> List[dict]:
     return out
 
 
+def _fetch_tracked_news(tickers: List[str], mode: str) -> List[dict]:
+    if not RECAP_TRACKED_NEWS_ENABLED or not RECAP_TAVILY_ENABLED or not TAVILY_API_KEY:
+        return []
+    query_suffix = "stock news catalyst premarket" if mode in {"morning", "opening"} else "stock news catalyst after hours"
+    out: List[dict] = []
+    for ticker in tickers[:max(1, int(RECAP_TRACKED_NEWS_MAX_TICKERS))]:
+        clean_ticker = str(ticker or "").strip().upper()
+        if not clean_ticker:
+            continue
+        snippets = _tavily_search(
+            query=f"{clean_ticker} {query_suffix}",
+            api_key=TAVILY_API_KEY,
+            max_results=max(1, min(int(RECAP_TAVILY_MAX_RESULTS), 2)),
+            timeout_sec=max(float(RECAP_GEMINI_TIMEOUT_SEC), 10.0),
+        )
+        if not snippets:
+            continue
+        news_items = [
+            {"title": _clip_text(item.get("title") or "", 90), "content": _clip_text(item.get("content") or "", 110)}
+            for item in snippets[:2]
+            if str(item.get("title", "")).strip()
+        ]
+        if not news_items:
+            continue
+        out.append({"ticker": clean_ticker, "news": news_items})
+    return out
+
+
+def _load_engine_snapshot() -> List[dict]:
+    df, _ = load_runtime_df(STATE_KEY_INTRADAY_SNAPSHOT)
+    if len(df) == 0:
+        return []
+    out: List[dict] = []
+    for _, row in df.iterrows():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        action = str(row.get("tv_event") or row.get("action") or "").strip().lower()
+        out.append({
+            "ticker": ticker,
+            "action": action,
+            "close": _safe_float(row.get("close"), 0.0),
+            "vwap": _safe_float(row.get("vwap"), 0.0),
+            "sqzmom_color": str(row.get("sqzmom_color", "")).strip(),
+            "sqzmom_value": _safe_float(row.get("sqzmom_value"), 0.0),
+            "signal_ts": str(row.get("signal_ts", "")).strip(),
+        })
+    return out
+
+
 def _top_candidate_payload(df: pd.DataFrame, tv_map: Dict[str, object]) -> List[dict]:
     out: List[dict] = []
     for _, row in df.head(3).iterrows():
@@ -850,7 +948,8 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
             "Do not claim that any opening validation has already happened. "
             "Prioritize existing position risk and the few names that can change the first 5 to 15 minutes. "
             "Use risk_flags for names that must be checked first at the open. "
-            "Use opening_plan for executable if-then instructions, not broad commentary or a long watchlist."
+            "Use opening_plan for executable if-then instructions, not broad commentary or a long watchlist. "
+            "If prior_bedtime_plan or prior_bedtime_risk_flags exists, carry those items forward unless the new facts clearly override them."
         )
     else:
         mode_instruction = (
@@ -858,7 +957,8 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
             "Validate whether the prior opening plan was confirmed in the first minutes after the opening bell. "
             "Prioritize sell-risk and failed setups before upside continuation. "
             "State clearly which plans are executable now, which are invalidated, and what to do in the next few minutes. "
-            "If the first opening window has no clean validation yet, say that the plan is still unconfirmed and stay conservative."
+            "If the first opening window has no clean validation yet, say that the plan is still unconfirmed and stay conservative. "
+            "If prior_bedtime_plan exists, keep those pending validation names visible until the opening data confirms or invalidates them."
         )
     prompt = (
         "You are editing a trading recap for a human operator. "
@@ -872,6 +972,10 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         "Use focus for the few charts worth opening first, risk_flags for true risks, and opening_plan for concrete first actions. "
         "Keep focus narrow and action-relevant, not a broad inventory. "
         "Keep opening_plan imperative and executable, not analytical. "
+        "If tracked_news exists, use it to judge catalyst quality for each ticker. "
+        "If engine_snapshot exists, use VWAP and SQZMOM state to validate or invalidate prior plans. "
+        "Rank tickers by actionable strength: risk-first, then continuation strength, then new opportunity. "
+        "This is a trading conclusion card, not a market commentary. Do not output analysis process. "
         "If the mode is opening, opening_plan means what to do now in the next few minutes. "
         "If the mode is opening and opening_has_data is false, do not claim that last night's plan was confirmed. "
         "If the mode is opening and both sell-risk validation and buy-strength validation exist, prioritize sell-risk validation first. "
@@ -924,6 +1028,18 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
     execution_window_df = _filter_execution_window(execution_df, start_dt, now_dt)
     execution_summaries = _summarize_execution_window(execution_window_df, positions_df, df)
     conflict_news = _fetch_conflict_news(execution_summaries)
+    bedtime_reference = _load_persisted_bedtime_plan(title_date) if mode == "morning" else {}
+    prior_bedtime_lines = _merge_lines(
+        bedtime_reference.get("opening_plan", []),
+        bedtime_reference.get("risk_flags", []),
+        bedtime_reference.get("focus", []),
+    )
+    tracked_tickers = [str(row.get("ticker", "")).strip().upper() for _, row in df.head(3).iterrows() if str(row.get("ticker", "")).strip()]
+    for _, row in positions_df.iterrows():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if ticker and ticker not in tracked_tickers:
+            tracked_tickers.append(ticker)
+    tracked_news = _fetch_tracked_news(tracked_tickers, mode)
     payload = {
         "mode": mode,
         "decision_date": title_date,
@@ -933,6 +1049,11 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
         "execution_summary": _summaries_to_payload(execution_summaries),
         "top_candidates": _top_candidate_payload(df, tv_map),
         "conflict_news": conflict_news,
+        "tracked_news": tracked_news,
+        "prior_bedtime_plan": bedtime_reference.get("opening_plan", []) if isinstance(bedtime_reference, dict) else [],
+        "prior_bedtime_focus": bedtime_reference.get("focus", []) if isinstance(bedtime_reference, dict) else [],
+        "prior_bedtime_risk_flags": bedtime_reference.get("risk_flags", []) if isinstance(bedtime_reference, dict) else [],
+        "prior_bedtime_lines": prior_bedtime_lines,
     }
     payload["ai_summary"] = _generate_recap_ai_summary(mode, payload)
     payload["positions_df"] = positions_df
@@ -944,6 +1065,7 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
     now_dt = _utc_now_naive()
     opening_start_dt, opening_end_dt = _opening_window_bounds(now_dt)
     reference_context = _build_recap_context(df=df, tv_map=tv_map, title_date=title_date, mode="morning", end_dt=opening_start_dt)
+    bedtime_reference = _load_persisted_bedtime_plan(title_date)
     persisted_morning = _load_persisted_morning_plan(title_date)
 
     positions_df = load_positions()
@@ -951,7 +1073,17 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
     opening_window_df = _filter_execution_window(execution_df, opening_start_dt, opening_end_dt)
     opening_summaries = _summarize_execution_window(opening_window_df, positions_df, df)
     validation_rows = _build_opening_validation(reference_context, opening_summaries)
-    reference_plan = persisted_morning.get("opening_plan", []) if isinstance(persisted_morning, dict) else []
+    engine_snapshot = _load_engine_snapshot()
+    tracked_tickers = [str(row.get("ticker", "")).strip().upper() for _, row in df.head(3).iterrows() if str(row.get("ticker", "")).strip()]
+    for _, row in positions_df.iterrows():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if ticker and ticker not in tracked_tickers:
+            tracked_tickers.append(ticker)
+    tracked_news = _fetch_tracked_news(tracked_tickers, "opening")
+    reference_plan = _merge_lines(
+        bedtime_reference.get("opening_plan", []) if isinstance(bedtime_reference, dict) else [],
+        persisted_morning.get("opening_plan", []) if isinstance(persisted_morning, dict) else [],
+    )
     if not reference_plan:
         reference_plan = _extract_reference_plan(reference_context)
 
@@ -963,9 +1095,14 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
         "opening_window_local": f"{_format_utc_to_active_local(opening_start_dt)} -> {_format_utc_to_active_local(opening_end_dt)}",
         "opening_has_data": len(opening_summaries) > 0,
         "reference_plan": reference_plan,
+        "prior_bedtime_plan": bedtime_reference.get("opening_plan", []) if isinstance(bedtime_reference, dict) else [],
+        "prior_bedtime_focus": bedtime_reference.get("focus", []) if isinstance(bedtime_reference, dict) else [],
+        "prior_bedtime_risk_flags": bedtime_reference.get("risk_flags", []) if isinstance(bedtime_reference, dict) else [],
         "reference_summary": _summaries_to_payload(reference_context.get("execution_summaries_full", [])),
         "opening_execution_summary": _summaries_to_payload(opening_summaries),
         "opening_validation": validation_rows,
+        "engine_snapshot": engine_snapshot,
+        "tracked_news": tracked_news,
         "positions": _position_payload(positions_df),
         "top_candidates": _top_candidate_payload(df, tv_map),
         "reference_plan_source": "persisted_morning" if reference_plan and persisted_morning else "regenerated_morning",
@@ -1027,6 +1164,7 @@ def _build_ai_summary_lines(
     plan_label: str = "開盤先做",
     focus_label: str = "焦點",
     risk_first: bool = False,
+    include_summary: bool = False,
 ) -> List[str]:
     if not ai_summary:
         return []
@@ -1035,7 +1173,7 @@ def _build_ai_summary_lines(
     summary = str(ai_summary.get("summary", "")).strip()
     if headline:
         lines.append(headline)
-    if summary:
+    if include_summary and summary:
         lines.append(summary)
     focus_items = ai_summary.get("focus", []) if isinstance(ai_summary.get("focus", []), list) else []
     risk_items = ai_summary.get("risk_flags", []) if isinstance(ai_summary.get("risk_flags", []), list) else []
@@ -1058,6 +1196,16 @@ def _build_ai_summary_lines(
             text = str(item).strip()
             if text:
                 lines.append(f"- {text}")
+    return lines
+
+
+def _build_reference_lines(reference_lines: List[str], label: str) -> List[str]:
+    cleaned = [str(item).strip() for item in reference_lines if str(item or "").strip()]
+    if not cleaned:
+        return []
+    lines = [f"{label}:"]
+    for item in cleaned[:5]:
+        lines.append(f"- {item}")
     return lines
 
 
@@ -1142,7 +1290,7 @@ def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_d
         changed = "是" if prev_top1 and str(top1.get("ticker", "")).upper() != prev_top1 else "否"
 
     lines = [
-        f"[Alpha Finder] 睡前摘要 {title_date}",
+        f"[Alpha Finder] 睡前結論卡 {title_date}",
         "",
     ]
     if top1 is not None:
@@ -1166,9 +1314,14 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     del _df
     del _tv_map
     lines = [
-        f"[Alpha Finder] 盤前佈局 {title_date}",
+        f"[Alpha Finder] 盤前結論卡 {title_date}",
         "",
     ]
+
+    prior_bedtime_lines = recap_context.get("prior_bedtime_lines", []) if isinstance(recap_context, dict) else []
+    if prior_bedtime_lines:
+        lines.extend(_build_reference_lines(prior_bedtime_lines, "延續昨晚待驗證"))
+        lines.append("")
 
     ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="盤前先看")
     if ai_lines:
@@ -1182,13 +1335,13 @@ def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     del _df
     del _tv_map
     lines = [
-        f"[Alpha Finder] 開盤驗證 {title_date}",
+        f"[Alpha Finder] 開盤驗證結論卡 {title_date}",
         "",
     ]
 
     reference_plan = recap_context.get("reference_plan_lines", []) if isinstance(recap_context, dict) else []
     if reference_plan:
-        lines.append(f"昨晚計畫: {' | '.join(str(item).strip() for item in reference_plan if str(item).strip())}")
+        lines.extend(_build_reference_lines(reference_plan, "待驗證計畫"))
         lines.append("")
 
     ai_lines = _build_ai_summary_lines(
@@ -1423,8 +1576,11 @@ def main() -> int:
     else:
         sent_channels.append("dry_run")
 
-    if str(args.mode) == "morning" and recap_context is not None and sent_channels and not args.dry_run:
-        _persist_morning_plan(decision_date, recap_context, message, source_id)
+    if recap_context is not None and sent_channels and not args.dry_run:
+        if str(args.mode) == "bedtime":
+            _persist_bedtime_plan(decision_date, recap_context, message, source_id)
+        elif str(args.mode) == "morning":
+            _persist_morning_plan(decision_date, recap_context, message, source_id)
 
     log_df = df[df["decision_tag"].isin(tags)].head(max(1, int(args.top_n))).copy()
     log_rows: List[dict] = []
