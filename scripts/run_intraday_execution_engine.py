@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, time as dt_time
 import sys
 import time
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -14,41 +12,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from app_logging import install_builtin_print_logging
 
 from ai_trading.intraday_execution_engine import run_intraday_execution_engine
+from ai_trading.market_session import get_intraday_active_window
 from config import (
-    INTRADAY_ACTIVE_END_LOCAL,
-    INTRADAY_ACTIVE_START_LOCAL,
-    INTRADAY_ACTIVE_TIMEZONE,
     INTRADAY_IDLE_POLL_SECONDS,
     INTRADAY_POLL_SECONDS,
     INTRADAY_TOP_N,
 )
 
 install_builtin_print_logging()
-
-
-def _parse_hhmm(value: str, fallback: str) -> dt_time:
-    raw = str(value or fallback).strip()
-    try:
-        hour_str, minute_str = raw.split(":", 1)
-        return dt_time(hour=int(hour_str), minute=int(minute_str))
-    except (ValueError, TypeError):
-        hour_str, minute_str = fallback.split(":", 1)
-        return dt_time(hour=int(hour_str), minute=int(minute_str))
-
-
-def _is_in_active_window(now_dt: datetime, start_local: dt_time, end_local: dt_time) -> bool:
-    current = now_dt.time().replace(second=0, microsecond=0)
-    if start_local <= end_local:
-        return start_local <= current <= end_local
-    return current >= start_local or current <= end_local
-
-
-def _now_in_active_timezone() -> datetime:
-    timezone_name = str(INTRADAY_ACTIVE_TIMEZONE or "Asia/Taipei").strip() or "Asia/Taipei"
-    try:
-        return datetime.now(ZoneInfo(timezone_name))
-    except ZoneInfoNotFoundError:
-        return datetime.now()
 
 
 def main() -> int:
@@ -60,21 +31,21 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=int, default=INTRADAY_POLL_SECONDS, help="Polling interval for --loop mode")
     args = parser.parse_args()
 
-    session_start = _parse_hhmm(INTRADAY_ACTIVE_START_LOCAL, "21:20")
-    session_end = _parse_hhmm(INTRADAY_ACTIVE_END_LOCAL, "05:10")
     idle_poll_seconds = max(60, int(INTRADAY_IDLE_POLL_SECONDS))
 
     while True:
         if (args.loop or args.respect_active_window) and not args.dry_run:
-            now_dt = _now_in_active_timezone()
-            if not _is_in_active_window(now_dt, session_start, session_end):
+            session = get_intraday_active_window()
+            if not bool(session.get("is_active", False)):
                 result = {
                     "ok": True,
                     "reason": "outside_active_window",
-                    "now_local": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "active_start": session_start.strftime("%H:%M"),
-                    "active_end": session_end.strftime("%H:%M"),
-                    "active_timezone": str(INTRADAY_ACTIVE_TIMEZONE or "Asia/Taipei"),
+                    "now_local": session.get("now_local").strftime("%Y-%m-%d %H:%M:%S"),
+                    "active_start": session.get("active_start_local").strftime("%m-%d %H:%M"),
+                    "active_end": session.get("active_end_local").strftime("%m-%d %H:%M"),
+                    "active_timezone": str(session.get("active_timezone", "Asia/Taipei")),
+                    "market_timezone": str(session.get("market_timezone", "America/New_York")),
+                    "market_date": str(session.get("market_date", "")),
                 }
                 print(result)
                 if not args.loop:

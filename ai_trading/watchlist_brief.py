@@ -4,9 +4,8 @@ import json
 import pathlib
 import re
 import sqlite3
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
@@ -17,9 +16,6 @@ from config import (
     CATALYST_TAVILY_MAX_RESULTS,
     GEMINI_API_KEY,
     GEMINI_MODEL,
-    INTRADAY_ACTIVE_END_LOCAL,
-    INTRADAY_ACTIVE_START_LOCAL,
-    INTRADAY_ACTIVE_TIMEZONE,
     INTRADAY_INTERVAL,
     INTRADAY_PERIOD,
     RECAP_GEMINI_TIMEOUT_SEC,
@@ -33,6 +29,7 @@ from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log,
 
 from .intraday_execution_engine import AI_DECISION_LATEST, SNAPSHOT_FILE, _classify_action, _fetch_intraday_bars
 from .intraday_indicators import add_intraday_indicators
+from .market_session import get_intraday_active_window
 from .position_state import get_position, load_positions
 from .shadow_watchlist import build_decision_universe_df, load_shadow_decision_df
 
@@ -58,41 +55,13 @@ def _clip_text(value: object, limit: int = 120) -> str:
     return text[: limit - 3] + "..."
 
 
-
-def _parse_hhmm(value: str, fallback: str) -> dt_time:
-    raw = str(value or fallback).strip()
-    try:
-        hour_str, minute_str = raw.split(":", 1)
-        return dt_time(hour=int(hour_str), minute=int(minute_str))
-    except (ValueError, TypeError):
-        hour_str, minute_str = fallback.split(":", 1)
-        return dt_time(hour=int(hour_str), minute=int(minute_str))
-
-
-def _now_in_active_timezone() -> datetime:
-    timezone_name = str(INTRADAY_ACTIVE_TIMEZONE or "Asia/Taipei").strip() or "Asia/Taipei"
-    try:
-        return datetime.now(ZoneInfo(timezone_name))
-    except ZoneInfoNotFoundError:
-        return datetime.now()
-
-
-def _is_in_active_window(now_dt: datetime, start_local: dt_time, end_local: dt_time) -> bool:
-    current = now_dt.time().replace(second=0, microsecond=0)
-    if start_local <= end_local:
-        return start_local <= current <= end_local
-    return current >= start_local or current <= end_local
-
-
 def _is_current_engine_signal(signal_ts: object) -> bool:
     text = str(signal_ts or "").strip()
     if not text:
         return False
 
-    now_local = _now_in_active_timezone()
-    session_start = _parse_hhmm(INTRADAY_ACTIVE_START_LOCAL, "21:20")
-    session_end = _parse_hhmm(INTRADAY_ACTIVE_END_LOCAL, "05:10")
-    if not _is_in_active_window(now_local, session_start, session_end):
+    session = get_intraday_active_window()
+    if not bool(session.get("is_active", False)):
         return False
 
     try:
@@ -105,8 +74,15 @@ def _is_current_engine_signal(signal_ts: object) -> bool:
     parsed_dt = parsed.to_pydatetime()
     if parsed_dt.tzinfo is None:
         parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - parsed_dt.astimezone(timezone.utc)
-    return timedelta(0) <= age <= timedelta(minutes=ENGINE_SIGNAL_MAX_AGE_MINUTES)
+    signal_utc = parsed_dt.astimezone(timezone.utc)
+    window_start_utc = session.get("active_start_utc")
+    window_end_utc = session.get("active_end_utc")
+    if not isinstance(window_start_utc, datetime) or not isinstance(window_end_utc, datetime):
+        return False
+    age = session.get("now_utc") - signal_utc
+    if not isinstance(age, timedelta):
+        return False
+    return window_start_utc <= signal_utc <= window_end_utc and timedelta(0) <= age <= timedelta(minutes=ENGINE_SIGNAL_MAX_AGE_MINUTES)
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
