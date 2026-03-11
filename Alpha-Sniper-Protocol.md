@@ -303,6 +303,14 @@ Local Top 5 排序鍵：
 - 最後 Top 1 改成誰
 - 改變的唯一理由是什麼催化
 
+而且你最後輸出的 `ai_decision_YYYY-MM-DD.csv`，必須依照「分析後最終勝出的 Top 1 / Top 5 順序」重排，不可仍沿用原始 Local Rank 順序。
+
+也就是說：
+
+- CSV 中 `rank=1` 的那一列，必須是你最終認定的明日 Top 1
+- 若發生 override，新的 Top 1 必須升到 CSV 第 1 列
+- 原本 Local Rank 1 若被 override 掉，應改排到它在最終 Top 5 中應在的位置，而不是仍固定佔住 `rank=1`
+
 若沒有足夠硬催化，就不要 override。
 
 ## 7) 最終輸出原則
@@ -389,6 +397,9 @@ CSV 規則：
 - `decision_tag` 必須遵守 Local 排序邏輯，不可主觀亂改
 - 這份 CSV 不負責承接 D-1 / D-2 / D-3 的延續觀察保留；那些屬於後端 watchlist 合成邏輯。
 - 因此不要在 `reason_summary`、`decision_tag` 或排序中，硬塞「昨天保留」「延續觀察」這種下游 watchlist 語意，除非它今天本身就應該入選。
+- CSV 的 `rank` 必須反映你最後分析後的最終排序，而不是僅複製 Local Rank。
+- 若最終 Top 1 與 Local Rank 1 不同，`ai_decision_YYYY-MM-DD.csv` 仍必須以最終 Top 1 當作 `rank=1` 輸出。
+- `明日最可能延續上漲 Top 1`、`Top 5 備選`、以及 `FILE: ai_decision_YYYY-MM-DD.csv` 三者的排序必須完全一致，不可互相矛盾。
 
 輸出順序固定：
 
