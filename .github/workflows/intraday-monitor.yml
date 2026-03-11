@@ -3,7 +3,9 @@ name: Intraday Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 13-21 * * 1-5'
+    # Cover both US summer and winter sessions in Taipei time.
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 13,22 * * 1-5'
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 14-21 * * 1-5'
 
 concurrency:
   group: intraday-monitor
