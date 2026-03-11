@@ -125,3 +125,36 @@ def test_evaluate_stop_loss_rebounds_marks_missed_rebound_without_reentry():
     assert bool(aaoi["manual_buy_hit"]) is True
     assert bool(nvda["reentry_signal_hit"]) is True
     assert bool(nvda["missed_rebound"]) is False
+
+
+def test_build_missed_rebound_view_returns_daily_focus_columns():
+    report_df = pd.DataFrame(
+        [
+            {
+                "ticker": "CRDU",
+                "stop_date": "2026-03-10",
+                "peak_high_date": "2026-03-11",
+                "stop_close": 23.47,
+                "max_high_pct": 11.63,
+                "reentry_signal_hit": False,
+                "manual_buy_hit": False,
+                "missed_rebound": True,
+            },
+            {
+                "ticker": "MULL",
+                "stop_date": "2026-03-10",
+                "peak_high_date": "2026-03-11",
+                "stop_close": 164.05,
+                "max_high_pct": 5.77,
+                "reentry_signal_hit": True,
+                "manual_buy_hit": False,
+                "missed_rebound": False,
+            },
+        ]
+    )
+
+    missed_view = report.build_missed_rebound_view(report_df)
+
+    assert list(missed_view["ticker"]) == ["CRDU"]
+    assert missed_view.iloc[0]["days_to_peak"] == 1
+    assert "沒有 engine 再進場" == missed_view.iloc[0]["reentry_status"]

@@ -58,6 +58,7 @@ TRADE_LEDGER_CSV = BACKTEST_DIR / "position_trade_log.csv"
 ANALYSIS_DIR = BACKTEST_DIR / "analysis"
 LATEST_MD = ANALYSIS_DIR / "stop_loss_rebound_latest.md"
 LATEST_CSV = ANALYSIS_DIR / "stop_loss_rebound_latest.csv"
+LATEST_MISSED_CSV = ANALYSIS_DIR / "stop_loss_missed_rebound_latest.csv"
 
 
 def _read_csv_if_exists(path: Path) -> pd.DataFrame:
@@ -309,6 +310,66 @@ def _to_markdown_table(df: pd.DataFrame, columns: List[str], percent_cols: List[
     return "\n".join(lines)
 
 
+def build_missed_rebound_view(report_df: pd.DataFrame) -> pd.DataFrame:
+    if report_df is None or len(report_df) == 0:
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "stop_date",
+                "peak_high_date",
+                "days_to_peak",
+                "stop_close",
+                "max_high_pct",
+                "reentry_status",
+                "manual_buy_status",
+                "followup_note",
+            ]
+        )
+
+    out = report_df.copy()
+    out = out[out["missed_rebound"]].copy()
+    if len(out) == 0:
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "stop_date",
+                "peak_high_date",
+                "days_to_peak",
+                "stop_close",
+                "max_high_pct",
+                "reentry_status",
+                "manual_buy_status",
+                "followup_note",
+            ]
+        )
+
+    out["stop_date"] = pd.to_datetime(out["stop_date"], errors="coerce")
+    out["peak_high_date"] = pd.to_datetime(out["peak_high_date"], errors="coerce")
+    out["days_to_peak"] = (out["peak_high_date"] - out["stop_date"]).dt.days
+    out["reentry_status"] = out["reentry_signal_hit"].map({True: "已有 engine 再進場", False: "沒有 engine 再進場"})
+    out["manual_buy_status"] = out["manual_buy_hit"].map({True: "有手動買回", False: "沒有手動買回"})
+    out["followup_note"] = out.apply(
+        lambda row: "應納入 watchlist follow-up" if not bool(row.get("manual_buy_hit")) else "手動已補回，仍可回看提醒時機",
+        axis=1,
+    )
+    out["max_high_pct"] = pd.to_numeric(out["max_high_pct"], errors="coerce")
+    out = out.sort_values(["max_high_pct", "stop_date", "ticker"], ascending=[False, False, True], na_position="last")
+    out["stop_date"] = out["stop_date"].dt.strftime("%Y-%m-%d")
+    out["peak_high_date"] = out["peak_high_date"].dt.strftime("%Y-%m-%d").fillna("")
+    keep_cols = [
+        "ticker",
+        "stop_date",
+        "peak_high_date",
+        "days_to_peak",
+        "stop_close",
+        "max_high_pct",
+        "reentry_status",
+        "manual_buy_status",
+        "followup_note",
+    ]
+    return out[keep_cols].reset_index(drop=True)
+
+
 def build_summary_markdown(report_df: pd.DataFrame, lookback_days: int, forward_days: int, rebound_threshold_pct: float) -> str:
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_events = int(len(report_df)) if report_df is not None else 0
@@ -316,15 +377,12 @@ def build_summary_markdown(report_df: pd.DataFrame, lookback_days: int, forward_
     reentry_hits = int(report_df["reentry_signal_hit"].sum()) if total_events else 0
     manual_buy_hits = int(report_df["manual_buy_hit"].sum()) if total_events else 0
     missed_hits = int(report_df["missed_rebound"].sum()) if total_events else 0
-    missed_df = report_df[report_df["missed_rebound"]].head(10) if total_events else pd.DataFrame()
-    strongest_df = pd.DataFrame()
-    if total_events:
-        sortable = report_df.copy()
-        sortable["max_high_pct"] = pd.to_numeric(sortable["max_high_pct"], errors="coerce")
-        strongest_df = sortable.sort_values("max_high_pct", ascending=False, na_position="last").head(10)
+    missed_df = build_missed_rebound_view(report_df)
+    top_missed = missed_df.head(10) if len(missed_df) > 0 else pd.DataFrame()
+    missed_rate = (missed_hits / rebound_hits * 100.0) if rebound_hits > 0 else 0.0
 
     lines = [
-        "# Stop Loss Rebound Report",
+        "# Stop Loss Missed Rebound Daily",
         "",
         f"- 產生時間：{generated_at}",
         f"- stop_loss 回看區間：近 {lookback_days} 天",
@@ -338,24 +396,22 @@ def build_summary_markdown(report_df: pd.DataFrame, lookback_days: int, forward_
         f"- 期間內出現 engine 再進場訊號：{reentry_hits}",
         f"- 期間內出現手動買回：{manual_buy_hits}",
         f"- 漏報型反彈：{missed_hits}",
+        f"- 反彈事件中的漏報比率：{missed_rate:.2f}%",
         "",
-        "## 最值得回頭看的漏報案例",
-        "",
-        _to_markdown_table(
-            missed_df,
-            columns=["ticker", "stop_date", "stop_close", "max_high_pct", "peak_high_date", "reentry_signal_hit", "manual_buy_hit"],
-            percent_cols=["max_high_pct"],
-        ),
-        "",
-        "## 最大反彈 Top 10",
+        "## 今日只看真正漏報案例",
         "",
         _to_markdown_table(
-            strongest_df,
-            columns=["ticker", "stop_date", "stop_close", "max_high_pct", "peak_high_date", "reentry_signal_hit", "missed_rebound"],
+            top_missed,
+            columns=["ticker", "stop_date", "peak_high_date", "days_to_peak", "max_high_pct", "reentry_status", "manual_buy_status", "followup_note"],
             percent_cols=["max_high_pct"],
         ),
         "",
     ]
+    if len(top_missed) == 0:
+        lines.extend([
+            "目前沒有真正漏報案例。",
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -391,6 +447,7 @@ def main() -> int:
     md_path = ANALYSIS_DIR / f"stop_loss_rebound_report_{today_tag}.md"
 
     report_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    missed_df = build_missed_rebound_view(report_df)
     markdown = build_summary_markdown(
         report_df,
         lookback_days=max(1, int(args.lookback_days)),
@@ -399,12 +456,14 @@ def main() -> int:
     )
     md_path.write_text(markdown, encoding="utf-8")
     shutil.copy2(csv_path, LATEST_CSV)
+    missed_df.to_csv(LATEST_MISSED_CSV, index=False, encoding="utf-8-sig")
     shutil.copy2(md_path, LATEST_MD)
 
     print(markdown)
     print("")
     print(f"CSV: {csv_path}")
     print(f"MD : {md_path}")
+    print(f"MISSED CSV : {LATEST_MISSED_CSV}")
     return 0
 
 
