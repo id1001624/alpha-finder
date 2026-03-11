@@ -96,6 +96,8 @@ TURSO_DATABASE_URL=$($env:TURSO_DATABASE_URL)
 TURSO_AUTH_TOKEN=$($env:TURSO_AUTH_TOKEN)
 DISCORD_WEBHOOK_URL=$($env:DISCORD_WEBHOOK_URL)
 FINNHUB_API_KEY=$($env:FINNHUB_API_KEY)
+TAVILY_API_KEY=$($env:TAVILY_API_KEY)
+GEMINI_API_KEY=$($env:GEMINI_API_KEY)
 "@
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($tempEnvFile, $envText, $utf8NoBom)
