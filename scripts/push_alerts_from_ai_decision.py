@@ -50,6 +50,9 @@ from config import (
     RECAP_GEMINI_TIMEOUT_SEC,
     RECAP_MARKET_OPEN_TIME,
     RECAP_MARKET_TIMEZONE,
+    RECAP_MORNING_FULL_ENGINE_ENABLED,
+    RECAP_MORNING_FULL_ENGINE_MAX_TICKERS,
+    RECAP_MORNING_GEMINI_REWRITE_ONLY,
     RECAP_MORNING_LOOKBACK_HOURS,
     RECAP_OPENING_LOOKBACK_MINUTES,
     RECAP_OPENING_RUN_AFTER_MINUTES,
@@ -560,7 +563,12 @@ def _derive_status_and_guidance(latest_action: str, has_conflict: bool, reversal
     return "待確認", "目前資料不足，先以原始 ai_decision 為主。"
 
 
-def _summarize_execution_window(execution_df: pd.DataFrame, positions_df: pd.DataFrame, decision_df: pd.DataFrame) -> List[dict]:
+def _summarize_execution_window(
+    execution_df: pd.DataFrame,
+    positions_df: pd.DataFrame,
+    decision_df: pd.DataFrame,
+    include_all_tickers: bool = False,
+) -> List[dict]:
     if len(execution_df) == 0:
         return []
 
@@ -581,7 +589,7 @@ def _summarize_execution_window(execution_df: pd.DataFrame, positions_df: pd.Dat
     for ticker, group in grouped:
         if not ticker:
             continue
-        if tracked_tickers and ticker not in tracked_tickers:
+        if not include_all_tickers and tracked_tickers and ticker not in tracked_tickers:
             continue
         ordered = group.copy().reset_index(drop=True)
         actions = [str(value).strip().lower() for value in ordered["action"].tolist() if str(value).strip()]
@@ -640,6 +648,93 @@ def _summarize_execution_window(execution_df: pd.DataFrame, positions_df: pd.Dat
         )
     )
     return out
+
+
+def _summary_sort_ts_value(item: dict) -> int:
+    ts = item.get("sort_ts")
+    if isinstance(ts, pd.Timestamp) and not pd.isna(ts):
+        return int(ts.value)
+    return 0
+
+
+def _morning_priority_bucket(item: dict) -> int:
+    latest_action = str(item.get("latest_action", "")).strip().lower()
+    has_position = bool(item.get("has_position"))
+    has_conflict = bool(item.get("has_conflict"))
+
+    if has_position and latest_action in {"stop_loss", "take_profit"}:
+        return 0
+    if has_position and has_conflict:
+        return 1
+    if latest_action in {"stop_loss", "take_profit"}:
+        return 2
+    if has_conflict:
+        return 3
+    if has_position and latest_action in {"entry", "add"}:
+        return 4
+    if latest_action in {"entry", "add"}:
+        return 5
+    return 6
+
+
+def _rank_morning_full_engine(execution_summaries: List[dict]) -> List[dict]:
+    ranked = execution_summaries.copy()
+    ranked.sort(
+        key=lambda item: (
+            _morning_priority_bucket(item),
+            int(item.get("rank", 9999)),
+            -_summary_sort_ts_value(item),
+            str(item.get("ticker", "")),
+        )
+    )
+    return ranked
+
+
+def _build_morning_rule_ai_summary(execution_summaries: List[dict], prior_bedtime_lines: List[str]) -> dict:
+    if not execution_summaries:
+        return {}
+
+    focus_items: List[str] = []
+    risk_items: List[str] = []
+    plan_items: List[str] = []
+    seen_plan_items: set[str] = set()
+
+    for item in execution_summaries[:max(1, int(RECAP_MORNING_FULL_ENGINE_MAX_TICKERS))]:
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        status = str(item.get("status_label", "待確認")).strip() or "待確認"
+        bucket = _morning_priority_bucket(item)
+        if len(focus_items) < 3:
+            focus_items.append(f"{ticker}({status})")
+        if bucket <= 3 and len(risk_items) < 3:
+            risk_items.append(f"{ticker}({status})")
+
+        guidance = _clip_text(item.get("guidance") or "", 72)
+        if guidance and guidance not in seen_plan_items and len(plan_items) < 3:
+            seen_plan_items.add(guidance)
+            plan_items.append(guidance)
+
+    for line in prior_bedtime_lines:
+        text = _clip_text(line or "", 72)
+        if text and text not in seen_plan_items and len(plan_items) < 3:
+            seen_plan_items.add(text)
+            plan_items.append(text)
+
+    risk_count = sum(1 for item in execution_summaries if _morning_priority_bucket(item) <= 3)
+    if risk_count > 0:
+        headline = "隔夜重點已整理，先控風險再看機會"
+    else:
+        headline = "隔夜重點已整理，盤前先驗證續強"
+
+    summary = f"隔夜 engine 監控 {len(execution_summaries)} 檔，風險優先 {risk_count} 檔。"
+    return {
+        "headline": _clip_text(headline, 80),
+        "summary": _clip_text(summary, 110),
+        "focus": focus_items[:3],
+        "risk_flags": risk_items[:3],
+        "opening_plan": plan_items[:3],
+    }
 
 
 def _extract_json_block(text: str) -> Dict[str, object]:
@@ -937,8 +1032,11 @@ def _build_opening_validation(reference_context: dict, opening_summaries: List[d
 
 
 def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
+    morning_rule_summary = recap_payload.get("morning_rule_ai_summary", {}) if mode == "morning" else {}
+    rewrite_only = bool(mode == "morning" and RECAP_MORNING_GEMINI_REWRITE_ONLY and morning_rule_summary)
+
     if not RECAP_GEMINI_ENABLED or not GEMINI_API_KEY:
-        return {}
+        return morning_rule_summary if isinstance(morning_rule_summary, dict) and morning_rule_summary else {}
 
     if mode == "bedtime":
         mode_instruction = "Focus on what changed before sleep and which names change tomorrow's first action."
@@ -963,6 +1061,17 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
             "If the first opening window has no clean validation yet, say that the plan is still unconfirmed and stay conservative. "
             "If prior_bedtime_plan exists, keep those pending validation names visible until the opening data confirms or invalidates them."
         )
+
+    rewrite_instruction = ""
+    rule_summary_block = ""
+    if rewrite_only:
+        rewrite_instruction = (
+            "Morning mode is rewrite-only. You must preserve the same ticker coverage and priority in morning_rule_ai_summary. "
+            "Do not introduce new tickers, new trade ideas, or any claims outside the provided rule summary. "
+            "Rewrite for readability only."
+        )
+        rule_summary_block = f"Morning rule summary JSON:\n{json.dumps(sanitize_prompt_payload(morning_rule_summary), ensure_ascii=False)}\n\n"
+
     prompt = (
         "You are editing a trading recap for a human operator. "
         "Use only the provided facts. "
@@ -985,7 +1094,9 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         "Return strict JSON only with keys: headline, summary, focus, risk_flags, opening_plan. "
         "headline and summary must be short Traditional Chinese strings. "
         "focus, risk_flags, opening_plan must each be arrays with 0 to 3 short Traditional Chinese strings. "
+        f"{rewrite_instruction}\n"
         f"{mode_instruction}\n\n"
+        f"{rule_summary_block}"
         f"Data JSON:\n{json.dumps(sanitize_prompt_payload(recap_payload), ensure_ascii=False)}"
     )
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -1002,11 +1113,11 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        return {}
+        return morning_rule_summary if isinstance(morning_rule_summary, dict) and morning_rule_summary else {}
 
     parsed = _extract_json_block(text)
     if not parsed:
-        return {}
+        return morning_rule_summary if isinstance(morning_rule_summary, dict) and morning_rule_summary else {}
 
     def _list_field(name: str) -> List[str]:
         value = parsed.get(name, [])
@@ -1014,13 +1125,26 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
             return []
         return [_clip_text(item, 90) for item in value if str(item or "").strip()][:3]
 
-    return {
+    out = {
         "headline": _clip_text(parsed.get("headline") or "", 80),
         "summary": _clip_text(parsed.get("summary") or "", 110),
         "focus": _list_field("focus"),
         "risk_flags": _list_field("risk_flags"),
         "opening_plan": _list_field("opening_plan"),
     }
+
+    if rewrite_only and isinstance(morning_rule_summary, dict):
+        if not str(out.get("headline", "")).strip():
+            out["headline"] = str(morning_rule_summary.get("headline", "")).strip()
+        if not str(out.get("summary", "")).strip():
+            out["summary"] = str(morning_rule_summary.get("summary", "")).strip()
+        if not out.get("focus"):
+            out["focus"] = [str(item).strip() for item in morning_rule_summary.get("focus", []) if str(item).strip()][:3]
+        if not out.get("risk_flags"):
+            out["risk_flags"] = [str(item).strip() for item in morning_rule_summary.get("risk_flags", []) if str(item).strip()][:3]
+        if not out.get("opening_plan"):
+            out["opening_plan"] = [str(item).strip() for item in morning_rule_summary.get("opening_plan", []) if str(item).strip()][:3]
+    return out
 
 
 def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date: str, mode: str, end_dt: Optional[datetime] = None) -> dict:
@@ -1029,17 +1153,33 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
     positions_df = load_positions()
     execution_df = _load_execution_df(RECAP_EXECUTION_LOOKBACK_LIMIT)
     execution_window_df = _filter_execution_window(execution_df, start_dt, now_dt)
-    execution_summaries = _summarize_execution_window(execution_window_df, positions_df, df)
-    conflict_news = _fetch_conflict_news(execution_summaries)
     bedtime_reference = _load_persisted_bedtime_plan(title_date) if mode == "morning" else {}
     prior_bedtime_lines = _merge_lines(
         bedtime_reference.get("opening_plan", []),
         bedtime_reference.get("risk_flags", []),
         bedtime_reference.get("focus", []),
     )
+    execution_summaries = _summarize_execution_window(execution_window_df, positions_df, df)
+    morning_rule_ai_summary: dict = {}
+    if mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED:
+        full_engine_summaries = _summarize_execution_window(
+            execution_window_df,
+            positions_df,
+            df,
+            include_all_tickers=True,
+        )
+        ranked_full_engine = _rank_morning_full_engine(full_engine_summaries)
+        execution_summaries = ranked_full_engine[:max(1, int(RECAP_MORNING_FULL_ENGINE_MAX_TICKERS))]
+        morning_rule_ai_summary = _build_morning_rule_ai_summary(execution_summaries, prior_bedtime_lines)
+
+    conflict_news = _fetch_conflict_news(execution_summaries)
     tracked_tickers = [str(row.get("ticker", "")).strip().upper() for _, row in df.head(3).iterrows() if str(row.get("ticker", "")).strip()]
     for _, row in positions_df.iterrows():
         ticker = str(row.get("ticker", "")).strip().upper()
+        if ticker and ticker not in tracked_tickers:
+            tracked_tickers.append(ticker)
+    for item in execution_summaries[: max(1, int(RECAP_TRACKED_NEWS_MAX_TICKERS))]:
+        ticker = str(item.get("ticker", "")).strip().upper()
         if ticker and ticker not in tracked_tickers:
             tracked_tickers.append(ticker)
     tracked_news = _fetch_tracked_news(tracked_tickers, mode)
@@ -1057,8 +1197,28 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
         "prior_bedtime_focus": bedtime_reference.get("focus", []) if isinstance(bedtime_reference, dict) else [],
         "prior_bedtime_risk_flags": bedtime_reference.get("risk_flags", []) if isinstance(bedtime_reference, dict) else [],
         "prior_bedtime_lines": prior_bedtime_lines,
+        "execution_summary_source": "morning_full_engine" if mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED else "tracked",
+        "morning_full_engine_enabled": bool(mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED),
+        "morning_rule_ai_summary": morning_rule_ai_summary,
     }
-    payload["ai_summary"] = _generate_recap_ai_summary(mode, payload)
+
+    ai_summary = _generate_recap_ai_summary(mode, payload)
+    if mode == "morning" and isinstance(morning_rule_ai_summary, dict) and morning_rule_ai_summary:
+        if not ai_summary:
+            ai_summary = morning_rule_ai_summary
+        else:
+            if not str(ai_summary.get("headline", "")).strip():
+                ai_summary["headline"] = str(morning_rule_ai_summary.get("headline", "")).strip()
+            if not str(ai_summary.get("summary", "")).strip():
+                ai_summary["summary"] = str(morning_rule_ai_summary.get("summary", "")).strip()
+            if not ai_summary.get("focus"):
+                ai_summary["focus"] = [str(item).strip() for item in morning_rule_ai_summary.get("focus", []) if str(item).strip()][:3]
+            if not ai_summary.get("risk_flags"):
+                ai_summary["risk_flags"] = [str(item).strip() for item in morning_rule_ai_summary.get("risk_flags", []) if str(item).strip()][:3]
+            if not ai_summary.get("opening_plan"):
+                ai_summary["opening_plan"] = [str(item).strip() for item in morning_rule_ai_summary.get("opening_plan", []) if str(item).strip()][:3]
+
+    payload["ai_summary"] = ai_summary
     payload["positions_df"] = positions_df
     payload["execution_summaries_full"] = execution_summaries
     return payload
