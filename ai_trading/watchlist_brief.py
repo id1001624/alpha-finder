@@ -407,22 +407,26 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
     if not GEMINI_API_KEY:
         return {}
     prompt = (
-        "You are a premarket trading assistant for a human operator. "
+        "You are a premarket trading decision engine for a human operator. "
         "Use only the provided facts. "
         "Do not invent news, prices, signals, or rankings. "
         "Combine current ai_decision candidates, open positions, and saved watchlist names into one clean ranking. "
         "Do not mention whether a ticker came from ai_decision, positions, or watchlist. "
-        "Do not mention raw news headlines. "
+        "Do not mention raw news headlines, search process, data collection process, or comparison process. "
         "Only output the strongest actionable names. Omit weak or unclear names. "
         "Risk control comes before fresh buying. "
         "If a ticker shows stop-loss, take-profit, or weak opening confirmation, prioritize that in risk_flags and action_plan before new long ideas. "
         "Only put clear buy candidates in priority_order. "
         "If many names are bullish, rank them from highest to lowest priority using cleaner engine continuation, stronger news, cleaner momentum, and better existing ai_decision rank. "
         "Do not recommend buying every bullish ticker. "
-        "Return strict JSON only with keys: headline, summary, priority_order, risk_flags, action_plan. "
-        "headline and summary must be short Traditional Chinese strings. "
-        "priority_order, risk_flags, action_plan must each be arrays with 0 to 5 short Traditional Chinese strings. "
-        "priority_order items should begin with the ticker symbol.\n\n"
+        "This is not a market commentary. It is a trading conclusion card. "
+        "Return strict JSON only with keys: headline, decision, priority_order, risk_flags, action_plan. "
+        "headline must be a very short Traditional Chinese title of at most 12 characters. "
+        "decision must be one short Traditional Chinese sentence that states the conclusion directly, without filler. "
+        "priority_order, risk_flags, action_plan must each be arrays with 0 to 4 short Traditional Chinese strings. "
+        "Each item must start with the ticker symbol when a ticker is involved. "
+        "Use imperative, trade-ready wording. Avoid abstract summary language like 整理完成, 已彙整, 已分析. "
+        "If there is no strong long candidate, leave priority_order empty instead of forcing one.\n\n"
         f"Data JSON:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -453,7 +457,7 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
 
     return {
         "headline": _clip_text(parsed.get("headline") or "", 80),
-        "summary": _clip_text(parsed.get("summary") or "", 120),
+        "summary": _clip_text(parsed.get("decision") or parsed.get("summary") or "", 120),
         "priority_order": _list_field("priority_order"),
         "risk_flags": _list_field("risk_flags"),
         "action_plan": _list_field("action_plan"),
@@ -514,8 +518,8 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
             elif str(engine.get("action", "")).strip().lower() in {"add", "entry"}:
                 action_plan.append(f"{ticker}: {engine.get('reason') or '優先開圖確認'}")
 
-    headline = "盤前整合排序完成"
-    summary = "已把強勢候選與風險股整合成單一排序，弱勢或不明確標的已省略。"
+    headline = "交易結論卡"
+    summary = "只看先做什麼、先避開什麼、先盯哪幾檔。"
     return {
         "headline": headline,
         "summary": summary,
@@ -536,7 +540,7 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
     summary = _gemini_watchlist_summary(payload) or _fallback_watchlist_summary(payload)
 
     lines = [
-        f"[Alpha Finder] 盤前整合排序 {payload.get('generated_at', '')}",
+        f"[Alpha Finder] 交易結論卡 {payload.get('generated_at', '')}",
         "",
     ]
     headline = str(summary.get("headline", "")).strip()
@@ -549,15 +553,15 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
     risk_flags = summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else []
     action_plan = summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else []
     if priority_order:
-        lines.append("最強排序:")
+        lines.append("先看標的:")
         for idx, item in enumerate(priority_order, 1):
             lines.append(f"- {idx}. {item}")
     if risk_flags:
-        lines.append("風險先處理:")
+        lines.append("先避開 / 先處理:")
         for item in risk_flags:
             lines.append(f"- {item}")
     if action_plan:
-        lines.append("現在先做:")
+        lines.append("執行動作:")
         for item in action_plan:
             lines.append(f"- {item}")
     return "\n".join(lines)
