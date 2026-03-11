@@ -25,7 +25,27 @@ from datetime import datetime, timedelta
 import argparse
 import time
 import re
+import requests
 
+RUNTIME_DATA_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    json.JSONDecodeError,
+    requests.RequestException,
+)
+OPTIONAL_DATA_ERRORS = (
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 def _fix_ssl_cert_path():
     """修復 SSL 憑證路徑中文問題（與 main.py 相同）"""
@@ -50,7 +70,7 @@ def _fix_ssl_cert_path():
         os.environ['SSL_CERT_FILE'] = safe_cert
         os.environ['REQUESTS_CA_BUNDLE'] = safe_cert
         os.environ['SSL_NO_VERIFY'] = '0'
-    except Exception:
+    except (ImportError, ModuleNotFoundError, OSError, PermissionError, shutil.Error):
         pass
 
 
@@ -115,7 +135,7 @@ from power_awake import keep_system_awake
 
 try:
     from config import AI_READY_OUTPUT_ENABLED, AI_READY_OUTPUT_DIR
-except Exception:
+except (ImportError, ModuleNotFoundError, AttributeError, OSError, ValueError):
     AI_READY_OUTPUT_ENABLED = True
     AI_READY_OUTPUT_DIR = "repo_outputs/ai_ready"
 
@@ -188,7 +208,7 @@ def read_xq_csv(file_path):
                 pd.to_numeric(df.iloc[:, 0], errors='raise')
                 # 是序號,可以刪除
                 df = df.iloc[:, 1:]
-            except:
+            except OPTIONAL_DATA_ERRORS:
                 pass
         
         # 清理欄位名稱
@@ -199,7 +219,7 @@ def read_xq_csv(file_path):
         
         return df
             
-    except Exception as e:
+    except (OSError, ValueError, TypeError, pd.errors.ParserError, pd.errors.EmptyDataError) as e:
         print(f"❌ 讀取 CSV 失敗: {e}")
         # 嘗試手動解析
         try:
@@ -219,9 +239,9 @@ def read_xq_csv(file_path):
                 print(f"📊 手動解析成功,讀取到 {len(df)} 支股票")
                 return df
             else:
-                print(f"❌ 無法找到欄位標題行")
+                print("❌ 無法找到欄位標題行")
                 return None
-        except Exception as e2:
+        except (OSError, ValueError, TypeError, pd.errors.ParserError, pd.errors.EmptyDataError) as e2:
             print(f"❌ 手動解析也失敗: {e2}")
             return None
 
@@ -285,7 +305,7 @@ def fetch_history(ticker, days=MAX_LOOKBACK):
         
         return hist
     
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS as e:
         print(f"❌ {ticker}: 抓取失敗 - {e}")
         return None
 
@@ -530,7 +550,7 @@ def print_top_movers(df, ticker_column):
     if ticker_column in temp.columns:
         temp['_ticker'] = temp[ticker_column].astype(str).str.strip()
     else:
-        temp['_ticker'] = temp.apply(lambda row: extract_ticker(row), axis=1)
+        temp['_ticker'] = temp.apply(extract_ticker, axis=1)
 
     for metric_col in [score_col, COL_1D_CHANGE_PCT, COL_3D_CHANGE_PCT, COL_5D_CHANGE_PCT, COL_VOL_STRENGTH]:
         if metric_col in temp.columns:
@@ -605,7 +625,7 @@ def build_top_picks_snapshot(df, ticker_column, source_name, top_n=TOP_PICKS_PER
     if ticker_column in temp.columns:
         temp['_ticker'] = temp[ticker_column].astype(str).str.strip().str.upper()
     else:
-        temp['_ticker'] = temp.apply(lambda row: extract_ticker(row).upper(), axis=1)
+        temp['_ticker'] = temp.apply(extract_ticker, axis=1).str.upper()
 
     numeric_cols = [
         COL_SHORT_SCORE,
@@ -729,9 +749,9 @@ def write_ai_ready_xq_manifest(source_file: Path, exported_file: Path, row_count
     return manifest_path
 
 
-def _candidate_csv_files() -> list[Path]:
+def _candidate_csv_files(xq_exports_dir: Path) -> list[Path]:
     return sorted(
-        [file for file in XQ_EXPORTS_DIR.glob('*.csv') if '_updated' not in file.stem],
+        [file for file in xq_exports_dir.glob('*.csv') if '_updated' not in file.stem],
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     )
@@ -826,10 +846,10 @@ def update_csv_with_history(file_path, ticker_column=None):
                 df.at[idx, key] = value
             df.at[idx, COL_AI_QUERY_HINT] = build_ai_query_hint(ticker)
             
-            print(f"✅ 完成")
+            print("✅ 完成")
             success_count += 1
         else:
-            print(f"❌ 跳過")
+            print("❌ 跳過")
         
         # 避免過度頻繁請求
         time.sleep(0.5)
@@ -846,7 +866,7 @@ def update_csv_with_history(file_path, ticker_column=None):
         print(f"🧭 輸出目標: repo_outputs/ai_ready/latest/{AI_XQ_TARGET_FILE}")
         print(f"{'='*60}\n")
         return df_out, ticker_column, file_path.name
-    except Exception as e:
+    except (OSError, ValueError, TypeError) as e:
         print(f"❌ 儲存失敗: {e}")
         return None
 
@@ -883,27 +903,26 @@ def main():
     args = parser.parse_args()
     
     # 如果用戶指定了資料夾,使用指定的路徑
-    global XQ_EXPORTS_DIR
+    xq_exports_dir = Path(args.dir) if args.dir else XQ_EXPORTS_DIR
     if args.dir:
-        XQ_EXPORTS_DIR = Path(args.dir)
-        print(f"📁 使用指定路徑: {XQ_EXPORTS_DIR}")
+        print(f"📁 使用指定路徑: {xq_exports_dir}")
     else:
-        print(f"📁 自動偵測到路徑: {XQ_EXPORTS_DIR}")
+        print(f"📁 自動偵測到路徑: {xq_exports_dir}")
     
-    print(f"""
+    print("""
 ╔═══════════════════════════════════════════════════════════╗
 ║   XQ 選股清單 - Yahoo Finance 歷史價格更新工具           ║
 ╚═══════════════════════════════════════════════════════════╝
     """)
     
     # 檢查資料夾是否存在
-    if not XQ_EXPORTS_DIR.exists():
-        print(f"❌ 找不到資料夾: {XQ_EXPORTS_DIR}")
-        print(f"\n請確認:")
-        print(f"  1. XQ_exports 資料夾是否存在")
-        print(f"  2. 或使用 --dir 參數指定路徑:")
+    if not xq_exports_dir.exists():
+        print(f"❌ 找不到資料夾: {xq_exports_dir}")
+        print("\n請確認:")
+        print("  1. XQ_exports 資料夾是否存在")
+        print("  2. 或使用 --dir 參數指定路徑:")
         print(f"     python {Path(__file__).name} --dir C:\\路徑\\XQ_exports")
-        print(f"\n自動搜尋順序:")
+        print("\n自動搜尋順序:")
         print(f"  1. 腳本所在目錄: {Path(__file__).parent / 'XQ_exports'}")
         print(f"  2. 腳本上層目錄: {Path(__file__).parent.parent / 'XQ_exports'}")
         print(f"  3. 當前工作目錄: {Path.cwd() / 'XQ_exports'}")
@@ -913,7 +932,7 @@ def main():
     results = []
 
     if args.file:
-        file_path = XQ_EXPORTS_DIR / args.file
+        file_path = xq_exports_dir / args.file
         if file_path.exists():
             result = update_csv_with_history(file_path, args.ticker_column)
             if result:
@@ -922,10 +941,10 @@ def main():
             print(f"❌ 找不到檔案: {file_path}")
             return 2
     else:
-        csv_files = _candidate_csv_files()
+        csv_files = _candidate_csv_files(xq_exports_dir)
 
         if not csv_files:
-            print(f"❌ 沒有找到任何 CSV 檔案")
+            print("❌ 沒有找到任何 CSV 檔案")
             return 2
 
         if args.all_files:
@@ -966,7 +985,7 @@ def main():
                 best_score_count = score_count
                 best_ai_xq_df = df
                 best_source_name = source_name
-                best_source_path = XQ_EXPORTS_DIR / source_name
+                best_source_path = xq_exports_dir / source_name
 
             snapshot = build_top_picks_snapshot(df, ticker_column, source_name)
             if len(snapshot) > 0:
@@ -991,7 +1010,7 @@ def main():
             if manifest_path is not None:
                 print(f"XQ manifest: {manifest_path}")
     
-    print(f"\n✅ 全部完成!\n")
+    print("\n✅ 全部完成!\n")
     return 0
 
 

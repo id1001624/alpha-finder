@@ -11,6 +11,7 @@ import sys
 import os
 import shutil
 import json
+import functools
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def _fix_ssl_cert_path():
         os.environ['SSL_CERT_FILE'] = safe_cert
         os.environ['REQUESTS_CA_BUNDLE'] = safe_cert
         os.environ['SSL_NO_VERIFY'] = '0'  # 確保不跳過驗證
-    except Exception as e:
+    except (ImportError, ModuleNotFoundError, OSError, PermissionError, shutil.Error):
         # 非關鍵，失敗就跳過
         pass
 
@@ -53,9 +54,30 @@ _fix_ssl_cert_path()
 import pandas as pd
 import time
 import warnings
-from typing import List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional
 import yfinance as yf
 import requests  # 新增：用於 Finnhub API 調用
+from app_logging import install_builtin_print_logging
+
+RUNTIME_DATA_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    json.JSONDecodeError,
+    requests.RequestException,
+)
+SCRAPER_RUNTIME_ERRORS = RUNTIME_DATA_ERRORS + (RuntimeError,)
+OPTIONAL_DATA_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+)
 
 # 從 config.py 導入所有配置常數
 from config import (
@@ -90,6 +112,8 @@ from config import (
 from signal_store import get_latest_signals
 from power_awake import keep_system_awake
 
+install_builtin_print_logging()
+
 # Google Sheets 相關套件
 try:
     import gspread
@@ -99,6 +123,13 @@ except ImportError:
     GSHEET_AVAILABLE = False
     print("[!] 警告：未安裝 gspread 或 oauth2client，Google Sheets 功能將被跳過")
     print("    請執行: pip install gspread oauth2client")
+
+if GSHEET_AVAILABLE:
+    GSHEET_RUNTIME_ERRORS = RUNTIME_DATA_ERRORS + (gspread.exceptions.GSpreadException,)
+    GSHEET_FORMATTING_ERRORS = (AttributeError, OSError, TypeError, ValueError, gspread.exceptions.GSpreadException)
+else:
+    GSHEET_RUNTIME_ERRORS = RUNTIME_DATA_ERRORS
+    GSHEET_FORMATTING_ERRORS = (AttributeError, OSError, TypeError, ValueError)
 
 warnings.filterwarnings('ignore')
 
@@ -119,21 +150,26 @@ def _previous_trading_day_str(base_dt: datetime = None) -> str:
 
 
 # ============ 動態門檻（可由大盤濾網覆寫） ============
-EFFECTIVE_LAUNCH_MIN_GAIN = LAUNCH_MIN_GAIN
-EFFECTIVE_LAUNCH_MIN_REL_VOL = LAUNCH_MIN_REL_VOL
-EFFECTIVE_EARNINGS_MIN_MCAP = EARNINGS_MIN_MCAP
-EFFECTIVE_ANALYST_MIN_UPSIDE = ANALYST_MIN_UPSIDE
+EFFECTIVE_FILTERS = {
+    'launch_min_gain': LAUNCH_MIN_GAIN,
+    'launch_min_rel_vol': LAUNCH_MIN_REL_VOL,
+    'earnings_min_mcap': EARNINGS_MIN_MCAP,
+    'analyst_min_upside': ANALYST_MIN_UPSIDE,
+}
+
+
+def _reset_effective_filters() -> None:
+    EFFECTIVE_FILTERS.update({
+        'launch_min_gain': LAUNCH_MIN_GAIN,
+        'launch_min_rel_vol': LAUNCH_MIN_REL_VOL,
+        'earnings_min_mcap': EARNINGS_MIN_MCAP,
+        'analyst_min_upside': ANALYST_MIN_UPSIDE,
+    })
 
 
 def apply_market_regime_filter() -> None:
     """MVP 大盤環境濾網：若 SPY 跌破 MA20，提升部分選股門檻。"""
-    global EFFECTIVE_LAUNCH_MIN_GAIN, EFFECTIVE_LAUNCH_MIN_REL_VOL
-    global EFFECTIVE_EARNINGS_MIN_MCAP, EFFECTIVE_ANALYST_MIN_UPSIDE
-
-    EFFECTIVE_LAUNCH_MIN_GAIN = LAUNCH_MIN_GAIN
-    EFFECTIVE_LAUNCH_MIN_REL_VOL = LAUNCH_MIN_REL_VOL
-    EFFECTIVE_EARNINGS_MIN_MCAP = EARNINGS_MIN_MCAP
-    EFFECTIVE_ANALYST_MIN_UPSIDE = ANALYST_MIN_UPSIDE
+    _reset_effective_filters()
 
     if not MARKET_FILTER_ENABLED:
         print("[步驟 0/4] 大盤濾網：停用（使用原始門檻）")
@@ -153,21 +189,21 @@ def apply_market_regime_filter() -> None:
         is_bear = last_close < ma_value
 
         if is_bear:
-            EFFECTIVE_LAUNCH_MIN_GAIN = MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN
-            EFFECTIVE_LAUNCH_MIN_REL_VOL = MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL
-            EFFECTIVE_EARNINGS_MIN_MCAP = MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP
-            EFFECTIVE_ANALYST_MIN_UPSIDE = MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE
+            EFFECTIVE_FILTERS['launch_min_gain'] = MARKET_FILTER_BEAR_LAUNCH_MIN_GAIN
+            EFFECTIVE_FILTERS['launch_min_rel_vol'] = MARKET_FILTER_BEAR_LAUNCH_MIN_REL_VOL
+            EFFECTIVE_FILTERS['earnings_min_mcap'] = MARKET_FILTER_BEAR_EARNINGS_MIN_MCAP
+            EFFECTIVE_FILTERS['analyst_min_upside'] = MARKET_FILTER_BEAR_ANALYST_MIN_UPSIDE
             print(
                 f"[步驟 0/4] 大盤濾網：BEAR（{MARKET_FILTER_SYMBOL} {last_close:.2f} < MA{MARKET_FILTER_MA_WINDOW} {ma_value:.2f}），"
-                f"門檻提高：起飛>{EFFECTIVE_LAUNCH_MIN_GAIN}%/{EFFECTIVE_LAUNCH_MIN_REL_VOL}x，"
-                f"財報市值>{EFFECTIVE_EARNINGS_MIN_MCAP/1e9:.1f}B，預測上漲>{EFFECTIVE_ANALYST_MIN_UPSIDE}%"
+                f"門檻提高：起飛>{EFFECTIVE_FILTERS['launch_min_gain']}%/{EFFECTIVE_FILTERS['launch_min_rel_vol']}x，"
+                f"財報市值>{EFFECTIVE_FILTERS['earnings_min_mcap']/1e9:.1f}B，預測上漲>{EFFECTIVE_FILTERS['analyst_min_upside']}%"
             )
         else:
             print(
                 f"[步驟 0/4] 大盤濾網：BULL（{MARKET_FILTER_SYMBOL} {last_close:.2f} >= MA{MARKET_FILTER_MA_WINDOW} {ma_value:.2f}），"
                 "使用原始門檻"
             )
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS as e:
         print(f"[步驟 0/4] 大盤濾網判斷失敗，維持原始門檻: {e}")
 
 
@@ -178,7 +214,7 @@ def retry_on_failure(func, max_retries=3, delay=2.0, backoff=2.0):
     for attempt in range(max_retries):
         try:
             return func()
-        except Exception as e:
+        except SCRAPER_RUNTIME_ERRORS as e:
             if attempt == max_retries - 1:
                 raise
             wait = delay * (backoff ** attempt)
@@ -226,7 +262,7 @@ def get_finnhub_earnings(ticker: str) -> Dict:
                     'eps_estimate': first.get('epsEstimate', None)
                 }
         return {}
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS:
         return {}
 
 
@@ -253,7 +289,7 @@ def get_finnhub_price_target(ticker: str) -> Dict:
                 'num_analysts': data.get('numberOfAnalysts', 0)
             }
         return {}
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS:
         return {}
 
 
@@ -281,7 +317,7 @@ def assign_grade(row: pd.Series) -> str:
             return 'B'
         
         return 'C'
-    except:
+    except (AttributeError, TypeError, ValueError):
         return 'C'
 
 
@@ -382,6 +418,13 @@ def _apply_sector_classification(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _screener_to_dataframe(screener: Any) -> pd.DataFrame:
+    to_dataframe = getattr(screener, 'to_dataframe', None)
+    if callable(to_dataframe):
+        return to_dataframe()
+    return pd.DataFrame([stock for stock in screener])
+
+
 def _resolve_earnings_fields(earnings_date_value, now_dt: datetime = None) -> Dict[str, object]:
     now_dt = now_dt or datetime.now()
     if earnings_date_value is None or earnings_date_value == '':
@@ -409,7 +452,7 @@ def _resolve_earnings_fields(earnings_date_value, now_dt: datetime = None) -> Di
             'Earnings_Status': status,
             'Days_To_Earnings': int(day_diff),
         }
-    except Exception:
+    except (TypeError, ValueError):
         return {
             'Earnings_Date': None,
             'Earnings_Status': 'none',
@@ -503,6 +546,69 @@ def _enrich_demo_row(row: pd.Series, idx: int) -> Dict[str, object]:
     }
 
 
+def _fetch_yfinance_enrichment_payload(ticker_symbol: str, current_row: pd.Series, now_dt: datetime) -> Dict[str, object]:
+    ticker = yf.Ticker(ticker_symbol)
+    info = ticker.info
+
+    earnings_date = None
+    earnings_time = '無財報'
+    eps_estimate = info.get('forwardEps', None)
+
+    try:
+        calendar = ticker.calendar
+        if calendar is not None and 'Earnings Date' in calendar:
+            dates = calendar['Earnings Date']
+            if len(dates) > 0:
+                earnings_date = dates[0]
+    except OPTIONAL_DATA_ERRORS:
+        pass
+
+    if not earnings_date and FINNHUB_API_KEY:
+        finnhub_earn = get_finnhub_earnings(ticker_symbol)
+        if finnhub_earn:
+            earnings_date = finnhub_earn.get('date')
+            earnings_time = finnhub_earn.get('time') or '無財報'
+            if not eps_estimate and finnhub_earn.get('eps_estimate'):
+                eps_estimate = finnhub_earn.get('eps_estimate')
+
+    earnings_info = _resolve_earnings_fields(earnings_date, now_dt=now_dt)
+    if earnings_info['Earnings_Status'] == 'none':
+        earnings_time = '無財報'
+
+    target_price = info.get('targetMeanPrice', None)
+    num_analysts = info.get('numberOfAnalystOpinions', 0)
+    if (not target_price or num_analysts == 0) and FINNHUB_API_KEY:
+        finnhub_target = get_finnhub_price_target(ticker_symbol)
+        if finnhub_target:
+            if not target_price:
+                target_price = finnhub_target.get('target_price')
+            if num_analysts == 0:
+                num_analysts = finnhub_target.get('num_analysts', 0)
+
+    current_price = current_row['Price']
+    upside_pct = ((target_price - current_price) / current_price * 100) if target_price and current_price > 0 else 0
+
+    news_headline = ""
+    try:
+        news = ticker.news
+        if news and len(news) > 0:
+            news_headline = news[0].get('title', '')[:80]
+    except OPTIONAL_DATA_ERRORS:
+        pass
+
+    return {
+        'Earnings_Date': earnings_info['Earnings_Date'],
+        'Earnings_Status': earnings_info['Earnings_Status'],
+        'Days_To_Earnings': earnings_info['Days_To_Earnings'],
+        'Earnings_Time': earnings_time,
+        'Target_Price': target_price,
+        'Upside_Pct': upside_pct,
+        'EPS_Estimate': eps_estimate,
+        'Num_Analysts': num_analysts or 0,
+        'News_Headline': news_headline,
+    }
+
+
 # ============ Google Sheets 上傳模組 ============
 
 class GoogleSheetsUploader:
@@ -536,7 +642,7 @@ class GoogleSheetsUploader:
             print("  [OK] 驗證成功")
             return True
 
-        except Exception as e:
+        except GSHEET_RUNTIME_ERRORS as e:
             print(f"[X] 驗證失敗: {e}")
             return False
 
@@ -553,17 +659,16 @@ class GoogleSheetsUploader:
                 print(f"   請到 Google Sheets 建立名為 '{self.spreadsheet_name}' 的試算表")
                 print(f"   並分享給服務帳號: {self._get_service_account_email()}")
                 return False
-        except Exception as e:
+        except GSHEET_RUNTIME_ERRORS as e:
             print(f"[X] 開啟試算表失敗: {e}")
             return False
 
     def _get_service_account_email(self) -> str:
         try:
-            import json
-            with open(self.credentials_file, 'r') as f:
+            with open(self.credentials_file, 'r', encoding='utf-8') as f:
                 creds = json.load(f)
                 return creds.get('client_email', '不詳')
-        except Exception:
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return '不詳'
 
     def _format_header(self, worksheet):
@@ -579,16 +684,16 @@ class GoogleSheetsUploader:
 
             try:
                 worksheet.freeze(rows=1)
-            except (AttributeError, Exception):
+            except GSHEET_FORMATTING_ERRORS:
                 pass
 
             try:
                 worksheet.auto_resize_columns(0, worksheet.col_count)
-            except Exception:
+            except GSHEET_FORMATTING_ERRORS:
                 pass
 
             print("    [OK] 標題格式設定完成")
-        except Exception as e:
+        except GSHEET_RUNTIME_ERRORS as e:
             print(f"    [!] 標題格式設定失敗: {e}")
 
     def upload_sheet(self, df: pd.DataFrame, sheet_title: str, clear_first=True) -> bool:
@@ -625,7 +730,7 @@ class GoogleSheetsUploader:
             print(f"    [OK] 上傳完成: {len(df)} 筆資料")
             return True
 
-        except Exception as e:
+        except GSHEET_RUNTIME_ERRORS as e:
             print(f"    [X] 上傳失敗: {e}")
             return False
 
@@ -664,14 +769,14 @@ class GoogleSheetsUploader:
             success = self.upload_sheet(combined_df, date_str, clear_first=True)
 
             if success:
-                print(f"[OK] 每日報告上傳成功")
+                print("[OK] 每日報告上傳成功")
                 s1, s2, s2b, s3, s4 = len(sheet1_top), len(sheet2_top), len(sheet2b_top), len(sheet3_top), len(sheet4_top)
                 tv_n = len(tv_need_list) if tv_need_list is not None else 0
                 print(f"  資料: 起飛清單({s1}) + 財報預熱({s2}) + 財報後延續({s2b}) + 預測情報({s3}) + Track F({s4}) + TV需求({tv_n})")
 
             return success
 
-        except Exception as e:
+        except GSHEET_RUNTIME_ERRORS as e:
             print(f"[X] 上傳每日報告失敗: {e}")
             return False
 
@@ -759,7 +864,7 @@ class GoogleSheetsUploader:
 
             return self.upload_sheet(final_df, '全量數據', clear_first=True)
 
-        except Exception as e:
+        except GSHEET_RUNTIME_ERRORS as e:
             print(f"[X] 上傳全量數據失敗: {e}")
             return False
 
@@ -808,6 +913,19 @@ class GoogleSheetsUploader:
             return pd.concat(frames, ignore_index=True)
         return pd.DataFrame()
 
+    def build_combined_report(self, sheet1: pd.DataFrame, sheet2: pd.DataFrame,
+                              sheet3: pd.DataFrame, sheet4: pd.DataFrame = None,
+                              sheet2b: pd.DataFrame = None,
+                              tv_need_list: pd.DataFrame = None) -> pd.DataFrame:
+        return self._build_combined_report(
+            sheet1,
+            sheet2,
+            sheet3,
+            sheet4,
+            sheet2b=sheet2b,
+            tv_need_list=tv_need_list,
+        )
+
 
 # ============ 資料爬取 ============
 
@@ -842,24 +960,24 @@ def scrape_finviz_screener() -> pd.DataFrame:
         print("  [*] 基本條件: 美股 + 平均量 > 500K")
 
         # ===== 取得 Performance 表 =====
-        print(f"  [*] 正在執行篩選器 (Performance 表)...")
-        screener_perf = Screener(filters=filters, table='Performance')
+        print("  [*] 正在執行篩選器 (Performance 表)...")
+        screener_perf: Any = Screener(filters=filters, table='Performance')
         print(f"  [OK] Performance 表: {len(screener_perf)} 檔股票")
 
         try:
-            df_perf = screener_perf.to_dataframe()
-        except (AttributeError, Exception):
+            df_perf = _screener_to_dataframe(screener_perf)
+        except OPTIONAL_DATA_ERRORS:
             rows = [stock for stock in screener_perf]
             df_perf = pd.DataFrame(rows)
 
         # ===== 取得 Overview 表 =====
-        print(f"  [*] 正在取得 Overview 資料...")
-        screener_overview = Screener(filters=filters, table='Overview')
+        print("  [*] 正在取得 Overview 資料...")
+        screener_overview: Any = Screener(filters=filters, table='Overview')
         print(f"  [OK] Overview 表: {len(screener_overview)} 檔股票")
 
         try:
-            df_overview = screener_overview.to_dataframe()
-        except (AttributeError, Exception):
+            df_overview = _screener_to_dataframe(screener_overview)
+        except OPTIONAL_DATA_ERRORS:
             rows = [stock for stock in screener_overview]
             df_overview = pd.DataFrame(rows)
 
@@ -867,13 +985,13 @@ def scrape_finviz_screener() -> pd.DataFrame:
             print("  [!] 篩選條件返回 0 筆，嘗試寬鬆篩選...")
             screener_overview = Screener(filters=['geo_usa', 'sh_avgvol_o500'], table='Overview')
             try:
-                df_overview = screener_overview.to_dataframe()
-            except (AttributeError, Exception):
+                df_overview = _screener_to_dataframe(screener_overview)
+            except OPTIONAL_DATA_ERRORS:
                 rows = [stock for stock in screener_overview]
                 df_overview = pd.DataFrame(rows)
 
         # ===== 合併兩個表 =====
-        print(f"  [*] 合併 Performance + Overview 資料...")
+        print("  [*] 合併 Performance + Overview 資料...")
 
         if len(df_overview) > 0 and len(df_perf) > 0:
             # 從 Performance 表取需要的欄位
@@ -945,7 +1063,7 @@ def scrape_finviz_screener() -> pd.DataFrame:
             df = df.sort_values('_signal_score', ascending=False).reset_index(drop=True)
             df = df.drop(columns=['_change_score', '_vol_score', '_signal_score'])
             top5 = df.head(5)[['Ticker', 'Daily_Change', 'Rel_Volume']].to_string(index=False)
-            print(f"  [*] 已按信號強度排序，前 5 強：")
+            print("  [*] 已按信號強度排序，前 5 強：")
             print(f"{top5}")
 
         print(f"  [OK] Finviz 爬取完成！共 {len(df)} 檔股票\n")
@@ -955,9 +1073,9 @@ def scrape_finviz_screener() -> pd.DataFrame:
         print("  [!] finviz 庫未安裝，降級使用示例數據")
         print("  請執行: pip install finviz>=2.0.0\n")
         return create_demo_data()
-    except Exception as e:
+    except SCRAPER_RUNTIME_ERRORS as e:
         print(f"  [X] Finviz 爬蟲失敗: {e}")
-        print(f"  使用示例數據進行演示...\n")
+        print("  使用示例數據進行演示...\n")
         return create_demo_data()
 
 
@@ -1036,7 +1154,7 @@ def fetch_upcoming_earnings_tickers() -> List[str]:
                 tickers.append(symbol)
 
         return sorted(set(tickers))
-    except Exception:
+    except RUNTIME_DATA_ERRORS:
         return []
 
 
@@ -1088,7 +1206,7 @@ def append_stock_from_yfinance(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         }
 
         return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    except Exception:
+    except RUNTIME_DATA_ERRORS:
         return df
 
 
@@ -1122,7 +1240,7 @@ def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     print(f"  [*] Finnhub 財報清單: {len(tickers)} 檔，其中 {len(missing)} 檔不在 Finviz 結果")
-    print(f"  [*] 開始篩選符合條件的財報股（市值 >{EFFECTIVE_EARNINGS_MIN_MCAP/1e9:.1f}B, 量能 >{EARNINGS_MIN_VOLUME/1e3:.0f}k）...")
+    print(f"  [*] 開始篩選符合條件的財報股（市值 >{EFFECTIVE_FILTERS['earnings_min_mcap']/1e9:.1f}B, 量能 >{EARNINGS_MIN_VOLUME/1e3:.0f}k）...")
 
     # 快速篩選：只保留符合市值+量能條件的 ticker
     qualified = []
@@ -1133,16 +1251,16 @@ def merge_upcoming_earnings(df: pd.DataFrame) -> pd.DataFrame:
             mcap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume', 0)
             
-            if mcap >= EFFECTIVE_EARNINGS_MIN_MCAP and avg_vol >= EARNINGS_MIN_VOLUME:
+            if mcap >= EFFECTIVE_FILTERS['earnings_min_mcap'] and avg_vol >= EARNINGS_MIN_VOLUME:
                 qualified.append(ticker)
                 if len(qualified) >= MAX_EARNINGS_MERGE:
                     break
-        except Exception:
+        except RUNTIME_DATA_ERRORS:
             continue
         time.sleep(0.1)  # 避免過快查詢
 
     if not qualified:
-        print(f"  [!] 無符合條件的財報股，跳過合併")
+        print("  [!] 無符合條件的財報股，跳過合併")
         return df
 
     print(f"  [OK] 篩選出 {len(qualified)} 檔符合條件的財報股，開始補抓...")
@@ -1190,7 +1308,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
     enriched_data = []
     now_dt = datetime.now()
 
-    for count, (idx, row) in enumerate(df_subset.iterrows(), 1):
+    for count, (_, row) in enumerate(df_subset.iterrows(), 1):
         ticker_symbol = row['Ticker']
         earnings_tag = " [財報]" if has_earnings_col and row.get('_has_upcoming_earnings', False) else ""
         print(f"  ({count}/{len(df_subset)}) 查詢 {ticker_symbol}{earnings_tag}...", end=' ')
@@ -1202,81 +1320,16 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
                 print("[DEMO]")
                 continue
 
-            def _fetch():
-                ticker = yf.Ticker(ticker_symbol)
-                info = ticker.info
-
-                # 財報日期 - 優先從 yfinance 取得
-                earnings_date = None
-                earnings_time = '無財報'
-                eps_estimate = info.get('forwardEps', None)
-                
-                try:
-                    calendar = ticker.calendar
-                    if calendar is not None and 'Earnings Date' in calendar:
-                        dates = calendar['Earnings Date']
-                        if len(dates) > 0:
-                            earnings_date = dates[0]
-                except Exception:
-                    pass
-                
-                # 如果 yfinance 找不到財報日期，嘗試 Finnhub
-                if not earnings_date and FINNHUB_API_KEY:
-                    finnhub_earn = get_finnhub_earnings(ticker_symbol)
-                    if finnhub_earn:
-                        earnings_date = finnhub_earn.get('date')
-                        earnings_time = finnhub_earn.get('time') or '無財報'
-                        if not eps_estimate and finnhub_earn.get('eps_estimate'):
-                            eps_estimate = finnhub_earn.get('eps_estimate')
-
-                earnings_info = _resolve_earnings_fields(earnings_date, now_dt=now_dt)
-                if earnings_info['Earnings_Status'] == 'none':
-                    earnings_time = '無財報'
-
-                # 分析師目標價 - 優先從 yfinance 取得
-                target_price = info.get('targetMeanPrice', None)
-                num_analysts = info.get('numberOfAnalystOpinions', 0)
-                
-                # 如果 yfinance 找不到目標價，嘗試 Finnhub
-                if (not target_price or num_analysts == 0) and FINNHUB_API_KEY:
-                    finnhub_target = get_finnhub_price_target(ticker_symbol)
-                    if finnhub_target:
-                        if not target_price:
-                            target_price = finnhub_target.get('target_price')
-                        if num_analysts == 0:
-                            num_analysts = finnhub_target.get('num_analysts', 0)
-                
-                # 計算上漲空間
-                current_price = row['Price']
-                upside_pct = ((target_price - current_price) / current_price * 100) if target_price and current_price > 0 else 0
-
-                # 最新新聞標題
-                news_headline = ""
-                try:
-                    news = ticker.news
-                    if news and len(news) > 0:
-                        news_headline = news[0].get('title', '')[:80]
-                except Exception:
-                    pass
-
-                return {
-                    'Earnings_Date': earnings_info['Earnings_Date'],
-                    'Earnings_Status': earnings_info['Earnings_Status'],
-                    'Days_To_Earnings': earnings_info['Days_To_Earnings'],
-                    'Earnings_Time': earnings_time,  # 新增：BMO/AMC
-                    'Target_Price': target_price,
-                    'Upside_Pct': upside_pct,
-                    'EPS_Estimate': eps_estimate,
-                    'Num_Analysts': num_analysts or 0,
-                    'News_Headline': news_headline,
-                }
-
-            result = retry_on_failure(_fetch, max_retries=2, delay=1.0)
+            result = retry_on_failure(
+                functools.partial(_fetch_yfinance_enrichment_payload, ticker_symbol, row, now_dt),
+                max_retries=2,
+                delay=1.0,
+            )
             enriched_data.append({**row.to_dict(), **result})
             print("[OK]")
             time.sleep(API_DELAY)
 
-        except Exception as e:
+        except RUNTIME_DATA_ERRORS as e:
             print(f"[X] (錯誤: {e})")
             enriched_data.append({
                 **row.to_dict(),
@@ -1292,7 +1345,7 @@ def enrich_with_yfinance(df: pd.DataFrame) -> pd.DataFrame:
             })
 
     result_df = pd.DataFrame(enriched_data)
-    print(f"  [OK] Yahoo Finance 資料補充完成！\n")
+    print("  [OK] Yahoo Finance 資料補充完成！\n")
     return result_df
 
 
@@ -1334,7 +1387,7 @@ def fetch_analyst_target_changes(tickers: List[str]) -> Dict[str, dict]:
                     'date': latest.get('date', ''),
                 }
             time.sleep(0.3)
-        except Exception:
+        except RUNTIME_DATA_ERRORS:
             continue
 
     print(f"  [OK] 取得 {len(results)} 檔分析師目標價變動\n")
@@ -1379,7 +1432,7 @@ def load_latest_signal_map(asof: Optional[datetime] = None) -> Dict[str, object]
         )
         print(f"[步驟 2.6] TradingView 有效訊號數: {len(signals)}")
         return signals
-    except Exception as e:
+    except RUNTIME_DATA_ERRORS as e:
         print(f"[步驟 2.6] TradingView 訊號載入失敗，改以無訊號模式執行: {e}")
         return {}
 
@@ -1452,8 +1505,8 @@ def filter_sheet1_launch(df: pd.DataFrame) -> pd.DataFrame:
     print("[步驟 3/4] 篩選起飛清單...")
 
     filtered = df[
-        (df['Daily_Change'] > EFFECTIVE_LAUNCH_MIN_GAIN) &
-        (df['Rel_Volume'] > EFFECTIVE_LAUNCH_MIN_REL_VOL) &
+        (df['Daily_Change'] > EFFECTIVE_FILTERS['launch_min_gain']) &
+        (df['Rel_Volume'] > EFFECTIVE_FILTERS['launch_min_rel_vol']) &
         (df['Price'] > LAUNCH_MIN_PRICE) &
         (df['Market_Cap_Raw'] > LAUNCH_MIN_MCAP)
     ].copy()
@@ -1622,7 +1675,7 @@ def filter_sheet3_analyst(df: pd.DataFrame, target_changes: Dict = None) -> pd.D
     print("[步驟 3/4] 篩選預測情報...")
 
     filtered = df[
-        (df['Upside_Pct'] > EFFECTIVE_ANALYST_MIN_UPSIDE) &
+        (df['Upside_Pct'] > EFFECTIVE_FILTERS['analyst_min_upside']) &
         (df['Num_Analysts'] >= ANALYST_MIN_COUNT) &
         (df['Target_Price'].notna())
     ].copy()
@@ -1979,7 +2032,7 @@ def display_summary(sheet1: pd.DataFrame, sheet2: pd.DataFrame, sheet2b: pd.Data
     else:
         print("  無符合條件的股票")
 
-    print(f"\n>> TV 指標需求清單")
+    print("\n>> TV 指標需求清單")
     if tv_need_list is not None and len(tv_need_list) > 0:
         for i, (_, row) in enumerate(tv_need_list.iterrows(), 1):
             print(f"  {i}. {row.get('Ticker', 'N/A')} - {row.get('need_tv_reason', '')}")
@@ -2012,7 +2065,7 @@ def _reset_path(path_obj: Path) -> None:
     elif path_obj.exists():
         try:
             path_obj.unlink()
-        except Exception:
+        except (OSError, PermissionError):
             pass
 
 
@@ -2302,7 +2355,7 @@ def export_daily_local_outputs(
     _write_csv_local(tv_need_list, run_dir / 'tv_need_list.csv')
 
     helper = GoogleSheetsUploader()
-    combined = helper._build_combined_report(sheet1, sheet2, sheet3, sheet4, sheet2b=sheet2b, tv_need_list=tv_need_list)
+    combined = helper.build_combined_report(sheet1, sheet2, sheet3, sheet4, sheet2b=sheet2b, tv_need_list=tv_need_list)
     _write_csv_local(combined, run_dir / 'fusion_top_daily.csv')
 
     theme_heat_df = _build_theme_heat(df_enriched)
@@ -2496,7 +2549,7 @@ def main():
     except KeyboardInterrupt:
         print("\n\n[!] 使用者中斷執行")
         sys.exit(0)
-    except Exception as e:
+    except SCRAPER_RUNTIME_ERRORS as e:
         print(f"\n\n[X] 嚴重錯誤: {e}")
         import traceback
         traceback.print_exc()
