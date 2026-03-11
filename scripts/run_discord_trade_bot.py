@@ -82,7 +82,8 @@ def _help_text() -> str:
         f"{DISCORD_BOT_PREFIX}watchlist AAPL NVDA TSLA\n"
         f"{DISCORD_BOT_PREFIX}watchadd AAPL NVDA\n"
         f"{DISCORD_BOT_PREFIX}watchremove AAPL\n"
-        f"{DISCORD_BOT_PREFIX}watchsaved"
+        f"{DISCORD_BOT_PREFIX}watchsaved\n\n"
+        "手動成交後請立刻用 /buy、/add、/sell 回報，後續 engine 與 recap 才會沿用正確持倉狀態。"
     )
 
 
@@ -314,8 +315,18 @@ def main() -> int:
 
         save_positions(updated_df)
         append_trade_ledger(ledger_row)
+        refreshed = load_positions()
+        current = refreshed[refreshed["ticker"] == ticker.upper()]
+        if len(current) > 0:
+            position_row = current.iloc[0]
+            avg_cost = float(position_row.get("avg_cost", 0.0))
+            add_count = int(pd.to_numeric(position_row.get("add_count", 0), errors="coerce") or 0)
+        else:
+            avg_cost = float(ledger_row.get("avg_cost_after", 0.0))
+            add_count = 0
         await ctx.send(
-            f"已記錄 {side.upper()} {ticker.upper()} | qty={float(quantity):g} | price={float(price):.2f} | after_qty={float(ledger_row['after_qty']):g}"
+            f"已記錄 {side.upper()} {ticker.upper()} | qty={float(quantity):g} | price={float(price):.2f} | after_qty={float(ledger_row['after_qty']):g} | avg={avg_cost:.2f} | add_count={add_count}\n"
+            "後續 engine / recap 會直接沿用這個持倉狀態。"
         )
 
     @bot.hybrid_command(name="buy", description="記錄新的買進成交")

@@ -42,7 +42,16 @@ from config import (
     DISCORD_WEBHOOK_URL,
     GEMINI_API_KEY,
     GEMINI_MODEL,
+    INTRADAY_ADD_SIZE_FRACTION,
     INTRADAY_ACTIVE_TIMEZONE,
+    INTRADAY_ENTRY_MAX_RANK,
+    INTRADAY_ENTRY_MIN_API_SCORE,
+    INTRADAY_ENTRY_MIN_CONFIDENCE,
+    INTRADAY_ENTRY_SIZE_FRACTION,
+    INTRADAY_ENTRY_WINDOW_MINUTES,
+    INTRADAY_MAX_NEW_ENTRIES_PER_DAY,
+    INTRADAY_MAX_TOTAL_POSITIONS,
+    INTRADAY_REDUCE_SIZE_FRACTION,
     RECAP_BEDTIME_UTC_START_HOUR,
     RECAP_CONFLICT_NEWS_MAX_TICKERS,
     RECAP_EXECUTION_LOOKBACK_LIMIT,
@@ -91,6 +100,8 @@ REQUIRED_COLS = [
     "rank",
     "ticker",
     "short_score_final",
+    "confidence",
+    "api_final_score",
     "risk_level",
     "tech_status",
     "decision_tag",
@@ -188,6 +199,8 @@ def _load_decision_df(csv_path: Path) -> pd.DataFrame:
     out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
     out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
     out["short_score_final"] = pd.to_numeric(out["short_score_final"], errors="coerce")
+    out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
+    out["api_final_score"] = pd.to_numeric(out["api_final_score"], errors="coerce")
     out = out[out["ticker"] != ""].copy()
     out = out.dropna(subset=["rank"]).copy()
     out["rank"] = out["rank"].astype(int)
@@ -880,6 +893,8 @@ def _top_candidate_payload(df: pd.DataFrame, tv_map: Dict[str, object]) -> List[
                 "rank": _safe_int(row.get("rank"), 0),
                 "decision_tag": str(row.get("decision_tag", "")).strip().lower(),
                 "risk_level": str(row.get("risk_level", "")).strip(),
+                "confidence": _safe_float(row.get("confidence"), 0.0),
+                "api_final_score": _safe_float(row.get("api_final_score"), 0.0),
                 "reason_summary": _clip_text(row.get("reason_summary") or "", 120),
                 "catalyst_summary": _clip_text(row.get("catalyst_summary") or row.get("catalyst_type") or "", 120),
                 "tv": _fmt_tv_line(str(row.get("ticker", "")), tv_map),
@@ -919,6 +934,150 @@ def _position_payload(positions_df: pd.DataFrame) -> List[dict]:
             }
         )
     return out
+
+
+def _decision_allows_auto_entry(row: pd.Series | dict) -> bool:
+    row_data = row if isinstance(row, (pd.Series, dict)) else {}
+    rank_value = _safe_int(row_data.get("rank"), 9999)
+    if rank_value > max(1, int(INTRADAY_ENTRY_MAX_RANK)):
+        return False
+    if str(row_data.get("decision_tag", "")).strip().lower() != "keep":
+        return False
+    if str(row_data.get("risk_level", "")).strip() == "高":
+        return False
+    confidence = _safe_float(row_data.get("confidence"), 0.0)
+    api_score = _safe_float(row_data.get("api_final_score"), 0.0)
+    if float(INTRADAY_ENTRY_MIN_CONFIDENCE) > 0 and confidence > 0 and confidence < float(INTRADAY_ENTRY_MIN_CONFIDENCE):
+        return False
+    if float(INTRADAY_ENTRY_MIN_API_SCORE) > 0 and api_score > 0 and api_score < float(INTRADAY_ENTRY_MIN_API_SCORE):
+        return False
+    return True
+
+
+def _find_auto_entry_candidate(df: pd.DataFrame, positions_df: pd.DataFrame) -> Optional[dict]:
+    open_tickers = {
+        str(row.get("ticker", "")).strip().upper()
+        for _, row in positions_df.iterrows()
+        if _safe_float(row.get("quantity"), 0.0) > 0
+    }
+    for _, row in df.sort_values(["rank", "ticker"], ascending=[True, True]).iterrows():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker or ticker in open_tickers:
+            continue
+        if _decision_allows_auto_entry(row):
+            return row.to_dict()
+    return None
+
+
+def _strategy_conclusion_for_summary(item: dict) -> str:
+    ticker = str(item.get("ticker", "")).strip().upper() or "NA"
+    latest_action = str(item.get("latest_action", "")).strip().lower()
+    has_position = bool(item.get("has_position"))
+    if latest_action == "stop_loss" and has_position:
+        return f"{ticker}: 直接全出，這不是雜訊等級，屬於硬風控。"
+    if latest_action == "take_profit" and has_position:
+        return f"{ticker}: 先減碼 {int(round(float(INTRADAY_REDUCE_SIZE_FRACTION) * 100))}% ，主倉保留。"
+    if latest_action == "add" and has_position:
+        return f"{ticker}: 續抱為主，若首輪仍強才允許再加碼 {int(round(float(INTRADAY_ADD_SIZE_FRACTION) * 100))}% 。"
+    if has_position:
+        return f"{ticker}: 預設續抱，不因第一段分鐘雜訊直接出場。"
+    if latest_action in {"entry", "add"}:
+        return f"{ticker}: 僅在開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強才開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 新倉。"
+    return f"{ticker}: 先觀察，不主動追價。"
+
+
+def _build_morning_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
+    positions_df = recap_context.get("positions_df") if isinstance(recap_context.get("positions_df"), pd.DataFrame) else pd.DataFrame()
+    execution_summaries = recap_context.get("execution_summaries_full", []) if isinstance(recap_context, dict) else []
+    lines = ["自動策略結論:"]
+    used: set[str] = set()
+
+    for item in execution_summaries:
+        if not bool(item.get("has_position")):
+            continue
+        text = _strategy_conclusion_for_summary(item)
+        if text not in used:
+            used.add(text)
+            lines.append(f"- {text}")
+        if len(lines) >= 3:
+            break
+
+    if len(positions_df) < max(1, int(INTRADAY_MAX_TOTAL_POSITIONS)):
+        candidate = _find_auto_entry_candidate(df, positions_df)
+        if candidate is not None and len(lines) < 4:
+            ticker = str(candidate.get("ticker", "")).strip().upper()
+            lines.append(
+                f"- 今日新倉只看 {ticker}；若開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強，最多開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 基礎倉。"
+            )
+
+    if len(lines) == 1:
+        lines.append("- 今天預設空手，先等 opening recap 驗證。")
+    return lines[:4]
+
+
+def _build_opening_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
+    if not isinstance(recap_context, dict):
+        return []
+    if not recap_context.get("opening_has_data"):
+        return ["自動策略結論:", "- 開盤資料還不夠，現在先不動作，等下一輪 validation。"]
+
+    positions_df = recap_context.get("positions_df") if isinstance(recap_context.get("positions_df"), pd.DataFrame) else pd.DataFrame()
+    opening_summaries = recap_context.get("execution_summaries_full", [])
+    lines = ["自動策略結論:"]
+    used: set[str] = set()
+
+    for item in opening_summaries:
+        if not bool(item.get("has_position")):
+            continue
+        text = _strategy_conclusion_for_summary(item)
+        if text not in used:
+            used.add(text)
+            lines.append(f"- {text}")
+        if len(lines) >= 3:
+            break
+
+    if len(positions_df) < max(1, int(INTRADAY_MAX_TOTAL_POSITIONS)) and len(lines) < 4:
+        candidate = _find_auto_entry_candidate(df, positions_df)
+        if candidate is not None:
+            ticker = str(candidate.get("ticker", "")).strip().upper()
+            candidate_summary = next(
+                (item for item in opening_summaries if str(item.get("ticker", "")).strip().upper() == ticker),
+                None,
+            )
+            if candidate_summary is not None and str(candidate_summary.get("latest_action", "")).strip().lower() in {"entry", "add"}:
+                lines.append(
+                    f"- {ticker}: 開盤已確認續強，現在可開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 新倉；今日最多新增 {int(INTRADAY_MAX_NEW_ENTRIES_PER_DAY)} 檔。"
+                )
+
+    if len(lines) == 1:
+        lines.append("- 現在沒有新的自動執行條件，維持原部位與觀察清單。")
+    return lines[:4]
+
+
+def _bedtime_unique_candidate_plan_line(df: pd.DataFrame, positions_df: pd.DataFrame) -> str:
+    if len(positions_df) >= max(1, int(INTRADAY_MAX_TOTAL_POSITIONS)):
+        return "明天不開新倉，先處理既有持倉。"
+    candidate = _find_auto_entry_candidate(df, positions_df)
+    if candidate is None:
+        return "明天預設空手，沒有合格的唯一候選新倉。"
+    ticker = str(candidate.get("ticker", "")).strip().upper() or "NA"
+    return (
+        f"明天唯一候選新倉是 {ticker}；只有開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強，才開 "
+        f"{int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 基礎倉。"
+    )
+
+
+def _build_bedtime_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
+    positions_df = recap_context.get("positions_df") if isinstance(recap_context.get("positions_df"), pd.DataFrame) else pd.DataFrame()
+    lines = ["自動策略結論:"]
+    if len(positions_df) > 0:
+        lines.append("- 既有部位明天先交給 opening recap 驗證，不因隔夜雜訊預設全出。")
+    lines.append(f"- {_bedtime_unique_candidate_plan_line(df, positions_df)}")
+    return lines[:3]
+
+
+def build_morning_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
+    return _build_morning_strategy_lines(df, recap_context)
 
 
 def _expected_bias_from_summary(summary: Optional[dict]) -> str:
@@ -1203,6 +1362,13 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
     }
 
     ai_summary = _generate_recap_ai_summary(mode, payload)
+    if mode == "bedtime":
+        candidate_plan_line = _bedtime_unique_candidate_plan_line(df, positions_df)
+        if ai_summary:
+            existing_plan = ai_summary.get("opening_plan", []) if isinstance(ai_summary.get("opening_plan", []), list) else []
+            merged_plan = [candidate_plan_line]
+            merged_plan.extend(str(item).strip() for item in existing_plan if str(item).strip() and str(item).strip() != candidate_plan_line)
+            ai_summary["opening_plan"] = merged_plan[:3]
     if mode == "morning" and isinstance(morning_rule_ai_summary, dict) and morning_rule_ai_summary:
         if not ai_summary:
             ai_summary = morning_rule_ai_summary
@@ -1274,6 +1440,7 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
     payload["reference_context"] = reference_context
     payload["reference_plan_lines"] = reference_plan
     payload["validation_rows"] = validation_rows
+    payload["positions_df"] = positions_df
     payload["execution_summaries_full"] = opening_summaries
     return payload
 
@@ -1445,6 +1612,7 @@ def _build_top3_lines(df: pd.DataFrame) -> List[str]:
 
 def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_date: str, recap_context: dict) -> str:
     del _tv_map
+    strategy_lines = _build_bedtime_strategy_lines(df, recap_context)
     selected = df.head(3).copy()
     top1 = selected.iloc[0] if len(selected) > 0 else None
     prev_top1 = _load_previous_top1(title_date)
@@ -1465,6 +1633,10 @@ def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_d
         lines.append("No candidates available.")
         lines.append("")
 
+    if strategy_lines:
+        lines.extend(strategy_lines)
+        lines.append("")
+
     ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="明早先做")
     if ai_lines:
         lines.extend(ai_lines)
@@ -1474,7 +1646,7 @@ def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_d
 
 
 def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_date: str, recap_context: dict) -> str:
-    del _df
+    strategy_lines = _build_morning_strategy_lines(_df, recap_context)
     del _tv_map
     lines = [
         f"[Alpha Finder] 隔夜結論卡 {title_date}",
@@ -1486,6 +1658,10 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
         lines.extend(_build_reference_lines(prior_bedtime_lines, "延續昨晚待驗證"))
         lines.append("")
 
+    if strategy_lines:
+        lines.extend(strategy_lines)
+        lines.append("")
+
     ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="今日盤前計畫")
     if ai_lines:
         lines.extend(ai_lines)
@@ -1495,7 +1671,7 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
 
 
 def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_date: str, recap_context: dict) -> str:
-    del _df
+    strategy_lines = _build_opening_strategy_lines(_df, recap_context)
     del _tv_map
     lines = [
         f"[Alpha Finder] 開盤驗證結論卡 {title_date}",
@@ -1505,6 +1681,10 @@ def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     reference_plan = recap_context.get("reference_plan_lines", []) if isinstance(recap_context, dict) else []
     if reference_plan:
         lines.extend(_build_reference_lines(reference_plan, "待驗證計畫"))
+        lines.append("")
+
+    if strategy_lines:
+        lines.extend(strategy_lines)
         lines.append("")
 
     ai_lines = _build_ai_summary_lines(

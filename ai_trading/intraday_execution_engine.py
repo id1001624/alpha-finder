@@ -15,6 +15,7 @@ from turso_state import (
     STATE_KEY_INTRADAY_HEARTBEAT,
     STATE_KEY_INTRADAY_SNAPSHOT,
     append_execution_log_rows,
+    load_recent_trade_ledger,
     load_runtime_df,
     load_runtime_df_with_fallback,
     sync_runtime_df,
@@ -24,25 +25,37 @@ from turso_state import (
 from config import (
     DISCORD_WEBHOOK_URL,
     FINNHUB_API_KEY,
+    INTRADAY_ADD_MIN_AVWAP_BUFFER_PCT,
     INTRADAY_ADD_SIZE_FRACTION,
+    INTRADAY_AUTOMATION_MODE,
     INTRADAY_DATA_PROVIDER,
+    INTRADAY_ENTRY_MAX_RANK,
+    INTRADAY_ENTRY_MIN_API_SCORE,
+    INTRADAY_ENTRY_MIN_AVWAP_BUFFER_PCT,
+    INTRADAY_ENTRY_MIN_CONFIDENCE,
     INTRADAY_ENGINE_ENABLED,
     INTRADAY_ENTRY_SIZE_FRACTION,
+    INTRADAY_ENTRY_WINDOW_MINUTES,
     INTRADAY_FINNHUB_TIMEOUT_SEC,
+    INTRADAY_HARD_STOP_LOSS_PCT,
     INTRADAY_HEARTBEAT_ENABLED,
     INTRADAY_HEARTBEAT_INTERVAL_MINUTES,
     INTRADAY_INTERVAL,
     INTRADAY_MAX_ADD_COUNT,
+    INTRADAY_MAX_NEW_ENTRIES_PER_DAY,
+    INTRADAY_MAX_TOTAL_POSITIONS,
     INTRADAY_MAX_SYMBOLS,
     INTRADAY_MIN_ADD_PROFIT_PCT,
+    INTRADAY_NOISE_EXIT_GRACE_MINUTES,
+    INTRADAY_NO_REENTRY_SAME_DAY,
     INTRADAY_PERIOD,
     INTRADAY_PREPOST,
     INTRADAY_REDUCE_SIZE_FRACTION,
-    INTRADAY_STOP_LOSS_PCT,
     INTRADAY_TAKE_PROFIT_PCT,
     INTRADAY_TOP_N,
 )
 from .intraday_indicators import add_intraday_indicators
+from .market_session import get_intraday_active_window
 from .position_state import get_position, load_positions
 from .shadow_watchlist import load_shadow_decision_df
 
@@ -135,11 +148,27 @@ def _load_decision_df() -> pd.DataFrame:
     if len(df) == 0 or "ticker" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
-    for col in ["decision_date", "rank", "ticker", "decision_tag", "risk_level", "tech_status", "theme", "reason_summary"]:
+    for col in [
+        "decision_date",
+        "rank",
+        "ticker",
+        "decision_tag",
+        "risk_level",
+        "tech_status",
+        "theme",
+        "reason_summary",
+        "confidence",
+        "explosion_probability",
+        "api_final_score",
+        "research_mode",
+    ]:
         if col not in out.columns:
             out[col] = ""
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
     out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
+    out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
+    out["explosion_probability"] = pd.to_numeric(out["explosion_probability"], errors="coerce")
+    out["api_final_score"] = pd.to_numeric(out["api_final_score"], errors="coerce")
     out = out[out["ticker"] != ""].dropna(subset=["rank"]).copy()
     out["rank"] = out["rank"].astype(int)
     return out.sort_values(["rank", "ticker"], ascending=[True, True]).reset_index(drop=True)
@@ -214,6 +243,117 @@ def _position_effect(action: str) -> str:
     if action == "stop_loss":
         return "close"
     return "update"
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    parsed = pd.to_numeric(value, errors="coerce")
+    if pd.isna(parsed):
+        return default
+    return float(parsed)
+
+
+def _coerce_utc_timestamp(value: object) -> Optional[pd.Timestamp]:
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        return None
+    return parsed
+
+
+def _load_recent_trade_df(limit: int = 240) -> pd.DataFrame:
+    df = load_recent_trade_ledger(limit=max(20, int(limit)))
+    if len(df) == 0:
+        return pd.DataFrame()
+    out = df.copy()
+    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    out["side"] = out["side"].astype(str).str.strip().str.lower()
+    out["position_effect"] = out["position_effect"].astype(str).str.strip().str.lower()
+    out["recorded_at_ts"] = pd.to_datetime(out["recorded_at"], errors="coerce", utc=True)
+    return out
+
+
+def _filter_trade_df_for_session(df: pd.DataFrame, start_utc: pd.Timestamp, end_utc: pd.Timestamp) -> pd.DataFrame:
+    if len(df) == 0:
+        return df.copy()
+    out = df.copy()
+    mask = out["recorded_at_ts"].notna()
+    mask &= out["recorded_at_ts"] >= start_utc
+    mask &= out["recorded_at_ts"] <= end_utc
+    return out[mask].copy().reset_index(drop=True)
+
+
+def _count_open_positions(positions_df: pd.DataFrame) -> int:
+    if len(positions_df) == 0:
+        return 0
+    return int((pd.to_numeric(positions_df["quantity"], errors="coerce").fillna(0.0) > 0).sum())
+
+
+def _count_new_entries_today(trade_df: pd.DataFrame) -> int:
+    if len(trade_df) == 0:
+        return 0
+    return int(trade_df.loc[trade_df["position_effect"] == "open", "ticker"].nunique())
+
+
+def _ticker_has_trade_today(trade_df: pd.DataFrame, ticker: str) -> bool:
+    if len(trade_df) == 0:
+        return False
+    return bool((trade_df["ticker"] == str(ticker).strip().upper()).any())
+
+
+def _latest_buy_fill_ts(trade_df: pd.DataFrame, ticker: str) -> Optional[pd.Timestamp]:
+    if len(trade_df) == 0:
+        return None
+    rows = trade_df[
+        (trade_df["ticker"] == str(ticker).strip().upper())
+        & trade_df["side"].isin({"buy", "add"})
+    ]["recorded_at_ts"]
+    if len(rows) == 0:
+        return None
+    latest = rows.max()
+    return latest if isinstance(latest, pd.Timestamp) and not pd.isna(latest) else None
+
+
+def _decision_allows_entry(meta: pd.Series) -> bool:
+    if str(INTRADAY_AUTOMATION_MODE or "").strip().lower() != "monster_swing":
+        return True
+    if str(meta.get("decision_tag", "")).strip().lower() != "keep":
+        return False
+    rank_value = int(pd.to_numeric(meta.get("rank"), errors="coerce") or 9999)
+    if rank_value > max(1, int(INTRADAY_ENTRY_MAX_RANK)):
+        return False
+    if str(meta.get("risk_level", "")).strip() == "高":
+        return False
+    confidence = _safe_float(meta.get("confidence"), 0.0)
+    api_score = _safe_float(meta.get("api_final_score"), 0.0)
+    if float(INTRADAY_ENTRY_MIN_CONFIDENCE) > 0 and confidence > 0 and confidence < float(INTRADAY_ENTRY_MIN_CONFIDENCE):
+        return False
+    if float(INTRADAY_ENTRY_MIN_API_SCORE) > 0 and api_score > 0 and api_score < float(INTRADAY_ENTRY_MIN_API_SCORE):
+        return False
+    return True
+
+
+def _is_within_entry_window(signal_ts: Optional[pd.Timestamp], session_context: Dict[str, object]) -> bool:
+    if signal_ts is None:
+        return False
+    market_open_utc = session_context.get("market_open_utc")
+    if not isinstance(market_open_utc, datetime):
+        return False
+    entry_deadline_utc = pd.Timestamp(market_open_utc + pd.Timedelta(minutes=max(1, int(INTRADAY_ENTRY_WINDOW_MINUTES))))
+    return pd.Timestamp(market_open_utc) <= signal_ts <= entry_deadline_utc
+
+
+def _is_in_noise_exit_grace(signal_ts: Optional[pd.Timestamp], last_fill_ts: Optional[pd.Timestamp]) -> bool:
+    if signal_ts is None or last_fill_ts is None:
+        return False
+    elapsed_minutes = (signal_ts - last_fill_ts).total_seconds() / 60.0
+    return 0 <= elapsed_minutes < max(0, int(INTRADAY_NOISE_EXIT_GRACE_MINUTES))
+
+
+def decision_allows_entry(meta: pd.Series) -> bool:
+    return _decision_allows_entry(meta)
+
+
+def is_in_noise_exit_grace(signal_ts: Optional[pd.Timestamp], last_fill_ts: Optional[pd.Timestamp]) -> bool:
+    return _is_in_noise_exit_grace(signal_ts, last_fill_ts)
 
 
 def _normalize_date_time(ts_value: object, fallback_ts: str) -> tuple[str, str]:
@@ -475,44 +615,77 @@ def _fetch_intraday_bars(ticker: str, period: str, interval: str, prepost: bool)
 
 def _build_reason(action: str) -> str:
     reasons = {
-        "entry": "動能剛轉強並重新站上主力防線，適合買進。",
-        "add": "既有部位續強且動能抬升，適合小幅加碼。",
-        "take_profit": "部位已有利潤且動能開始放緩，適合先賣一部分。",
-        "stop_loss": "價格失守主力防線且動能轉弱，適合全出或快速降風險。",
+        "entry": "只做高信心主選股；開盤首小時確認續強後，適合先開基礎倉。",
+        "add": "既有部位已浮盈且續強，允許單次小幅加碼。",
+        "take_profit": "先減碼一半保留主倉，避免被分鐘雜訊整筆洗掉。",
+        "stop_loss": "已觸發硬停損或結構明顯失效，這時候才考慮全出。",
     }
     return reasons.get(action, "")
 
 
-def _classify_action(latest: pd.Series, previous: pd.Series, position: Optional[pd.Series]) -> tuple[str, float, str]:
+def _classify_action(
+    latest: pd.Series,
+    previous: pd.Series,
+    position: Optional[pd.Series],
+    meta: pd.Series,
+    session_context: Dict[str, object],
+    trade_df: pd.DataFrame,
+    open_position_count: int,
+    planned_entry_count: int,
+    new_entries_today: int,
+) -> tuple[str, float, str]:
     close_val = float(pd.to_numeric(latest.get("Close"), errors="coerce"))
     avwap = float(pd.to_numeric(latest.get("dynamic_avwap"), errors="coerce"))
     hist = float(pd.to_numeric(latest.get("sqzmom_hist"), errors="coerce"))
     prev_hist = float(pd.to_numeric(previous.get("sqzmom_hist"), errors="coerce")) if previous is not None else hist
     sqz_release = bool(latest.get("sqz_release", False))
     color = str(latest.get("sqzmom_color", "")).strip().lower()
+    signal_ts = _coerce_utc_timestamp(latest.get("Datetime"))
 
     if pd.isna(close_val) or pd.isna(avwap) or pd.isna(hist):
         return "", 0.0, ""
 
     if position is None or float(position.get("quantity", 0.0)) <= 0:
-        if sqz_release and hist > 0 and close_val > avwap:
+        if not _decision_allows_entry(meta):
+            return "", 0.0, ""
+        if open_position_count + planned_entry_count >= max(1, int(INTRADAY_MAX_TOTAL_POSITIONS)):
+            return "", 0.0, ""
+        if new_entries_today + planned_entry_count >= max(1, int(INTRADAY_MAX_NEW_ENTRIES_PER_DAY)):
+            return "", 0.0, ""
+        if not _is_within_entry_window(signal_ts, session_context):
+            return "", 0.0, ""
+        if INTRADAY_NO_REENTRY_SAME_DAY and _ticker_has_trade_today(trade_df, str(meta.get("ticker", ""))):
+            return "", 0.0, ""
+        if (
+            sqz_release
+            and hist > 0
+            and hist > prev_hist
+            and close_val >= avwap * (1.0 + (float(INTRADAY_ENTRY_MIN_AVWAP_BUFFER_PCT) / 100.0))
+            and color in {"lime", "green"}
+        ):
             return "entry", INTRADAY_ENTRY_SIZE_FRACTION, _build_reason("entry")
         return "", 0.0, ""
 
     avg_cost = float(position.get("avg_cost", 0.0))
     add_count = int(pd.to_numeric(position.get("add_count", 0), errors="coerce"))
     unrealized_pct = ((close_val / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
+    last_fill_ts = _latest_buy_fill_ts(trade_df, str(meta.get("ticker", "")))
+    in_noise_grace = _is_in_noise_exit_grace(signal_ts, last_fill_ts)
 
-    if unrealized_pct <= INTRADAY_STOP_LOSS_PCT or (close_val < avwap and hist < 0 and color in {"red", "maroon"}):
+    if unrealized_pct <= float(INTRADAY_HARD_STOP_LOSS_PCT):
         return "stop_loss", 1.0, _build_reason("stop_loss")
 
     if unrealized_pct >= INTRADAY_TAKE_PROFIT_PCT and hist < prev_hist:
         return "take_profit", INTRADAY_REDUCE_SIZE_FRACTION, _build_reason("take_profit")
 
+    if not in_noise_grace and close_val < avwap and hist < 0 and color in {"red", "maroon"}:
+        return "take_profit", INTRADAY_REDUCE_SIZE_FRACTION, _build_reason("take_profit")
+
     if (
         add_count < INTRADAY_MAX_ADD_COUNT
         and unrealized_pct >= INTRADAY_MIN_ADD_PROFIT_PCT
-        and close_val >= avwap * 1.003
+        and _is_within_entry_window(signal_ts, session_context)
+        and close_val >= avwap * (1.0 + (float(INTRADAY_ADD_MIN_AVWAP_BUFFER_PCT) / 100.0))
         and hist > 0
         and hist > prev_hist
         and color in {"lime", "green"}
@@ -530,7 +703,7 @@ def _format_user_line(row: dict) -> str:
     action_map = {
         "entry": "適合買",
         "add": "可加碼",
-        "take_profit": "適合先賣一部分",
+        "take_profit": "先減碼",
         "stop_loss": "適合全出",
     }
     qty_part = ""
@@ -559,6 +732,14 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         return {"ok": False, "reason": "no_watchlist"}
 
     positions_df = load_positions()
+    session_context = get_intraday_active_window(datetime.now(timezone.utc))
+    trade_df = _load_recent_trade_df(limit=240)
+    market_open_utc = pd.Timestamp(session_context.get("market_open_utc") or datetime.now(timezone.utc))
+    active_end_utc = pd.Timestamp(session_context.get("active_end_utc") or datetime.now(timezone.utc))
+    session_trade_df = _filter_trade_df_for_session(trade_df, market_open_utc, active_end_utc)
+    open_position_count = _count_open_positions(positions_df)
+    new_entries_today = _count_new_entries_today(session_trade_df)
+    planned_entry_count = 0
     state = _load_state()
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -583,7 +764,17 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         latest = valid.iloc[-1]
         previous = valid.iloc[-2]
         position = get_position(positions_df, ticker)
-        action, size_fraction, reason = _classify_action(latest, previous, position)
+        action, size_fraction, reason = _classify_action(
+            latest,
+            previous,
+            position,
+            meta,
+            session_context,
+            session_trade_df,
+            open_position_count,
+            planned_entry_count,
+            new_entries_today,
+        )
 
         snapshot_rows.append(
             {
@@ -602,6 +793,8 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                 "has_position": bool(position is not None and float(position.get("quantity", 0.0)) > 0),
                 "position_qty": float(position.get("quantity", 0.0)) if position is not None else 0.0,
                 "avg_cost": float(position.get("avg_cost", 0.0)) if position is not None else 0.0,
+                "confidence": _safe_float(meta.get("confidence"), 0.0),
+                "api_final_score": _safe_float(meta.get("api_final_score"), 0.0),
                 "action": action,
                 "size_fraction": size_fraction,
                 "reason_summary": reason,
@@ -641,6 +834,8 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         }
         action_rows.append(action_row)
         state_updates[ticker] = signature
+        if action == "entry":
+            planned_entry_count += 1
         execution_rows.append(
             {
                 "recorded_at": now_ts,
