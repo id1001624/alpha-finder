@@ -2,6 +2,7 @@ from ai_trading import watchlist_brief as wb
 
 
 def test_load_all_saved_watchlist_tickers_merges_users_by_recent_update(monkeypatch):
+    monkeypatch.setattr(wb, "load_all_saved_watchlist_states", wb.pd.DataFrame)
     monkeypatch.setattr(
         wb,
         "_load_watchlist_store",
@@ -14,6 +15,26 @@ def test_load_all_saved_watchlist_tickers_merges_users_by_recent_update(monkeypa
     )
 
     assert wb.load_all_saved_watchlist_tickers() == ["LITE", "AAOI", "NVDA"]
+
+
+def test_load_saved_watchlist_prefers_shared_state(monkeypatch):
+    monkeypatch.setattr(wb, "load_saved_watchlist_state", lambda user_id: ["AAOI", "NVDA"])
+
+    assert wb.load_saved_watchlist("123") == ["AAOI", "NVDA"]
+
+
+def test_load_saved_watchlist_fallback_syncs_local_to_shared(monkeypatch):
+    synced = []
+    monkeypatch.setattr(wb, "load_saved_watchlist_state", lambda user_id: None)
+    monkeypatch.setattr(
+        wb,
+        "_load_watchlist_store",
+        lambda: {"users": {"123": {"tickers": ["CRDU", "MULL"], "updated_at": "2026-03-12 00:30:00"}}},
+    )
+    monkeypatch.setattr(wb, "_sync_saved_watchlist_to_shared", lambda user_id, tickers, updated_at="": synced.append((user_id, tickers, updated_at)))
+
+    assert wb.load_saved_watchlist("123") == ["CRDU", "MULL"]
+    assert synced == [("123", ["CRDU", "MULL"], "2026-03-12 00:30:00")]
 
 
 def test_fallback_saved_watchlist_followup_summary_marks_reentry_and_risk():

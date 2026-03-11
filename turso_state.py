@@ -26,6 +26,7 @@ STATE_KEY_INTRADAY_SNAPSHOT = "intraday_snapshot_latest"
 STATE_SOURCE_PREFIX = "turso://runtime_state_latest/"
 TRADE_LEDGER_SOURCE_PREFIX = "turso://position_trade_log/"
 EXECUTION_LOG_SOURCE_PREFIX = "turso://execution_trade_log/"
+SAVED_WATCHLIST_SOURCE_PREFIX = "turso://saved_watchlists/"
 
 TRADE_LEDGER_FIELDS = [
     "recorded_at",
@@ -205,6 +206,18 @@ def _ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_execution_trade_log_lookup ON execution_trade_log(execution_date, execution_time, ticker)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_watchlists (
+            user_id TEXT PRIMARY KEY,
+            tickers_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saved_watchlists_updated_at ON saved_watchlists(updated_at)"
+    )
     conn.commit()
 
 
@@ -258,6 +271,10 @@ def trade_ledger_source_label(event_id: str) -> str:
 
 def execution_log_source_label(event_id: str) -> str:
     return f"{EXECUTION_LOG_SOURCE_PREFIX}{event_id}"
+
+
+def saved_watchlist_source_label(user_id: str) -> str:
+    return f"{SAVED_WATCHLIST_SOURCE_PREFIX}{str(user_id or '').strip()}"
 
 
 def _normalize_execution_row(row: dict) -> dict:
@@ -657,3 +674,68 @@ def load_recent_execution_log(limit: int = 5, ticker: str = "") -> pd.DataFrame:
         """,
         (limit_value,),
     )
+
+
+def load_saved_watchlist_state(user_id: int | str) -> list[str] | None:
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT tickers_json FROM saved_watchlists WHERE user_id = ?",
+            (str(user_id),),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        _safe_close(conn)
+
+    if not row:
+        return None
+
+    tickers_json = row[0] if isinstance(row, tuple) else row["tickers_json"]
+    try:
+        parsed = json.loads(str(tickers_json or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item or "").strip() for item in parsed if str(item or "").strip()]
+
+
+def load_all_saved_watchlist_states() -> pd.DataFrame:
+    return _load_query_df(
+        """
+        SELECT user_id, tickers_json, updated_at
+        FROM saved_watchlists
+        ORDER BY updated_at DESC, user_id ASC
+        """
+    )
+
+
+def sync_saved_watchlist_state(user_id: int | str, tickers: list[str], updated_at: str = "") -> str | None:
+    conn = _connect()
+    if conn is None:
+        return None
+    normalized = [str(item or "").strip().upper() for item in tickers if str(item or "").strip()]
+    payload = json.dumps(normalized, ensure_ascii=False)
+    updated_text = str(updated_at or "").strip() or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn.execute(
+            """
+            INSERT INTO saved_watchlists (user_id, tickers_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                tickers_json = excluded.tickers_json,
+                updated_at = excluded.updated_at
+            """,
+            (str(user_id), payload, updated_text),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        _safe_rollback(conn)
+        logger.warning("sync_saved_watchlist_state failed for %s", user_id)
+        return None
+    finally:
+        _safe_close(conn)
+    return saved_watchlist_source_label(str(user_id))

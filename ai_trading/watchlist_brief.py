@@ -25,7 +25,14 @@ from config import (
     TAVILY_API_KEY,
 )
 from signal_store import get_latest_signals
-from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log, load_runtime_df_with_fallback
+from turso_state import (
+    STATE_KEY_AI_DECISION_LATEST,
+    load_all_saved_watchlist_states,
+    load_recent_execution_log,
+    load_runtime_df_with_fallback,
+    load_saved_watchlist_state,
+    sync_saved_watchlist_state,
+)
 
 from .intraday_execution_engine import AI_DECISION_LATEST, SNAPSHOT_FILE, _classify_action, _fetch_intraday_bars
 from .intraday_indicators import add_intraday_indicators
@@ -144,13 +151,43 @@ def _save_watchlist_store(data: dict) -> None:
     WATCHLIST_STORE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _sync_saved_watchlist_to_shared(user_id: int | str, tickers: List[str], updated_at: str = "") -> None:
+    sync_saved_watchlist_state(user_id, tickers, updated_at=updated_at)
+
+
+def _sync_local_store_to_shared_if_needed() -> None:
+    shared_df = load_all_saved_watchlist_states()
+    if len(shared_df) > 0:
+        return
+    store = _load_watchlist_store()
+    users = store.get("users", {}) if isinstance(store, dict) else {}
+    if not isinstance(users, dict):
+        return
+    for user_id, entry in users.items():
+        if not isinstance(entry, dict):
+            continue
+        tickers = entry.get("tickers", [])
+        if not isinstance(tickers, list):
+            continue
+        parsed = _parse_tickers(" ".join(str(item) for item in tickers), limit=MAX_TRACKED_TICKERS)
+        updated_at = str(entry.get("updated_at", "")).strip()
+        _sync_saved_watchlist_to_shared(user_id, parsed, updated_at=updated_at)
+
+
 def load_saved_watchlist(user_id: int | str) -> List[str]:
+    shared = load_saved_watchlist_state(user_id)
+    if shared is not None:
+        return _parse_tickers(" ".join(str(item) for item in shared), limit=MAX_TRACKED_TICKERS)
+
     store = _load_watchlist_store()
     entry = store.get("users", {}).get(str(user_id), {})
     tickers = entry.get("tickers", []) if isinstance(entry, dict) else []
     if not isinstance(tickers, list):
         return []
-    return _parse_tickers(" ".join(str(item) for item in tickers), limit=MAX_TRACKED_TICKERS)
+    parsed = _parse_tickers(" ".join(str(item) for item in tickers), limit=MAX_TRACKED_TICKERS)
+    if parsed:
+        _sync_saved_watchlist_to_shared(user_id, parsed, updated_at=str(entry.get("updated_at", "")).strip())
+    return parsed
 
 
 def add_saved_watchlist_tickers(user_id: int | str, raw_tickers: str) -> List[str]:
@@ -164,11 +201,13 @@ def add_saved_watchlist_tickers(user_id: int | str, raw_tickers: str) -> List[st
             merged.append(ticker)
     merged = merged[:MAX_TRACKED_TICKERS]
     store = _load_watchlist_store()
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     store.setdefault("users", {})[str(user_id)] = {
         "tickers": merged,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": updated_at,
     }
     _save_watchlist_store(store)
+    _sync_saved_watchlist_to_shared(user_id, merged, updated_at=updated_at)
     return merged
 
 
@@ -179,33 +218,55 @@ def remove_saved_watchlist_tickers(user_id: int | str, raw_tickers: str) -> List
     current = load_saved_watchlist(user_id)
     remaining = [ticker for ticker in current if ticker not in removals]
     store = _load_watchlist_store()
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     store.setdefault("users", {})[str(user_id)] = {
         "tickers": remaining,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": updated_at,
     }
     _save_watchlist_store(store)
+    _sync_saved_watchlist_to_shared(user_id, remaining, updated_at=updated_at)
     return remaining
 
 
 def load_all_saved_watchlist_tickers(limit: int = MAX_TRACKED_TICKERS) -> List[str]:
-    store = _load_watchlist_store()
-    users = store.get("users", {})
-    if not isinstance(users, dict):
-        return []
-
     ordered_entries: List[tuple[str, List[str]]] = []
-    for entry in users.values():
-        if not isinstance(entry, dict):
-            continue
-        tickers = entry.get("tickers", [])
-        if not isinstance(tickers, list):
-            continue
-        ordered_entries.append(
-            (
-                str(entry.get("updated_at", "")).strip(),
-                [str(item or "").strip() for item in tickers],
+    shared_df = load_all_saved_watchlist_states()
+    if len(shared_df) == 0:
+        _sync_local_store_to_shared_if_needed()
+        shared_df = load_all_saved_watchlist_states()
+
+    if len(shared_df) > 0:
+        for _, row in shared_df.iterrows():
+            tickers_json = str(row.get("tickers_json", "[]"))
+            try:
+                tickers = json.loads(tickers_json)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                tickers = []
+            if not isinstance(tickers, list):
+                tickers = []
+            ordered_entries.append(
+                (
+                    str(row.get("updated_at", "")).strip(),
+                    [str(item or "").strip() for item in tickers],
+                )
             )
-        )
+    else:
+        store = _load_watchlist_store()
+        users = store.get("users", {})
+        if not isinstance(users, dict):
+            return []
+        for entry in users.values():
+            if not isinstance(entry, dict):
+                continue
+            tickers = entry.get("tickers", [])
+            if not isinstance(tickers, list):
+                continue
+            ordered_entries.append(
+                (
+                    str(entry.get("updated_at", "")).strip(),
+                    [str(item or "").strip() for item in tickers],
+                )
+            )
 
     ordered_entries.sort(key=lambda item: item[0], reverse=True)
     merged: List[str] = []

@@ -74,6 +74,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - `/watchremove`: 從你的保存關注股移除 ticker
 - `/watchsaved`: 看你目前保存的關注股清單
 - 保存關注股會進入獨立的 watchlist follow-up recap，只做續強 / 再進場觀察提醒，不會混進正式 auto-trade 新倉決策
+- `/watchadd` 保存清單現在會同步到共享狀態，讓 Discord bot 與 GitHub Actions follow-up workflow 讀到同一份名單
 
 推薦實際用法：
 
