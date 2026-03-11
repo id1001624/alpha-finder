@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -21,10 +22,16 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
     alert_dir.mkdir(parents=True, exist_ok=True)
     init_signal_store(str(signal_db))
 
+    # Use dynamic timestamps so the signal is always "fresh" regardless of when CI runs
+    now_utc = datetime.now(timezone.utc)
+    signal_ts = (now_utc - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    received_at = (now_utc - timedelta(minutes=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today_str = now_utc.strftime("%Y-%m-%d")
+
     pd.DataFrame(
         [
             {
-                "decision_date": "2026-03-09",
+                "decision_date": today_str,
                 "rank": 1,
                 "ticker": "AAPL",
                 "decision_tag": "keep",
@@ -42,7 +49,7 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
             "symbol": "AAPL",
             "exchange": "NASDAQ",
             "timeframe": "5",
-            "ts": "2026-03-09T14:35:00Z",
+            "ts": signal_ts,
             "close": 188.25,
             "vwap": 187.9,
             "sqzmom_value": 0.32,
@@ -50,7 +57,7 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
             "event": "entry",
         },
         signature="sig-1",
-        received_at="2026-03-09T14:35:05Z",
+        received_at=received_at,
     )
     upsert_signal_event(str(signal_db), event)
 
@@ -77,7 +84,9 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
     assert execution_df.loc[0, "position_effect"] == "open"
     assert str(execution_df.loc[0, "timeframe"]) == "5"
 
-    daily_df = pd.read_csv(daily_dir / "2026-03-09_execution_trade.csv", encoding="utf-8-sig")
+    daily_csv = sorted(daily_dir.glob("*_execution_trade.csv"))
+    assert len(daily_csv) == 1
+    daily_df = pd.read_csv(daily_csv[0], encoding="utf-8-sig")
     assert len(daily_df) == 1
 
     monkeypatch.setattr(sys, "argv", ["push_tradingview_execution_alerts.py", "--top-n", "5"])

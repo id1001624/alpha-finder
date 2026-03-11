@@ -1,0 +1,46 @@
+name: Discord Opening Recap
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '38 13 * * 1-5'
+    - cron: '38 14 * * 1-5'
+
+concurrency:
+  group: discord-opening-recap
+  cancel-in-progress: false
+
+jobs:
+  opening-recap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      TURSO_ENABLED: "true"
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      INTRADAY_ACTIVE_TIMEZONE: Asia/Taipei
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Send opening recap
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python scripts/push_alerts_from_ai_decision.py --auto-latest --channel discord --mode opening
+          else
+            python scripts/push_alerts_from_ai_decision.py --auto-latest --channel discord --mode opening --respect-mode-window
+          fi

@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
+from ai_trading.watchlist_brief import build_watchlist_brief_message
 from config import (
     DISCORD_BOT_ALLOWED_CHANNEL_IDS,
     DISCORD_BOT_ENABLED,
@@ -55,7 +56,8 @@ def _help_text() -> str:
         "/positions\n"
         "/position ticker\n"
         "/trades [ticker] [limit]\n"
-        "/executions [ticker] [limit]\n\n"
+        "/executions [ticker] [limit]\n"
+        "/watchlist tickers\n\n"
         "也保留文字指令相容:\n"
         f"{DISCORD_BOT_PREFIX}buy AAPL 100 188.2\n"
         f"{DISCORD_BOT_PREFIX}add AAPL 50 190.1\n"
@@ -63,8 +65,28 @@ def _help_text() -> str:
         f"{DISCORD_BOT_PREFIX}positions\n"
         f"{DISCORD_BOT_PREFIX}position AAPL\n"
         f"{DISCORD_BOT_PREFIX}trades AAPL 5\n"
-        f"{DISCORD_BOT_PREFIX}executions AAPL 5"
+        f"{DISCORD_BOT_PREFIX}executions AAPL 5\n"
+        f"{DISCORD_BOT_PREFIX}watchlist AAPL NVDA TSLA"
     )
+
+
+def _split_chunks(text: str, limit: int = 1800) -> list[str]:
+    chunks: list[str] = []
+    remaining = str(text or "")
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _send_long_message(ctx, text: str) -> None:
+    for chunk in _split_chunks(text):
+        await ctx.send(chunk)
 
 
 def _format_recent_trades(ticker: str = "", limit: int = 5) -> str:
@@ -196,6 +218,20 @@ def main() -> int:
             return
         limit_value = max(1, min(int(limit), 20))
         await ctx.send(_format_recent_executions(ticker=ticker, limit=limit_value))
+
+    @bot.hybrid_command(name="watchlist", description="分析自選關注股，整理盤前新聞、engine 訊號與優先順序")
+    @app_commands.describe(tickers="以空白或逗號分隔股票代號，例如 AAPL NVDA TSLA")
+    async def watchlist(ctx, *, tickers: str):
+        if not await _guard_channel(ctx):
+            return
+        if getattr(ctx, "interaction", None) is not None:
+            await ctx.defer()
+        try:
+            message = build_watchlist_brief_message(tickers)
+        except ValueError as exc:
+            await ctx.send(f"指令失敗: {exc}")
+            return
+        await _send_long_message(ctx, message)
 
     async def _record_trade(ctx, side: str, ticker: str, quantity: float, price: float, note: str = ""):
         if not await _guard_channel(ctx):

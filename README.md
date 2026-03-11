@@ -57,6 +57,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - /position
 - /trades
 - /executions
+- /watchlist
 - /buy
 - /add
 - /sell
@@ -65,6 +66,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 - `/trades`: 查你透過 Discord 回報過的真實成交紀錄，來源是 Turso 的 `position_trade_log`
 - `/executions`: 查 engine 或 TradingView execution 流程產生的執行歷史，來源是 Turso 的 `execution_trade_log`
+- `/watchlist`: 輸入你自己關注的 ticker 清單，盤前用 Tavily 新聞、最新 execution / TV 訊號與 Gemini 幫你整理風險、優先順序與先看哪幾檔
 
 推薦實際用法：
 
@@ -83,6 +85,18 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 ```
 
 1. 系統之後會根據目前持倉與盤中訊號繼續提醒你
+
+如果你想臨時分析自己的關注股，不用改主 watchlist，直接：
+
+```text
+/watchlist AAPL NVDA TSLA
+```
+
+它會用最新可用的盤前新聞、engine 指標與 execution 脈絡，幫你整理：
+
+- 哪些先處理風險
+- 如果很多都偏多，誰最優先開圖或考慮
+- 盤前第一輪先做什麼
 
 補充：
 
@@ -115,7 +129,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 現在的正式主流程是 GitHub Actions 雲端排程加上 Turso 狀態儲存，不是本機夜間排程：
 
 - repo 內有獨立的 intraday monitor workflow
-- 也有對應的 bedtime recap 與 morning recap workflows
+- 也有對應的 bedtime recap、opening recap 與 morning recap workflows
 - 排程採用偏移分鐘，不用整點附近的 0,5,10
 - workflow 會跑在 default branch 最新 commit，不會讀你本機未提交檔案
 - GitHub Actions 與 Discord bot 現在都優先讀 Turso
