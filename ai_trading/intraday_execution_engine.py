@@ -13,6 +13,7 @@ import yfinance as yf
 from turso_state import (
     STATE_KEY_AI_DECISION_LATEST,
     STATE_KEY_INTRADAY_HEARTBEAT,
+    STATE_KEY_INTRADAY_SNAPSHOT,
     append_execution_log_rows,
     load_runtime_df,
     load_runtime_df_with_fallback,
@@ -670,7 +671,9 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
 
     if snapshot_rows:
         INTRADAY_DIR.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(snapshot_rows).to_csv(SNAPSHOT_FILE, index=False, encoding="utf-8-sig")
+        snapshot_df = pd.DataFrame(snapshot_rows)
+        snapshot_df.to_csv(SNAPSHOT_FILE, index=False, encoding="utf-8-sig")
+        sync_runtime_df(STATE_KEY_INTRADAY_SNAPSHOT, snapshot_df, source_name="intraday_snapshot")
 
     if action_rows and not dry_run:
         _append_action_log(action_rows)
