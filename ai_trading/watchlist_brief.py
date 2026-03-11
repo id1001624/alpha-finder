@@ -187,6 +187,39 @@ def remove_saved_watchlist_tickers(user_id: int | str, raw_tickers: str) -> List
     return remaining
 
 
+def load_all_saved_watchlist_tickers(limit: int = MAX_TRACKED_TICKERS) -> List[str]:
+    store = _load_watchlist_store()
+    users = store.get("users", {})
+    if not isinstance(users, dict):
+        return []
+
+    ordered_entries: List[tuple[str, List[str]]] = []
+    for entry in users.values():
+        if not isinstance(entry, dict):
+            continue
+        tickers = entry.get("tickers", [])
+        if not isinstance(tickers, list):
+            continue
+        ordered_entries.append(
+            (
+                str(entry.get("updated_at", "")).strip(),
+                [str(item or "").strip() for item in tickers],
+            )
+        )
+
+    ordered_entries.sort(key=lambda item: item[0], reverse=True)
+    merged: List[str] = []
+    for _, raw_tickers in ordered_entries:
+        parsed = _parse_tickers(" ".join(raw_tickers), limit=limit)
+        for ticker in parsed:
+            if ticker in merged:
+                continue
+            merged.append(ticker)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 def format_saved_watchlist_message(user_id: int | str) -> str:
     tickers = load_saved_watchlist(user_id)
     if not tickers:
@@ -195,6 +228,13 @@ def format_saved_watchlist_message(user_id: int | str) -> str:
     for ticker in tickers:
         lines.append(f"- {ticker}")
     return "\n".join(lines)
+
+
+def _count_open_positions(positions_df: pd.DataFrame) -> int:
+    if len(positions_df) == 0 or "quantity" not in positions_df.columns:
+        return 0
+    qty = pd.to_numeric(positions_df["quantity"], errors="coerce").fillna(0.0)
+    return int((qty > 0).sum())
 
 
 def _load_decision_df() -> pd.DataFrame:
@@ -321,7 +361,7 @@ def _build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
     }
 
 
-def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame) -> dict:
+def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision: dict | None = None) -> dict:
     bars = _fetch_intraday_bars(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, True)
     if len(bars) < 60:
         return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認"}
@@ -338,7 +378,28 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame) -> dict:
         return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認", "signal_ts": signal_ts}
 
     position = get_position(positions_df, ticker)
-    action, size_fraction, reason = _classify_action(latest, previous, position)
+    meta = pd.Series(
+        {
+            "ticker": ticker,
+            "rank": (decision or {}).get("rank", 9999),
+            "decision_tag": str((decision or {}).get("decision_tag", "")).strip().lower(),
+            "risk_level": str((decision or {}).get("risk_level", "")).strip(),
+            "confidence": pd.to_numeric((decision or {}).get("confidence"), errors="coerce"),
+            "api_final_score": pd.to_numeric((decision or {}).get("api_final_score"), errors="coerce"),
+        }
+    )
+    session_context = get_intraday_active_window(datetime.now(timezone.utc))
+    action, size_fraction, reason = _classify_action(
+        latest,
+        previous,
+        position,
+        meta,
+        session_context,
+        pd.DataFrame(),
+        _count_open_positions(positions_df),
+        0,
+        0,
+    )
     return {
         "ticker": ticker,
         "has_data": True,
@@ -355,11 +416,11 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame) -> dict:
     }
 
 
-def _build_engine_payload(ticker: str, positions_df: pd.DataFrame, snapshot_map: Dict[str, dict]) -> dict:
+def _build_engine_payload(ticker: str, positions_df: pd.DataFrame, snapshot_map: Dict[str, dict], decision: dict | None = None) -> dict:
     snapshot_row = snapshot_map.get(ticker)
     if snapshot_row is not None and _is_current_engine_signal(snapshot_row.get("signal_ts")):
         return _build_engine_payload_from_snapshot(snapshot_row)
-    return _build_engine_payload_live(ticker, positions_df)
+    return _build_engine_payload_live(ticker, positions_df, decision=decision)
 
 
 def _tv_payload_for(ticker: str, signal_map: Dict[str, object]) -> dict:
@@ -477,7 +538,7 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
                     "avg_cost": _safe_float(position.get("avg_cost", 0.0), 0.0) if position is not None else 0.0,
                 },
                 "tv_signal": _tv_payload_for(ticker, signal_map),
-                "engine": _build_engine_payload(ticker, positions_df, snapshot_map),
+                "engine": _build_engine_payload(ticker, positions_df, snapshot_map, decision=decision),
                 "recent_execution": _load_recent_execution_rows(ticker, limit=3),
                 "news": [
                     {
@@ -679,6 +740,171 @@ def _fallback_watchlist_summary(payload: dict) -> dict:
     }
 
 
+def _gemini_saved_watchlist_followup_summary(payload: dict) -> dict:
+    if not GEMINI_API_KEY:
+        return {}
+    prompt = (
+        "You are a watchlist follow-up assistant for a human swing trader. "
+        "Use only the provided facts. "
+        "These names come from the user's saved watchlist, not the formal auto-trade chain. "
+        "Do not turn this into a market commentary or a full portfolio review. "
+        "Do not say a name is a formal new-entry order. "
+        "Focus only on which names are still continuing cleanly, which names are rebuilding and worth re-entry observation, and which names should not be chased yet. "
+        "Do not mention search process, data collection process, or raw news headlines. "
+        "Return strict JSON only with keys: headline, decision, priority_order, risk_flags, action_plan. "
+        "headline must be a very short Traditional Chinese title of at most 12 characters. "
+        "decision must be one short Traditional Chinese sentence that directly states the conclusion, and must imply this is follow-up only, not a formal buy order. "
+        "priority_order, risk_flags, action_plan must each be arrays with 0 to 4 short Traditional Chinese strings. "
+        "Each item must start with the ticker symbol when a ticker is involved. "
+        "priority_order should only include names worth continuation or re-entry observation. "
+        "risk_flags should include names that are still weak, failed, or should not be chased. "
+        "action_plan should tell the user exactly what to do next, such as 留觀察、等站回 AVWAP、等開盤確認.\n\n"
+        f"Data JSON:\n{json.dumps(sanitize_prompt_payload(payload), ensure_ascii=False)}"
+    )
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    request_payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.15,
+            "responseMimeType": "application/json",
+        },
+    }
+    try:
+        response = requests.post(endpoint, json=request_payload, timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 8.0))
+        response.raise_for_status()
+        data = response.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        return {}
+
+    parsed = _extract_json_block(text)
+    if not parsed:
+        return {}
+
+    def _list_field(name: str) -> List[str]:
+        value = parsed.get(name, [])
+        if not isinstance(value, list):
+            return []
+        return [_clip_text(item, 90) for item in value if str(item or "").strip()][:5]
+
+    return {
+        "headline": _clip_text(parsed.get("headline") or "", 80),
+        "summary": _clip_text(parsed.get("decision") or parsed.get("summary") or "", 120),
+        "priority_order": _list_field("priority_order"),
+        "risk_flags": _list_field("risk_flags"),
+        "action_plan": _list_field("action_plan"),
+    }
+
+
+def _fallback_saved_watchlist_followup_summary(payload: dict) -> dict:
+    scored: List[tuple[float, str, str, dict]] = []
+    risk_flags: List[str] = []
+    action_plan: List[str] = []
+    engine_data_count = 0
+
+    for item in payload.get("items", []):
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+
+        engine = item.get("engine", {}) if isinstance(item.get("engine"), dict) else {}
+        news = item.get("news", []) if isinstance(item.get("news"), list) else []
+        tv_signal = item.get("tv_signal", {}) if isinstance(item.get("tv_signal"), dict) else {}
+        decision = item.get("decision", {}) if isinstance(item.get("decision"), dict) else {}
+        position = item.get("position", {}) if isinstance(item.get("position"), dict) else {}
+        has_position = bool(position.get("has_position", False))
+        action = str(engine.get("action", "")).strip().lower()
+        has_data = bool(engine.get("has_data", False))
+        close_val = _safe_float(engine.get("close"), 0.0)
+        avwap = _safe_float(engine.get("dynamic_avwap"), 0.0)
+        hist = _safe_float(engine.get("sqzmom_hist"), 0.0)
+        rank_num = pd.to_numeric(decision.get("rank"), errors="coerce")
+        rank_value = int(rank_num) if pd.notna(rank_num) else 9999
+
+        if has_data:
+            engine_data_count += 1
+
+        if action in {"stop_loss", "take_profit"}:
+            risk_text = engine.get("reason") or "短線結構還沒修回來，先別追。"
+            risk_flags.append(f"{ticker}: {risk_text}")
+            if has_position:
+                action_plan.append(f"{ticker}: 先照部位風控走，等重回 AVWAP 再考慮補回。")
+            else:
+                action_plan.append(f"{ticker}: 先留觀察，不要把反彈當成正式重啟。")
+            continue
+
+        score = 0.0
+        label = "保留觀察"
+        reason = "等下一次結構轉強再看。"
+
+        if action in {"entry", "add"}:
+            score += 30
+            label = "重回站上，可列再進場觀察"
+            reason = str(engine.get("reason") or "已回到 AVWAP 上方且動能轉強。")
+        elif has_data and close_val > 0 and avwap > 0 and close_val >= avwap and hist > 0:
+            score += 20
+            label = "續強觀察"
+            reason = "維持在 AVWAP 上方，動能仍偏正。"
+        elif str(tv_signal.get("event", "")).strip().lower() in {"entry", "add", "buy", "breakout"}:
+            score += 12
+            label = "訊號轉強，待開盤確認"
+            reason = "TV 訊號轉強，但仍只列觀察。"
+        elif news:
+            score += 8
+            label = "催化觀察"
+            reason = "有新催化，等開盤或下一次回站上再說。"
+
+        if rank_value <= 5:
+            score += {1: 10, 2: 8, 3: 6, 4: 4, 5: 2}.get(rank_value, 0)
+        if has_position:
+            score += 5
+            if label == "保留觀察":
+                label = "續抱觀察"
+                reason = "已有部位，先盯是否維持強勢。"
+
+        scored.append((score, label, reason, item))
+
+    scored.sort(key=lambda row: row[0], reverse=True)
+
+    priority_order: List[str] = []
+    for score, label, reason, item in scored:
+        if score < 8:
+            continue
+        ticker = str(item.get("ticker", "")).strip().upper()
+        priority_order.append(f"{ticker}: {label}，{reason}")
+        if len(priority_order) >= 5:
+            break
+
+    if not action_plan:
+        if priority_order:
+            for _, label, reason, item in scored[:3]:
+                ticker = str(item.get("ticker", "")).strip().upper()
+                if not ticker:
+                    continue
+                if label in {"重回站上，可列再進場觀察", "續強觀察", "訊號轉強，待開盤確認"}:
+                    action_plan.append(f"{ticker}: 保留觀察名單，不直接當正式新倉指令。")
+                else:
+                    action_plan.append(f"{ticker}: {reason}")
+                if len(action_plan) >= 3:
+                    break
+        else:
+            action_plan.append("今天沒有明確重啟結構的關注股，先等下一次回站上。")
+
+    headline = "Watchlist追蹤"
+    if engine_data_count > 0:
+        summary = "這份只追蹤你 watchadd 的票，供續強與再進場觀察，不等於正式買點指令。"
+    else:
+        summary = "⚠️ 目前無盤中指標資料；這份只追蹤關注股近況，不等於正式買點指令。"
+
+    return {
+        "headline": headline,
+        "summary": summary,
+        "priority_order": priority_order[:5],
+        "risk_flags": risk_flags[:5],
+        "action_plan": action_plan[:5],
+    }
+
+
 def _priority_map(payload: dict) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for item in payload.get("items", []):
@@ -754,6 +980,51 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
             lines.append(f"- {item}")
     if action_plan:
         lines.append("執行動作:")
+        for item in action_plan:
+            lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+def build_saved_watchlist_followup_message(saved_tickers: List[str] | None = None) -> str:
+    saved = _parse_tickers(" ".join(saved_tickers or load_all_saved_watchlist_tickers()), limit=MAX_TRACKED_TICKERS)
+    if not saved:
+        raise ValueError("目前沒有保存的關注股。先用 /watchadd 新增。")
+
+    payload = _build_watch_payload(saved, saved, [])
+    summary = _gemini_saved_watchlist_followup_summary(payload) or _fallback_saved_watchlist_followup_summary(payload)
+    engine_data_available = any(
+        bool((item.get("engine") or {}).get("has_data", False))
+        for item in (payload.get("items", []) if isinstance(payload.get("items"), list) else [])
+    )
+
+    lines = [
+        f"[Alpha Finder] Watchlist Follow-up {payload.get('generated_at', '')}",
+        "",
+    ]
+    headline = str(summary.get("headline", "")).strip()
+    message_summary = str(summary.get("summary", "")).strip()
+    if headline:
+        lines.append(headline)
+    if message_summary:
+        lines.append(message_summary)
+    lines.append(f"追蹤名單: {', '.join(saved)}")
+    if not engine_data_available and "⚠️" not in message_summary:
+        lines.append("⚠️ 目前無盤中指標資料；先把這張卡當 follow-up，不要當正式新倉指令。")
+
+    priority_order = summary.get("priority_order", []) if isinstance(summary.get("priority_order", []), list) else []
+    risk_flags = summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else []
+    action_plan = summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else []
+
+    if priority_order:
+        lines.append("續強 / 再進場觀察:")
+        for idx, item in enumerate(priority_order, 1):
+            lines.append(f"- {idx}. {item}")
+    if risk_flags:
+        lines.append("先別追 / 先處理:")
+        for item in risk_flags:
+            lines.append(f"- {item}")
+    if action_plan:
+        lines.append("現在先做:")
         for item in action_plan:
             lines.append(f"- {item}")
     return "\n".join(lines)

@@ -73,6 +73,7 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - `/watchadd`: 把 ticker 加進你自己的保存關注股
 - `/watchremove`: 從你的保存關注股移除 ticker
 - `/watchsaved`: 看你目前保存的關注股清單
+- 保存關注股會進入獨立的 watchlist follow-up recap，只做續強 / 再進場觀察提醒，不會混進正式 auto-trade 新倉決策
 
 推薦實際用法：
 
@@ -133,6 +134,7 @@ shadow watchlist 規則：
 現在盤中 execution 已經不是靠你手動維護 TradingView alert。
 
 - watchlist 來源是今天 ai_decision、遞減保留 2 到 3 天的 shadow ai_decision，以及目前持倉
+- 你的 `/watchadd` 保存清單不會直接進入 engine 新倉判斷；它只會走獨立的 watchlist follow-up recap
 - engine 自己抓分鐘級 OHLCV
 - 自己算 Dynamic AVWAP + SQZMOM
 - 只輸出四種執行建議：適合買、可加碼、適合先賣一部分、適合全出
