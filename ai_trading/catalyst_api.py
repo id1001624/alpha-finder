@@ -8,6 +8,12 @@ from typing import Dict, List
 import pandas as pd
 import requests
 
+from app_logging import get_logger
+from prompt_safety import sanitize_prompt_payload, sanitize_prompt_text, sanitize_ticker
+
+
+logger = get_logger(__name__)
+
 
 API_CATALYST_COLUMNS = [
     'api_rank',
@@ -106,7 +112,8 @@ def _tavily_search(query: str, api_key: str, max_results: int, timeout_sec: floa
         response = requests.post(url, json=payload, timeout=timeout_sec)
         response.raise_for_status()
         data = response.json()
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning('tavily search failed: %s', exc)
         return []
 
     results = data.get('results', []) if isinstance(data, dict) else []
@@ -134,10 +141,16 @@ def _gemini_catalyst_analyze(
     if not api_key:
         return {}
 
-    snippets_text = []
+    safe_ticker = sanitize_ticker(ticker)
+    safe_snippets = []
     for idx, item in enumerate(snippets[:6], 1):
-        snippets_text.append(
-            f"[{idx}] title={item.get('title', '')}\nurl={item.get('url', '')}\ncontent={item.get('content', '')[:420]}"
+        safe_snippets.append(
+            {
+                'index': idx,
+                'title': sanitize_prompt_text(item.get('title', ''), max_length=140),
+                'url': sanitize_prompt_text(item.get('url', ''), max_length=220),
+                'content': sanitize_prompt_text(item.get('content', ''), max_length=420),
+            }
         )
 
     prompt = (
@@ -146,9 +159,10 @@ def _gemini_catalyst_analyze(
         'ticker, catalyst_type, sentiment, hype_score, explosion_probability, confidence, reason. '\
         'Sentiment must be one of positive/neutral/negative. '\
         'hype_score, explosion_probability, confidence are integers from 0 to 100. '\
-        f'Ticker: {ticker}\n\n'
-        'News snippets:\n'
-        + ('\n\n'.join(snippets_text) if snippets_text else 'No snippets found.')
+        'Ticker JSON:\n'
+        + json.dumps({'ticker': safe_ticker}, ensure_ascii=False)
+        + '\n\nNews snippets JSON:\n'
+        + json.dumps(sanitize_prompt_payload(safe_snippets), ensure_ascii=False)
     )
 
     endpoint = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}'
@@ -164,7 +178,8 @@ def _gemini_catalyst_analyze(
         response = requests.post(endpoint, json=payload, timeout=timeout_sec)
         response.raise_for_status()
         data = response.json()
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning('gemini catalyst analyze failed for %s: %s', safe_ticker, exc)
         return {}
 
     try:
@@ -177,7 +192,7 @@ def _gemini_catalyst_analyze(
         return {}
 
     return {
-        'ticker': ticker,
+        'ticker': safe_ticker,
         'catalyst_type': str(parsed.get('catalyst_type', '')).strip(),
         'sentiment': _normalize_sentiment(str(parsed.get('sentiment', 'neutral'))),
         'hype_score': int(round(_safe_float(parsed.get('hype_score'), 0))),

@@ -25,9 +25,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app_logging import install_builtin_print_logging
+
 from config import DISCORD_WEBHOOK_URL, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
 from signal_store import get_latest_signals
 from turso_state import append_execution_log_rows, sync_execution_latest
+
+install_builtin_print_logging()
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"

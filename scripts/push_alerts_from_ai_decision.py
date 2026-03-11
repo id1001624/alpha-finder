@@ -34,6 +34,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app_logging import get_logger
+from prompt_safety import sanitize_prompt_payload
+
 from ai_trading.position_state import load_positions
 from config import (
     DISCORD_WEBHOOK_URL,
@@ -60,6 +63,8 @@ from config import (
 )
 from signal_store import get_latest_signals
 from turso_state import STATE_KEY_AI_DECISION_LATEST, load_recent_execution_log, load_runtime_df, load_runtime_df_with_fallback, sync_runtime_df
+
+logger = get_logger(__name__)
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 INBOX_DIR = BACKTEST_DIR / "inbox"
@@ -874,7 +879,7 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         "headline and summary must be short Traditional Chinese strings. "
         "focus, risk_flags, opening_plan must each be arrays with 0 to 3 short Traditional Chinese strings. "
         f"{mode_instruction}\n\n"
-        f"Data JSON:\n{json.dumps(recap_payload, ensure_ascii=False)}"
+        f"Data JSON:\n{json.dumps(sanitize_prompt_payload(recap_payload), ensure_ascii=False)}"
     )
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
@@ -1337,11 +1342,11 @@ def main() -> int:
     if args.auto_latest or csv_path is None:
         df, source_id = _load_latest_decision_df()
         if source_id is None:
-            print("No ai_decision latest state found in Turso / backtest latest / inbox / ai_ready/latest / daily_refresh/latest")
+            logger.error("No ai_decision latest state found in Turso / backtest latest / inbox / ai_ready/latest / daily_refresh/latest")
             return 1
     else:
         if not csv_path.exists():
-            print(f"CSV not found: {csv_path}")
+            logger.error("CSV not found: %s", csv_path)
             return 2
         df = _load_decision_df(csv_path)
         source_id = str(csv_path)
@@ -1358,8 +1363,10 @@ def main() -> int:
         now_dt = _utc_now_naive()
         if not _is_in_opening_dispatch_window(now_dt):
             open_start, open_end = _opening_dispatch_bounds(now_dt)
-            print(
-                f"[SKIP] opening mode outside dispatch window: {_format_utc_to_active_local(open_start)} -> {_format_utc_to_active_local(open_end)}"
+            logger.warning(
+                "[SKIP] opening mode outside dispatch window: %s -> %s",
+                _format_utc_to_active_local(open_start),
+                _format_utc_to_active_local(open_end),
             )
             return 0
 
@@ -1382,19 +1389,18 @@ def main() -> int:
     ALERT_DIR.mkdir(parents=True, exist_ok=True)
     ALERT_MESSAGE_TXT.write_text(message, encoding="utf-8")
 
-    print("\n=== Alert Preview ===")
-    print(message)
+    logger.info("=== Alert Preview ===\n%s", message)
 
     sent_channels: List[str] = []
     send_failed = False
     if not args.dry_run:
         if args.channel in {"discord", "both"}:
             if _already_sent(decision_date, args.mode, "discord", source_id):
-                print(f"[SKIP] discord {args.mode} already sent for {decision_date} -> {source_id}")
+                logger.warning("[SKIP] discord %s already sent for %s -> %s", args.mode, decision_date, source_id)
             else:
                 discord_url = _sanitize_webhook_url(os.getenv("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL))
                 ok, detail = _send_discord(message, discord_url)
-                print(f"[DISCORD] ok={ok} detail={detail}")
+                logger.info("[DISCORD] ok=%s detail=%s", ok, detail)
                 if ok:
                     sent_channels.append("discord")
                     _write_sent_marker(decision_date, args.mode, "discord", source_id)
@@ -1403,12 +1409,12 @@ def main() -> int:
 
         if args.channel in {"line", "both"}:
             if _already_sent(decision_date, args.mode, "line", source_id):
-                print(f"[SKIP] line {args.mode} already sent for {decision_date} -> {source_id}")
+                logger.warning("[SKIP] line %s already sent for %s -> %s", args.mode, decision_date, source_id)
             else:
                 line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
                 line_to = os.getenv("LINE_TO_USER_ID", "").strip()
                 ok, detail = _send_line(message, line_token, line_to)
-                print(f"[LINE] ok={ok} detail={detail}")
+                logger.info("[LINE] ok=%s detail=%s", ok, detail)
                 if ok:
                     sent_channels.append("line")
                     _write_sent_marker(decision_date, args.mode, "line", source_id)
@@ -1442,9 +1448,9 @@ def main() -> int:
 
     if log_rows and not args.dry_run:
         _append_alert_log(log_rows)
-        print(f"[ALERT_LOG] appended {len(log_rows)} rows -> {ALERT_LOG_CSV}")
+        logger.info("[ALERT_LOG] appended %s rows -> %s", len(log_rows), ALERT_LOG_CSV)
 
-    print(f"[ALERT_MSG] {ALERT_MESSAGE_TXT}")
+    logger.info("[ALERT_MSG] %s", ALERT_MESSAGE_TXT)
     return 4 if send_failed else 0
 
 

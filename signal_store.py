@@ -1,8 +1,14 @@
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Union
+
+from app_logging import get_logger
+from config import SIGNAL_RAW_LOG_RETENTION_DAYS, SIGNAL_STORE_RETENTION_DAYS
+
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -80,6 +86,12 @@ def init_signal_store(db_path: str) -> None:
             """
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signals_lookup ON signals(symbol, received_at DESC, updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signals_received_at ON signals(received_at)"
+        )
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS raw_webhook_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +101,35 @@ def init_signal_store(db_path: str) -> None:
             )
             """
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_webhook_logs_received_at ON raw_webhook_logs(received_at)"
+        )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def cleanup_signal_store(
+    db_path: str,
+    signal_retention_days: int = SIGNAL_STORE_RETENTION_DAYS,
+    raw_log_retention_days: int = SIGNAL_RAW_LOG_RETENTION_DAYS,
+) -> None:
+    init_signal_store(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        signal_cutoff = (datetime.now(timezone.utc) - timedelta(days=max(int(signal_retention_days), 1))).isoformat()
+        raw_cutoff = (datetime.now(timezone.utc) - timedelta(days=max(int(raw_log_retention_days), 1))).isoformat()
+        conn.execute(
+            "DELETE FROM signals WHERE COALESCE(updated_at, received_at) < ?",
+            (signal_cutoff,),
+        )
+        conn.execute(
+            "DELETE FROM raw_webhook_logs WHERE received_at < ?",
+            (raw_cutoff,),
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("signal store cleanup failed: %s", exc)
     finally:
         conn.close()
 
@@ -105,6 +145,7 @@ def log_raw_webhook(db_path: str, raw_text: str, content_type: Optional[str]) ->
         conn.commit()
     finally:
         conn.close()
+    cleanup_signal_store(db_path)
 
 
 def build_signal_event(payload: dict, signature: Optional[str], received_at: Optional[str] = None) -> SignalEvent:
@@ -184,6 +225,7 @@ def upsert_signal_event(db_path: str, event: SignalEvent) -> None:
         conn.commit()
     finally:
         conn.close()
+    cleanup_signal_store(db_path)
 
 
 def _parse_iso_or_epoch(ts_value: str) -> Optional[datetime]:

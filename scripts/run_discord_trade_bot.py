@@ -10,6 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app_logging import get_logger
+
 from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
 from ai_trading.watchlist_brief import (
     add_saved_watchlist_tickers,
@@ -26,6 +28,8 @@ from config import (
     DISCORD_BOT_TOKEN,
 )
 from turso_state import load_recent_execution_log, load_recent_trade_ledger
+
+logger = get_logger(__name__)
 
 
 def _parse_allowed_channel_ids(raw: str) -> set[int]:
@@ -147,10 +151,10 @@ def main() -> int:
     parser.parse_args()
 
     if not DISCORD_BOT_ENABLED:
-        print("DISCORD_BOT_ENABLED is false.")
+        logger.error("DISCORD_BOT_ENABLED is false.")
         return 2
     if not DISCORD_BOT_TOKEN:
-        print("DISCORD_BOT_TOKEN is missing.")
+        logger.error("DISCORD_BOT_TOKEN is missing.")
         return 3
 
     import discord
@@ -166,19 +170,19 @@ def main() -> int:
             sync_guild_raw = str(DISCORD_BOT_SYNC_GUILD_ID or "").strip()
             if not sync_guild_raw:
                 synced = await self.tree.sync()
-                print(f"Discord trade bot synced {len(synced)} global command(s).")
+                logger.info("Discord trade bot synced %s global command(s).", len(synced))
                 return
 
             try:
                 guild = discord.Object(id=int(sync_guild_raw))
             except ValueError:
                 synced = await self.tree.sync()
-                print(f"DISCORD_BOT_SYNC_GUILD_ID invalid, fallback to global sync ({len(synced)} command(s)).")
+                logger.warning("DISCORD_BOT_SYNC_GUILD_ID invalid, fallback to global sync (%s command(s)).", len(synced))
                 return
 
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
-            print(f"Discord trade bot synced {len(synced)} guild command(s) to {sync_guild_raw}.")
+            logger.info("Discord trade bot synced %s guild command(s) to %s.", len(synced), sync_guild_raw)
 
     bot = TradeBot(command_prefix=DISCORD_BOT_PREFIX, intents=intents, help_command=None)
 
@@ -197,7 +201,7 @@ def main() -> int:
 
     @bot.event
     async def on_ready():
-        print(f"Discord trade bot ready: {bot.user}")
+        logger.info("Discord trade bot ready: %s", bot.user)
 
     @bot.hybrid_command(name="tradehelp", description="顯示可用的交易指令")
     async def tradehelp(ctx):

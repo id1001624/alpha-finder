@@ -6,11 +6,16 @@ import importlib
 from io import StringIO
 import json
 from pathlib import Path
+import time
 from typing import Iterable
 
 import pandas as pd
 
-from config import TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, TURSO_ENABLED
+from app_logging import get_logger
+from config import TURSO_AUTH_TOKEN, TURSO_CONNECT_RETRY_COUNT, TURSO_CONNECT_RETRY_DELAY_SEC, TURSO_DATABASE_URL, TURSO_ENABLED
+
+
+logger = get_logger(__name__)
 
 
 STATE_KEY_AI_DECISION_LATEST = "ai_decision_latest"
@@ -95,17 +100,36 @@ def _connect():
     connect = getattr(module, "connect", None)
     if connect is None:
         return None
-    try:
-        conn = connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
-        _ensure_schema(conn)
-        return conn
-    except Exception:  # noqa: BLE001
-        return None
+
+    total_attempts = max(1, int(TURSO_CONNECT_RETRY_COUNT) + 1)
+    retry_delay = max(0.0, float(TURSO_CONNECT_RETRY_DELAY_SEC))
+    for attempt in range(total_attempts):
+        conn = None
+        try:
+            conn = connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+            _ensure_schema(conn)
+            return conn
+        except Exception as exc:  # noqa: BLE001
+            _safe_close(conn)
+            if attempt >= total_attempts - 1:
+                logger.warning("Turso connect failed after %s attempt(s): %s", total_attempts, exc)
+                return None
+            logger.warning("Turso connect attempt %s/%s failed: %s", attempt + 1, total_attempts, exc)
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+    return None
 
 
 def _safe_close(conn) -> None:
     try:
         conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _safe_rollback(conn) -> None:
+    try:
+        conn.rollback()
     except Exception:  # noqa: BLE001
         pass
 
@@ -332,6 +356,8 @@ def sync_runtime_df(state_key: str, df: pd.DataFrame, source_name: str = "") -> 
         )
         conn.commit()
     except Exception:  # noqa: BLE001
+        _safe_rollback(conn)
+        logger.warning("sync_runtime_df failed for %s", state_key)
         return None
     finally:
         _safe_close(conn)
@@ -430,6 +456,8 @@ def append_execution_log_rows(rows: list[dict]) -> str | None:
         )
         conn.commit()
     except Exception:  # noqa: BLE001
+        _safe_rollback(conn)
+        logger.warning("append_execution_log_rows failed for %s row(s)", len(values))
         return None
     finally:
         _safe_close(conn)
@@ -489,13 +517,12 @@ def append_trade_ledger_row(row: dict) -> str | None:
             ),
         )
         conn.commit()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        _safe_rollback(conn)
+        logger.warning("append_trade_ledger_row failed for %s", payload["ticker"])
         return None
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _safe_close(conn)
     return trade_ledger_source_label(event_id)
 
 
@@ -557,6 +584,8 @@ def sync_trade_ledger_csv(source_path: Path) -> str | None:
         )
         conn.commit()
     except Exception:  # noqa: BLE001
+        _safe_rollback(conn)
+        logger.warning("sync_trade_ledger_csv failed for %s row(s)", len(rows))
         return None
     finally:
         _safe_close(conn)

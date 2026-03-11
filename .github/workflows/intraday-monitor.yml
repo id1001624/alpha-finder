@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: intraday-monitor
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   intraday-monitor:

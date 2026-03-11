@@ -26,7 +26,11 @@ import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app_logging import install_builtin_print_logging
+
 from turso_state import sync_ai_decision_latest as sync_ai_decision_latest_to_turso
+
+install_builtin_print_logging()
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 DAILY_AI_DIR = BACKTEST_DIR / "daily_ai_decisions"

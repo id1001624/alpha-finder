@@ -32,7 +32,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -42,6 +41,10 @@ from ai_trading.catalyst_api import generate_api_ai_decision, run_catalyst_detec
 from ai_trading.market_data_pipeline import MarketDataPipeline
 from ai_trading.research_bridge import build_research_bridge
 import config as app_config
+
+from app_logging import install_builtin_print_logging
+
+install_builtin_print_logging()
 
 DAILY_REFRESH_LATEST = PROJECT_ROOT / 'repo_outputs' / 'daily_refresh' / 'latest'
 AI_READY_LATEST = PROJECT_ROOT / 'repo_outputs' / 'ai_ready' / 'latest'

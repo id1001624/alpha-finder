@@ -10,6 +10,8 @@ import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app_logging import get_logger
+
 from ai_trading.position_state import TRADE_LEDGER_FILE
 from turso_state import (
     sync_ai_decision_latest,
@@ -19,6 +21,8 @@ from turso_state import (
     sync_trade_ledger_csv,
     turso_status,
 )
+
+logger = get_logger(__name__)
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"
@@ -47,7 +51,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="同步最新 runtime 狀態到 Turso")
     parser.parse_args()
 
-    print(f"turso_status: {turso_status()}")
+    logger.info("turso_status: %s", turso_status())
 
     decision_source = AI_DECISION_LATEST
     positions_source = POSITIONS_LATEST
@@ -59,15 +63,15 @@ def main() -> int:
     execution_log_target = _sync_execution_history()
     trade_ledger_target = sync_trade_ledger_csv(TRADE_LEDGER_LATEST if TRADE_LEDGER_LATEST.exists() else TRADE_LEDGER_FILE)
 
-    print("=== Turso state 同步完成 ===")
-    print(f"ai_decision_latest: {decision_target or '未同步'} | source={decision_source if decision_source.exists() else '缺少來源檔'}")
-    print(f"positions_latest: {positions_target or '未同步'} | source={positions_source if positions_source.exists() else '缺少來源檔'}")
-    print(f"execution_trade_latest: {execution_target or '未同步'} | source={execution_source if execution_source.exists() else '缺少來源檔'}")
+    logger.info("=== Turso state 同步完成 ===")
+    logger.info("ai_decision_latest: %s | source=%s", decision_target or '未同步', decision_source if decision_source.exists() else '缺少來源檔')
+    logger.info("positions_latest: %s | source=%s", positions_target or '未同步', positions_source if positions_source.exists() else '缺少來源檔')
+    logger.info("execution_trade_latest: %s | source=%s", execution_target or '未同步', execution_source if execution_source.exists() else '缺少來源檔')
     execution_history_source = BACKTEST_DIR / "execution_trade_log.csv"
     if not execution_history_source.exists():
         execution_history_source = EXECUTION_DAILY_DIR if EXECUTION_DAILY_DIR.exists() else Path("缺少來源檔")
-    print(f"execution_trade_log: {execution_log_target or '未同步'} | source={execution_history_source}")
-    print(f"position_trade_log: {trade_ledger_target or '未同步'} | source={TRADE_LEDGER_LATEST if TRADE_LEDGER_LATEST.exists() else '缺少來源檔'}")
+    logger.info("execution_trade_log: %s | source=%s", execution_log_target or '未同步', execution_history_source)
+    logger.info("position_trade_log: %s | source=%s", trade_ledger_target or '未同步', TRADE_LEDGER_LATEST if TRADE_LEDGER_LATEST.exists() else '缺少來源檔')
     return 0
 
 

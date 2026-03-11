@@ -10,6 +10,8 @@ from typing import Dict, List
 import pandas as pd
 import requests
 
+from prompt_safety import sanitize_prompt_payload
+
 from config import (
     CATALYST_TAVILY_MAX_RESULTS,
     GEMINI_API_KEY,
@@ -441,7 +443,7 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
         "Each item must start with the ticker symbol when a ticker is involved. "
         "Use imperative, trade-ready wording. Avoid abstract summary language like 整理完成, 已彙整, 已分析. "
         "If there is no strong long candidate, leave priority_order empty instead of forcing one.\n\n"
-        f"Data JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+        f"Data JSON:\n{json.dumps(sanitize_prompt_payload(payload), ensure_ascii=False)}"
     )
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     request_payload = {

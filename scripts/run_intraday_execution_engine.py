@@ -11,6 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app_logging import install_builtin_print_logging
+
 from ai_trading.intraday_execution_engine import run_intraday_execution_engine
 from config import (
     INTRADAY_ACTIVE_END_LOCAL,
@@ -20,6 +22,8 @@ from config import (
     INTRADAY_POLL_SECONDS,
     INTRADAY_TOP_N,
 )
+
+install_builtin_print_logging()
 
 
 def _parse_hhmm(value: str, fallback: str) -> dt_time:
