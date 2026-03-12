@@ -43,10 +43,16 @@ run_daily.bat
 - 只有真的拿到有效決策列時，才可寫出 ai_decision_YYYY-MM-DD.csv
 - 不允許用純本地排序偽裝成 AI 決策
 
-### 3. Intraday Operation Is Repo-Native
+### 3. Dual-Strategy Intraday & Swing Operation
 
 - 盤中主流程已經不是依賴手動 TradingView alert 維護
-- ai_trading/intraday_execution_engine.py 自己抓分鐘資料並計算 Dynamic AVWAP + SQZMOM
+- **Intraday Monster Strategy**：
+  - `ai_trading/intraday_execution_engine.py` 自己抓分鐘資料並計算 Dynamic AVWAP + SQZMOM
+  - 平日每 5 分鐘喚醒一次；風控訊號（stop_loss/take_profit）立即推 Discord，進場類訊號（entry/add）僅寫記錄由 recap 整合
+- **Swing Trend Strategy**：
+  - `ai_trading/swing_core_engine.py` 每日 21:15 UTC 自動掃描日線，無需手動觸發
+  - 用日線 Dynamic AVWAP + SQZMOM（swing_period=3），減碼/出場立即推 Discord，進場類事件由早晨 recap 整合
+  - 來源：core_list 與 saved watchlist 中分類為 swing_core 的標的
 - scripts/run_discord_trade_bot.py 是真實成交回報入口
 - engine / recap 正式排程已經以 GitHub Actions 為主，不應再把本機夜間 Windows 排程描述成主流程
 - watchlist、持倉、成交與 execution history 現在優先讀 Turso，最後才 fallback 到本機 CSV
@@ -136,10 +142,13 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 - setup.bat: Windows 排程與自啟配置
 - deploy/redeploy_discord_bot.ps1: 一鍵把最新 bot 程式重新部署到 Oracle Cloud VM
 - scripts/record_ai_decision.py: 決策歸檔
-- scripts/run_intraday_execution_engine.py: 盤中 engine 啟動器
-- scripts/run_discord_trade_bot.py: Discord 成交回報 bot
-- ai_trading/intraday_execution_engine.py: 盤中訊號核心
-- ai_trading/position_state.py: 持倉與成交 ledger
+- scripts/run_intraday_execution_engine.py: 分鐘級 engine 啟動器（平日每 5 分鐘 GitHub Actions 觸發）
+- scripts/run_swing_core_engine.py: 日線 engine 啟動器（每日 21:15 UTC GitHub Actions 觸發）
+- scripts/push_alerts_from_ai_decision.py: Recap 整合（bedtime/morning/opening/watchlist）
+- scripts/run_discord_trade_bot.py: Discord 成交回報 bot（常駐，Oracle Cloud systemd）
+- ai_trading/intraday_execution_engine.py: 分鐘級訊號核心（Dynamic AVWAP + SQZMOM + 兩層通知）
+- ai_trading/swing_core_engine.py: 日線訊號核心（Dynamic AVWAP + SQZMOM + 兩層通知）
+- ai_trading/position_state.py: 持倉與成交 ledger（支援 monster_swing / swing_trend profile）
 - turso_state.py: Turso 雲端 latest state / ledger / execution history 同步與查詢
 - Alpha-Sniper-Protocol.md: 提供給網頁 AI 的決策 prompt
 
@@ -159,6 +168,8 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 ## Current Direction
 
-- 目前基礎工作流已完成
+- 目前基礎工作流已完成：研究、決策、盤中 intraday engine、盤後 swing engine、recap 整合、Discord 回報與追蹤
+- 兩層通知已實裝：風控出場（stop_loss/take_profit/swing_exit/swing_reduce）立即推 Discord；進場事件（entry/add/swing_entry/swing_add）由 recap 整合報告
+- Swing Core Engine 每日 21:15 UTC 自動觸發，早晨 recap 整合 Swing Top1 進決策卡
 - 後續若再做，應以優化與強化為主，不是回頭補基本能力
 - 不要把專案方向拉回舊版 scanner-only 或 GSheets-only
