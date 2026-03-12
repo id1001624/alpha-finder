@@ -153,12 +153,13 @@ shadow watchlist 規則：
 - 以台灣時間為例，夏令時間通常約是 21:20 到隔天 05:10，冬令時間通常約是 22:20 到隔天 06:10
 - 超出時段會自動略過，不抓資料、不推 Discord
 - 盤中 engine 預設每 5 分鐘喚醒一次、跑完就退出
-- 若該輪沒有新的 entry/add/take profit/stop loss 訊號，現在也會每 30 分鐘送一則 heartbeat，表示監控仍在線
+- 言號分兩層：`stop_loss`/`take_profit` 立即推 Discord；`entry`/`add` 僅寫記錄，由早晨 recap 整合
 
 現在的正式主流程是 GitHub Actions 雲端排程加上 Turso 狀態儲存，不是本機夜間排程：
 
 - repo 內有獨立的 intraday monitor workflow
 - 也有對應的 bedtime recap、opening recap 與 morning recap workflows
+- swing engine 每日女日 21:15 UTC（總在美股收盤後）自動採用日線計算 AVWAP + SQZMOM，減碼/出場立即推，進場事件由早晨 recap 整合
 - 排程採用偏移分鐘，不用整點附近的 0,5,10
 - workflow 會跑在 default branch 最新 commit，不會讀你本機未提交檔案
 - GitHub Actions 與 Discord bot 現在都優先讀 Turso
@@ -170,12 +171,6 @@ shadow watchlist 規則：
 - 更新雲端 bot 程式時，直接執行 `deploy\redeploy_discord_bot.ps1`
 - Discord 交易 bot 本身仍然是常駐型服務，GitHub Actions 不能取代它的 slash command/gateway 連線
 
-監控 heartbeat 補充：
-
-- heartbeat 預設已開啟
-- 預設每 30 分鐘最多送一則
-- 只有在該輪沒有新的盤中執行建議時才送 heartbeat，避免和真正告警混在一起刷版
-- 可用環境變數調整：`INTRADAY_HEARTBEAT_ENABLED=true|false`、`INTRADAY_HEARTBEAT_INTERVAL_MINUTES=30`
 
 如果你改了 token、頻道 ID 或其他設定，只要重跑一次：
 
@@ -266,7 +261,7 @@ c:/Users/w6359/OneDrive/文件/alpha-finder/.venv/Scripts/python.exe .\scripts\r
 1. 再到 GitHub Actions 手動觸發 `Intraday Monitor`
 
 - 如果有新的 action signal，Discord 會收到真正的 engine 告警
-- 如果沒有新的 action signal，但 heartbeat 到期，Discord 會收到 heartbeat
+- 如果沒有新的 action signal，該輯 engine 不送 Discord，進場类訊號展到早晨 recap 整合報告
 - workflow log 內現在也會印出 `[DISCORD] ok=True detail=...`，可直接確認是否送出成功
 
 ## 專案現況
