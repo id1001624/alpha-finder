@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app_logging import get_logger
 
-from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
+from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions, get_position
 from ai_trading.strategy_context import (
     HORIZON_INTRADAY_MONSTER,
     HORIZON_SWING_CORE,
@@ -342,8 +342,36 @@ def main() -> int:
                 note=note,
             )
         except ValueError as exc:
-            await ctx.send(f"指令失敗: {exc}")
-            return
+            # If selling and we couldn't find an open position for the given profile,
+            # try a fallback: locate any existing position for the ticker (ticker-only match)
+            # and reuse its horizon/profile so the sell can apply to the real open position.
+            if str(side).strip().lower() == "sell" and "no open position for" in str(exc).lower():
+                existing_any = get_position(positions_df, ticker)
+                if existing_any is not None:
+                    fallback_strategy = existing_any.get("strategy_profile", "")
+                    fallback_horizon = existing_any.get("horizon_tag", "")
+                    try:
+                        updated_df, ledger_row = apply_trade_fill(
+                            positions_df=positions_df,
+                            ticker=ticker,
+                            side=side,
+                            quantity=float(quantity),
+                            price=float(price),
+                            horizon_tag=fallback_horizon,
+                            strategy_profile=fallback_strategy,
+                            signal_type=f"manual_{side}",
+                            source="discord_bot",
+                            note=note,
+                        )
+                    except ValueError as exc2:
+                        await ctx.send(f"指令失敗: {exc2}")
+                        return
+                else:
+                    await ctx.send(f"指令失敗: {exc}")
+                    return
+            else:
+                await ctx.send(f"指令失敗: {exc}")
+                return
 
         save_positions(updated_df)
         append_trade_ledger(ledger_row)
