@@ -1,0 +1,39 @@
+name: Swing Engine Daily Scan
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 21:15 UTC = 5:15pm EDT / 4:15pm EST — always after US market close (4pm ET)
+    - cron: '15 21 * * 1-5'
+
+concurrency:
+  group: swing-engine-daily
+  cancel-in-progress: true
+
+jobs:
+  swing-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      TURSO_ENABLED: "true"
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run swing engine
+        run: |
+          python scripts/run_swing_core_engine.py

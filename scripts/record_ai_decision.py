@@ -27,6 +27,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app_logging import install_builtin_print_logging
+from ai_trading.strategy_context import (
+    REGIME_NEUTRAL,
+    detect_regime_tag,
+    ensure_decision_strategy_columns,
+)
 
 from turso_state import sync_ai_decision_latest as sync_ai_decision_latest_to_turso
 
@@ -68,7 +73,14 @@ CATALYST_COLUMNS = [
     "catalyst_summary",
 ]
 
-REQUIRED_COLUMNS = BASE_COLUMNS + CATALYST_COLUMNS
+STRATEGY_COLUMNS = [
+    "horizon_tag",
+    "strategy_profile",
+    "signal_type",
+    "regime_tag",
+]
+
+REQUIRED_COLUMNS = BASE_COLUMNS + CATALYST_COLUMNS + STRATEGY_COLUMNS
 
 VALID_DECISION_TAGS = {"keep", "watch", "replace_candidate"}
 
@@ -211,6 +223,12 @@ def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
     out["hype_score"] = pd.to_numeric(out["hype_score"], errors="coerce")
     out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
     out["api_final_score"] = pd.to_numeric(out["api_final_score"], errors="coerce")
+
+    try:
+        regime_default = detect_regime_tag()
+    except Exception:  # noqa: BLE001
+        regime_default = REGIME_NEUTRAL
+    out = ensure_decision_strategy_columns(out, default_regime=regime_default)
 
     invalid_tag_mask = ~out["decision_tag"].isin(VALID_DECISION_TAGS)
     if invalid_tag_mask.any():

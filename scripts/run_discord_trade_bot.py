@@ -13,6 +13,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from app_logging import get_logger
 
 from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
+from ai_trading.strategy_context import (
+    HORIZON_INTRADAY_MONSTER,
+    HORIZON_SWING_CORE,
+    STRATEGY_MONSTER_SWING,
+    STRATEGY_SWING_TREND,
+)
 from ai_trading.watchlist_brief import (
     add_saved_watchlist_tickers,
     build_watchlist_brief_message,
@@ -50,19 +56,26 @@ def _format_positions() -> str:
     if len(positions) == 0:
         return "目前沒有開倉部位。"
     lines = ["目前開倉部位:"]
-    for _, row in positions.sort_values(["ticker"]).iterrows():
+    for _, row in positions.sort_values(["ticker", "horizon_tag", "strategy_profile"]).iterrows():
         lines.append(
-            f"- {row['ticker']} | qty={float(row['quantity']):g} | avg={float(row['avg_cost']):.2f} | add_count={int(row['add_count'])}"
+            f"- {row['ticker']} | {row.get('horizon_tag', HORIZON_INTRADAY_MONSTER)} | {row.get('strategy_profile', STRATEGY_MONSTER_SWING)} | qty={float(row['quantity']):g} | avg={float(row['avg_cost']):.2f} | add_count={int(row['add_count'])}"
         )
     return "\n".join(lines)
+
+
+def _normalize_profile(raw: str) -> tuple[str, str]:
+    text = str(raw or "").strip().lower()
+    if text in {"swing", "swing_trend", "core", "swing_core"}:
+        return STRATEGY_SWING_TREND, HORIZON_SWING_CORE
+    return STRATEGY_MONSTER_SWING, HORIZON_INTRADAY_MONSTER
 
 
 def _help_text() -> str:
     return (
         "可用指令:\n"
         "/buy ticker quantity price [note]\n"
-        "/add ticker quantity price [note]\n"
-        "/sell ticker quantity price [note]\n"
+        "/add ticker quantity price [note] [profile]\n"
+        "/sell ticker quantity price [note] [profile]\n"
         "/positions\n"
         "/position ticker\n"
         "/trades [ticker] [limit]\n"
@@ -73,8 +86,8 @@ def _help_text() -> str:
         "/watchsaved\n\n"
         "也保留文字指令相容:\n"
         f"{DISCORD_BOT_PREFIX}buy AAPL 100 188.2\n"
-        f"{DISCORD_BOT_PREFIX}add AAPL 50 190.1\n"
-        f"{DISCORD_BOT_PREFIX}sell AAPL 80 196.5\n"
+        f"{DISCORD_BOT_PREFIX}add AAPL 50 190.1 swing\n"
+        f"{DISCORD_BOT_PREFIX}sell AAPL 80 196.5 monster\n"
         f"{DISCORD_BOT_PREFIX}positions\n"
         f"{DISCORD_BOT_PREFIX}position AAPL\n"
         f"{DISCORD_BOT_PREFIX}trades AAPL 5\n"
@@ -295,10 +308,11 @@ def main() -> int:
             return
         await ctx.send(format_saved_watchlist_message(_ctx_user_id(ctx)))
 
-    async def _record_trade(ctx, side: str, ticker: str, quantity: float, price: float, note: str = ""):
+    async def _record_trade(ctx, side: str, ticker: str, quantity: float, price: float, note: str = "", profile: str = "monster"):
         if not await _guard_channel(ctx):
             return
         positions_df = load_positions()
+        strategy_profile, horizon_tag = _normalize_profile(profile)
         try:
             updated_df, ledger_row = apply_trade_fill(
                 positions_df=positions_df,
@@ -306,6 +320,9 @@ def main() -> int:
                 side=side,
                 quantity=float(quantity),
                 price=float(price),
+                horizon_tag=horizon_tag,
+                strategy_profile=strategy_profile,
+                signal_type=f"manual_{side}",
                 source="discord_bot",
                 note=note,
             )
@@ -316,7 +333,11 @@ def main() -> int:
         save_positions(updated_df)
         append_trade_ledger(ledger_row)
         refreshed = load_positions()
-        current = refreshed[refreshed["ticker"] == ticker.upper()]
+        current = refreshed[
+            (refreshed["ticker"] == ticker.upper())
+            & (refreshed["horizon_tag"] == horizon_tag)
+            & (refreshed["strategy_profile"] == strategy_profile)
+        ]
         if len(current) > 0:
             position_row = current.iloc[0]
             avg_cost = float(position_row.get("avg_cost", 0.0))
@@ -325,24 +346,24 @@ def main() -> int:
             avg_cost = float(ledger_row.get("avg_cost_after", 0.0))
             add_count = 0
         await ctx.send(
-            f"已記錄 {side.upper()} {ticker.upper()} | qty={float(quantity):g} | price={float(price):.2f} | after_qty={float(ledger_row['after_qty']):g} | avg={avg_cost:.2f} | add_count={add_count}\n"
+            f"已記錄 {side.upper()} {ticker.upper()} | {horizon_tag}/{strategy_profile} | qty={float(quantity):g} | price={float(price):.2f} | after_qty={float(ledger_row['after_qty']):g} | avg={avg_cost:.2f} | add_count={add_count}\n"
             "後續 engine / recap 會直接沿用這個持倉狀態。"
         )
 
     @bot.hybrid_command(name="buy", description="記錄新的買進成交")
-    @app_commands.describe(ticker="股票代號，例如 AAPL", quantity="成交股數", price="成交價格", note="備註，可留空")
-    async def buy(ctx, ticker: str, quantity: float, price: float, *, note: str = ""):
-        await _record_trade(ctx, "buy", ticker, quantity, price, note)
+    @app_commands.describe(ticker="股票代號，例如 AAPL", quantity="成交股數", price="成交價格", note="備註，可留空", profile="monster 或 swing")
+    async def buy(ctx, ticker: str, quantity: float, price: float, *, note: str = "", profile: str = "monster"):
+        await _record_trade(ctx, "buy", ticker, quantity, price, note, profile)
 
     @bot.hybrid_command(name="add", description="記錄加碼成交")
-    @app_commands.describe(ticker="股票代號，例如 AAPL", quantity="成交股數", price="成交價格", note="備註，可留空")
-    async def add(ctx, ticker: str, quantity: float, price: float, *, note: str = ""):
-        await _record_trade(ctx, "add", ticker, quantity, price, note)
+    @app_commands.describe(ticker="股票代號，例如 AAPL", quantity="成交股數", price="成交價格", note="備註，可留空", profile="monster 或 swing")
+    async def add(ctx, ticker: str, quantity: float, price: float, *, note: str = "", profile: str = "monster"):
+        await _record_trade(ctx, "add", ticker, quantity, price, note, profile)
 
     @bot.hybrid_command(name="sell", description="記錄賣出成交")
-    @app_commands.describe(ticker="股票代號，例如 AAPL", quantity="成交股數", price="成交價格", note="備註，可留空")
-    async def sell(ctx, ticker: str, quantity: float, price: float, *, note: str = ""):
-        await _record_trade(ctx, "sell", ticker, quantity, price, note)
+    @app_commands.describe(ticker="股票代號，例如 AAPL", quantity="成交股數", price="成交價格", note="備註，可留空", profile="monster 或 swing")
+    async def sell(ctx, ticker: str, quantity: float, price: float, *, note: str = "", profile: str = "monster"):
+        await _record_trade(ctx, "sell", ticker, quantity, price, note, profile)
 
     @bot.event
     async def on_command_error(ctx, error):
