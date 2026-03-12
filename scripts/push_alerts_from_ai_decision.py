@@ -38,6 +38,11 @@ from app_logging import get_logger
 from prompt_safety import sanitize_prompt_payload
 
 from ai_trading.position_state import load_positions
+from ai_trading.strategy_context import (
+    HORIZON_SWING_CORE,
+    classify_watch_horizon,
+    default_strategy_for_horizon,
+)
 from config import (
     DISCORD_WEBHOOK_URL,
     GEMINI_API_KEY,
@@ -57,6 +62,7 @@ from config import (
     RECAP_EXECUTION_LOOKBACK_LIMIT,
     RECAP_GEMINI_ENABLED,
     RECAP_GEMINI_TIMEOUT_SEC,
+    RECAP_INTRADAY_PLAN_MAX_TICKERS,
     RECAP_MARKET_OPEN_TIME,
     RECAP_MARKET_TIMEZONE,
     RECAP_MORNING_FULL_ENGINE_ENABLED,
@@ -66,6 +72,7 @@ from config import (
     RECAP_OPENING_LOOKBACK_MINUTES,
     RECAP_OPENING_RUN_AFTER_MINUTES,
     RECAP_OPENING_RUN_GRACE_MINUTES,
+    RECAP_SWING_PLAN_MAX_TICKERS,
     RECAP_TAVILY_ENABLED,
     RECAP_TAVILY_MAX_RESULTS,
     RECAP_TRACKED_NEWS_ENABLED,
@@ -623,6 +630,14 @@ def _summarize_execution_window(
         rank_value = _safe_int(latest.get("rank"), 9999)
         if decision_row is not None:
             rank_value = _safe_int(decision_row.get("rank"), rank_value)
+        horizon = str(latest.get("horizon_tag", "")).strip() or (
+            str((decision_row.get("horizon_tag") if decision_row is not None else "")).strip()
+            or classify_watch_horizon(ticker, decision_row.to_dict() if decision_row is not None else {})
+        )
+        strategy = str(latest.get("strategy_profile", "")).strip() or (
+            str((decision_row.get("strategy_profile") if decision_row is not None else "")).strip()
+            or default_strategy_for_horizon(horizon)
+        )
         sequence_text = " -> ".join(action.upper() for action in actions[:4])
         if len(actions) > 4:
             sequence_text += " -> ..."
@@ -633,6 +648,8 @@ def _summarize_execution_window(
                 "latest_label": ACTION_LABELS.get(latest_action, latest_action or "NA"),
                 "latest_time": latest_ts_text,
                 "rank": rank_value,
+                "horizon_tag": horizon,
+                "strategy_profile": strategy,
                 "decision_tag": str((decision_row.get("decision_tag") if decision_row is not None else latest.get("decision_tag")) or "").strip().lower(),
                 "has_position": has_position,
                 "position_qty": _safe_float(position.get("quantity", 0.0), 0.0) if position is not None else 0.0,
@@ -914,6 +931,8 @@ def _summaries_to_payload(items: List[dict], limit: int = 6) -> List[dict]:
                 "latest_time": item.get("latest_time", ""),
                 "has_position": bool(item.get("has_position")),
                 "rank": _safe_int(item.get("rank"), 9999),
+                "horizon_tag": item.get("horizon_tag", ""),
+                "strategy_profile": item.get("strategy_profile", ""),
                 "has_conflict": bool(item.get("has_conflict")),
                 "action_sequence": item.get("action_sequence", ""),
                 "guidance": item.get("guidance", ""),
@@ -931,6 +950,8 @@ def _position_payload(positions_df: pd.DataFrame) -> List[dict]:
                 "quantity": _safe_float(row.get("quantity", 0.0), 0.0),
                 "avg_cost": _safe_float(row.get("avg_cost", 0.0), 0.0),
                 "add_count": _safe_int(row.get("add_count"), 0),
+                "horizon_tag": str(row.get("horizon_tag", "")).strip(),
+                "strategy_profile": str(row.get("strategy_profile", "")).strip(),
             }
         )
     return out
@@ -973,17 +994,76 @@ def _strategy_conclusion_for_summary(item: dict) -> str:
     ticker = str(item.get("ticker", "")).strip().upper() or "NA"
     latest_action = str(item.get("latest_action", "")).strip().lower()
     has_position = bool(item.get("has_position"))
+    horizon = str(item.get("horizon_tag", "")).strip()
+    tag = "[Swing]" if horizon == HORIZON_SWING_CORE else "[Monster]"
     if latest_action == "stop_loss" and has_position:
-        return f"{ticker}: 直接全出，這不是雜訊等級，屬於硬風控。"
+        return f"{ticker}{tag}: 直接全出，這不是雜訊等級，屬於硬風控。"
     if latest_action == "take_profit" and has_position:
-        return f"{ticker}: 先減碼 {int(round(float(INTRADAY_REDUCE_SIZE_FRACTION) * 100))}% ，主倉保留。"
+        return f"{ticker}{tag}: 先減碼 {int(round(float(INTRADAY_REDUCE_SIZE_FRACTION) * 100))}% ，主倉保留。"
     if latest_action == "add" and has_position:
-        return f"{ticker}: 續抱為主，若首輪仍強才允許再加碼 {int(round(float(INTRADAY_ADD_SIZE_FRACTION) * 100))}% 。"
+        return f"{ticker}{tag}: 續抱為主，若首輪仍強才允許再加碼 {int(round(float(INTRADAY_ADD_SIZE_FRACTION) * 100))}% 。"
     if has_position:
-        return f"{ticker}: 預設續抱，不因第一段分鐘雜訊直接出場。"
+        return f"{ticker}{tag}: 預設續抱，不因第一段分鐘雜訊直接出場。"
     if latest_action in {"entry", "add"}:
-        return f"{ticker}: 僅在開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強才開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 新倉。"
-    return f"{ticker}: 先觀察，不主動追價。"
+        return f"{ticker}{tag}: 僅在開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強才開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 新倉。"
+    return f"{ticker}{tag}: 先觀察，不主動追價。"
+
+
+def _load_swing_watchlist_top1() -> Optional[str]:
+    """讀取 swing_signal_latest.csv 快照，回傳最強 swing 候選的格式化文字行；找不到則回傳 None。"""
+    snapshot_path = BACKTEST_DIR / "swing" / "swing_signal_latest.csv"
+    if not snapshot_path.exists():
+        return None
+    try:
+        df = pd.read_csv(snapshot_path, encoding="utf-8-sig")
+    except (OSError, ValueError):
+        return None
+    if len(df) == 0 or "ticker" not in df.columns:
+        return None
+
+    df = df.copy()
+    df["_above"] = df.get("above_avwap", False).astype(str).str.lower().isin({"true", "1"})
+    df["_sqzmom"] = pd.to_numeric(df.get("sqzmom_hist", 0), errors="coerce").fillna(0.0)
+    df["_action"] = df.get("action", "").fillna("").astype(str)
+    df["_source"] = df.get("source", "core_list").fillna("core_list").astype(str)
+
+    # 優先: 有 action > above_avwap + 正動能 > saved_watchlist 來源
+    candidates = df[df["_above"] & (df["_sqzmom"] > 0)].copy()
+    if len(candidates) == 0:
+        candidates = df.copy()
+    if len(candidates) == 0:
+        return None
+
+    candidates["_priority"] = (
+        (candidates["_action"] != "").astype(int) * 4
+        + (candidates["_source"] == "saved_watchlist").astype(int) * 2
+        + candidates["_above"].astype(int)
+    )
+    top = candidates.sort_values(["_priority", "_sqzmom"], ascending=[False, False]).iloc[0]
+
+    ticker = str(top.get("ticker", "")).strip().upper()
+    if not ticker:
+        return None
+
+    action = str(top.get("action", "")).strip()
+    signal_type = str(top.get("signal_type", "")).strip()
+    close_val = pd.to_numeric(top.get("close"), errors="coerce")
+    avwap = pd.to_numeric(top.get("dynamic_avwap"), errors="coerce")
+
+    price_part = ""
+    if pd.notna(close_val) and pd.notna(avwap) and float(avwap) > 0:
+        price_part = f" | 收 {float(close_val):.2f} vs AVWAP {float(avwap):.2f}"
+
+    if action and signal_type:
+        size_raw = pd.to_numeric(top.get("size_fraction", 0.25), errors="coerce")
+        size_pct = int(round(float(size_raw) * 100)) if pd.notna(size_raw) else 25
+        return f"Swing 關注 Top1: {ticker}{price_part} | {signal_type} 候選 ({size_pct}%)"
+
+    reason = str(top.get("reason_summary", "")).strip()
+    if reason:
+        reason_short = reason[:50]
+        return f"Swing 關注 Top1: {ticker}{price_part} | {reason_short}"
+    return f"Swing 關注 Top1: {ticker}{price_part} | 監控中"
 
 
 def _build_morning_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
@@ -992,27 +1072,45 @@ def _build_morning_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List
     lines = ["自動策略結論:"]
     used: set[str] = set()
 
-    for item in execution_summaries:
+    intraday_items = [s for s in execution_summaries if str(s.get("horizon_tag", "")).strip() != HORIZON_SWING_CORE]
+    swing_items = [s for s in execution_summaries if str(s.get("horizon_tag", "")).strip() == HORIZON_SWING_CORE]
+
+    for item in intraday_items[:max(1, int(RECAP_INTRADAY_PLAN_MAX_TICKERS))]:
         if not bool(item.get("has_position")):
             continue
         text = _strategy_conclusion_for_summary(item)
         if text not in used:
             used.add(text)
             lines.append(f"- {text}")
-        if len(lines) >= 3:
-            break
+
+    for item in swing_items[:max(1, int(RECAP_SWING_PLAN_MAX_TICKERS))]:
+        if not bool(item.get("has_position")):
+            continue
+        text = _strategy_conclusion_for_summary(item)
+        if text not in used:
+            used.add(text)
+            lines.append(f"- {text}")
 
     if len(positions_df) < max(1, int(INTRADAY_MAX_TOTAL_POSITIONS)):
         candidate = _find_auto_entry_candidate(df, positions_df)
-        if candidate is not None and len(lines) < 4:
+        if candidate is not None and len(lines) < 5:
             ticker = str(candidate.get("ticker", "")).strip().upper()
             lines.append(
                 f"- 今日新倉只看 {ticker}；若開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強，最多開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 基礎倉。"
             )
 
+    # 加入 swing 關注清單 Top1（來自 swing_signal_latest.csv）
+    if len(lines) < 6:
+        swing_top1 = _load_swing_watchlist_top1()
+        if swing_top1:
+            line_text = f"- {swing_top1}"
+            if line_text not in used:
+                used.add(line_text)
+                lines.append(line_text)
+
     if len(lines) == 1:
         lines.append("- 今天預設空手，先等 opening recap 驗證。")
-    return lines[:4]
+    return lines[:7]
 
 
 def _build_opening_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
@@ -1258,7 +1356,7 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         f"{rule_summary_block}"
         f"Data JSON:\n{json.dumps(sanitize_prompt_payload(recap_payload), ensure_ascii=False)}"
     )
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -1267,7 +1365,12 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         },
     }
     try:
-        response = requests.post(endpoint, json=payload, timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 5.0))
+        response = requests.post(
+            endpoint,
+            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+            json=payload,
+            timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 5.0),
+        )
         response.raise_for_status()
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -1451,8 +1554,10 @@ def _build_position_lines(positions_df: pd.DataFrame) -> List[str]:
     lines: List[str] = []
     trimmed = positions_df.sort_values(["ticker"]).head(5)
     for _, row in trimmed.iterrows():
+        horizon = str(row.get("horizon_tag", "")).strip()
+        tag = "[S]" if horizon == HORIZON_SWING_CORE else "[M]"
         lines.append(
-            f"- {row.get('ticker', 'NA')} | qty={_safe_float(row.get('quantity', 0.0), 0.0):g} | avg={_safe_float(row.get('avg_cost', 0.0), 0.0):.2f} | add_count={_safe_int(row.get('add_count'), 0)}"
+            f"- {row.get('ticker', 'NA')}{tag} | qty={_safe_float(row.get('quantity', 0.0), 0.0):g} | avg={_safe_float(row.get('avg_cost', 0.0), 0.0):.2f} | add_count={_safe_int(row.get('add_count'), 0)}"
         )
     if len(positions_df) > len(trimmed):
         lines.append(f"- 其餘 {len(positions_df) - len(trimmed)} 檔持倉略。")
@@ -1464,8 +1569,10 @@ def _build_execution_lines(execution_summaries: List[dict]) -> List[str]:
         return ["- 這個時間窗沒有新的 execution 訊號。"]
     lines: List[str] = []
     for item in execution_summaries[:5]:
+        horizon = str(item.get("horizon_tag", "")).strip()
+        tag = "[S]" if horizon == HORIZON_SWING_CORE else "[M]"
         base = (
-            f"- {item.get('ticker', 'NA')} | {item.get('status_label', '待確認')} | 最新={item.get('latest_label', 'NA')} {item.get('latest_time', 'NA')}"
+            f"- {item.get('ticker', 'NA')}{tag} | {item.get('status_label', '待確認')} | 最新={item.get('latest_label', 'NA')} {item.get('latest_time', 'NA')}"
         )
         if bool(item.get("has_position")):
             base += f" | 持倉={float(item.get('position_qty', 0.0)):g}@{float(item.get('avg_cost', 0.0)):.2f}"
