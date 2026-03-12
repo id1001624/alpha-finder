@@ -37,8 +37,14 @@ from turso_state import (
 from .intraday_execution_engine import AI_DECISION_LATEST, SNAPSHOT_FILE, _classify_action, _fetch_intraday_bars
 from .intraday_indicators import add_intraday_indicators
 from .market_session import get_intraday_active_window
-from .position_state import get_position, load_positions
+from .position_state import get_position_by_profile, load_positions
 from .shadow_watchlist import build_decision_universe_df, load_shadow_decision_df
+from .strategy_context import (
+    classify_watch_horizon,
+    classify_watch_stance,
+    default_strategy_for_horizon,
+    detect_regime_tag,
+)
 
 
 ACTION_LABELS = {
@@ -411,6 +417,7 @@ def _build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
         "has_data": True,
         "action": action,
         "action_label": ACTION_LABELS.get(action, "待確認"),
+        "signal_type": str(snapshot_row.get("signal_type", "")).strip(),
         "size_fraction": _safe_float(snapshot_row.get("size_fraction"), 0.0),
         "reason": _clip_text(snapshot_row.get("reason_summary") or "", 90),
         "close": _safe_float(snapshot_row.get("close"), 0.0),
@@ -438,7 +445,9 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision
     if not _is_current_engine_signal(signal_ts):
         return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認", "signal_ts": signal_ts}
 
-    position = get_position(positions_df, ticker)
+    horizon = classify_watch_horizon(ticker, decision)
+    strategy = default_strategy_for_horizon(horizon)
+    position = get_position_by_profile(positions_df, ticker, horizon_tag=horizon, strategy_profile=strategy)
     meta = pd.Series(
         {
             "ticker": ticker,
@@ -447,25 +456,31 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision
             "risk_level": str((decision or {}).get("risk_level", "")).strip(),
             "confidence": pd.to_numeric((decision or {}).get("confidence"), errors="coerce"),
             "api_final_score": pd.to_numeric((decision or {}).get("api_final_score"), errors="coerce"),
+            "horizon_tag": horizon,
+            "strategy_profile": strategy,
         }
     )
     session_context = get_intraday_active_window(datetime.now(timezone.utc))
-    action, size_fraction, reason = _classify_action(
+    action, size_fraction, reason, signal_type = _classify_action(
         latest,
         previous,
         position,
         meta,
         session_context,
         pd.DataFrame(),
+        positions_df,
         _count_open_positions(positions_df),
         0,
         0,
+        detect_regime_tag(),
+        valid,
     )
     return {
         "ticker": ticker,
         "has_data": True,
         "action": action,
         "action_label": ACTION_LABELS.get(action, "待確認"),
+        "signal_type": signal_type,
         "size_fraction": float(size_fraction or 0.0),
         "reason": _clip_text(reason or "", 90),
         "close": _safe_float(latest.get("Close"), 0.0),
@@ -575,10 +590,13 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
     items: List[dict] = []
     for ticker in tickers:
         decision = decision_map.get(ticker, {})
-        position = get_position(positions_df, ticker)
+        horizon = classify_watch_horizon(ticker, decision)
+        strategy = default_strategy_for_horizon(horizon)
+        position = get_position_by_profile(positions_df, ticker, horizon_tag=horizon, strategy_profile=strategy)
         news = _tavily_search(f"{ticker} stock news premarket catalyst", max_results=max(1, min(int(CATALYST_TAVILY_MAX_RESULTS), 2)))
         has_position = bool(position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0)
         monitor_priority = str(decision.get("monitor_priority") or ("今天主監控" if (has_position or ticker in extra_tickers or ticker in saved_tickers) else "延續觀察")).strip()
+        engine_payload = _build_engine_payload(ticker, positions_df, snapshot_map, decision=decision)
         items.append(
             {
                 "ticker": ticker,
@@ -599,7 +617,7 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
                     "avg_cost": _safe_float(position.get("avg_cost", 0.0), 0.0) if position is not None else 0.0,
                 },
                 "tv_signal": _tv_payload_for(ticker, signal_map),
-                "engine": _build_engine_payload(ticker, positions_df, snapshot_map, decision=decision),
+                "engine": engine_payload,
                 "recent_execution": _load_recent_execution_rows(ticker, limit=3),
                 "news": [
                     {
@@ -608,6 +626,9 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
                     }
                     for item in news[:2]
                 ],
+                "horizon_tag": horizon,
+                "strategy_profile": strategy,
+                "stance": classify_watch_stance(horizon, engine_payload, decision),
                 "source_flags": {
                     "saved_watchlist": ticker in saved_tickers,
                     "ad_hoc_watchlist": ticker in extra_tickers,
@@ -651,7 +672,7 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
         "If there is no strong long candidate, leave priority_order empty instead of forcing one.\n\n"
         f"Data JSON:\n{json.dumps(sanitize_prompt_payload(payload), ensure_ascii=False)}"
     )
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     request_payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -660,7 +681,12 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
         },
     }
     try:
-        response = requests.post(endpoint, json=request_payload, timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 8.0))
+        response = requests.post(
+            endpoint,
+            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+            json=request_payload,
+            timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 8.0),
+        )
         response.raise_for_status()
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -822,7 +848,7 @@ def _gemini_saved_watchlist_followup_summary(payload: dict) -> dict:
         "action_plan should tell the user exactly what to do next, such as 留觀察、等站回 AVWAP、等開盤確認.\n\n"
         f"Data JSON:\n{json.dumps(sanitize_prompt_payload(payload), ensure_ascii=False)}"
     )
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     request_payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -831,7 +857,12 @@ def _gemini_saved_watchlist_followup_summary(payload: dict) -> dict:
         },
     }
     try:
-        response = requests.post(endpoint, json=request_payload, timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 8.0))
+        response = requests.post(
+            endpoint,
+            headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+            json=request_payload,
+            timeout=max(float(RECAP_GEMINI_TIMEOUT_SEC), 8.0),
+        )
         response.raise_for_status()
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]

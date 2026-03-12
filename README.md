@@ -61,9 +61,9 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 - /watchadd
 - /watchremove
 - /watchsaved
-- /buy
-- /add
-- /sell
+- /buy（可加 profile=monster 或 swing，預設 monster）
+- /add（可加 profile=monster 或 swing，預設 monster）
+- /sell（可加 profile=monster 或 swing，預設 monster）
 
 這兩個新查詢指令的用途：
 

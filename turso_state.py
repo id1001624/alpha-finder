@@ -39,6 +39,27 @@ TRADE_LEDGER_FIELDS = [
     "after_qty",
     "avg_cost_after",
     "realized_pnl_delta",
+    "horizon_tag",
+    "strategy_profile",
+    "signal_type",
+    "regime_tag",
+    "theme",
+    "entry_reason",
+    "exit_reason",
+    "position_size_fraction",
+    "entry_price",
+    "exit_price",
+    "holding_minutes",
+    "holding_days",
+    "mfe",
+    "mae",
+    "realized_R",
+    "realized_pct",
+    "slippage_bps",
+    "source_decision_rank",
+    "source_confidence",
+    "source_api_final_score",
+    "snapshot_json",
     "source",
     "note",
 ]
@@ -62,6 +83,26 @@ EXECUTION_LOG_FIELDS = [
     "timeframe",
     "tv_event",
     "signal_ts",
+    "horizon_tag",
+    "strategy_profile",
+    "signal_type",
+    "regime_tag",
+    "entry_reason",
+    "exit_reason",
+    "position_size_fraction",
+    "entry_price",
+    "exit_price",
+    "holding_minutes",
+    "holding_days",
+    "mfe",
+    "mae",
+    "realized_R",
+    "realized_pct",
+    "slippage_bps",
+    "source_decision_rank",
+    "source_confidence",
+    "source_api_final_score",
+    "snapshot_json",
     "close",
     "vwap",
     "sqzmom_color",
@@ -165,6 +206,27 @@ def _ensure_schema(conn) -> None:
             after_qty REAL NOT NULL DEFAULT 0,
             avg_cost_after REAL NOT NULL DEFAULT 0,
             realized_pnl_delta REAL NOT NULL DEFAULT 0,
+            horizon_tag TEXT NOT NULL DEFAULT '',
+            strategy_profile TEXT NOT NULL DEFAULT '',
+            signal_type TEXT NOT NULL DEFAULT '',
+            regime_tag TEXT NOT NULL DEFAULT '',
+            theme TEXT NOT NULL DEFAULT '',
+            entry_reason TEXT NOT NULL DEFAULT '',
+            exit_reason TEXT NOT NULL DEFAULT '',
+            position_size_fraction REAL NOT NULL DEFAULT 0,
+            entry_price REAL,
+            exit_price REAL,
+            holding_minutes REAL,
+            holding_days REAL,
+            mfe REAL,
+            mae REAL,
+            realized_R REAL,
+            realized_pct REAL,
+            slippage_bps REAL,
+            source_decision_rank INTEGER NOT NULL DEFAULT 0,
+            source_confidence REAL,
+            source_api_final_score REAL,
+            snapshot_json TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
             note TEXT NOT NULL DEFAULT ''
         )
@@ -195,6 +257,26 @@ def _ensure_schema(conn) -> None:
             timeframe TEXT NOT NULL DEFAULT '',
             tv_event TEXT NOT NULL DEFAULT '',
             signal_ts TEXT NOT NULL DEFAULT '',
+            horizon_tag TEXT NOT NULL DEFAULT '',
+            strategy_profile TEXT NOT NULL DEFAULT '',
+            signal_type TEXT NOT NULL DEFAULT '',
+            regime_tag TEXT NOT NULL DEFAULT '',
+            entry_reason TEXT NOT NULL DEFAULT '',
+            exit_reason TEXT NOT NULL DEFAULT '',
+            position_size_fraction REAL NOT NULL DEFAULT 0,
+            entry_price REAL,
+            exit_price REAL,
+            holding_minutes REAL,
+            holding_days REAL,
+            mfe REAL,
+            mae REAL,
+            realized_R REAL,
+            realized_pct REAL,
+            slippage_bps REAL,
+            source_decision_rank INTEGER NOT NULL DEFAULT 0,
+            source_confidence REAL,
+            source_api_final_score REAL,
+            snapshot_json TEXT NOT NULL DEFAULT '',
             close REAL,
             vwap REAL,
             sqzmom_color TEXT NOT NULL DEFAULT '',
@@ -211,6 +293,7 @@ def _ensure_schema(conn) -> None:
         CREATE TABLE IF NOT EXISTS saved_watchlists (
             user_id TEXT PRIMARY KEY,
             tickers_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             updated_at TEXT NOT NULL DEFAULT ''
         )
         """
@@ -218,6 +301,56 @@ def _ensure_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_saved_watchlists_updated_at ON saved_watchlists(updated_at)"
     )
+
+    # Backward-compatible migrations for older tables.
+    for sql in [
+        "ALTER TABLE position_trade_log ADD COLUMN horizon_tag TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN strategy_profile TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN signal_type TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN regime_tag TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN theme TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN entry_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN exit_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE position_trade_log ADD COLUMN position_size_fraction REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE position_trade_log ADD COLUMN entry_price REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN exit_price REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN holding_minutes REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN holding_days REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN mfe REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN mae REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN realized_R REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN realized_pct REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN slippage_bps REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN source_decision_rank INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE position_trade_log ADD COLUMN source_confidence REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN source_api_final_score REAL",
+        "ALTER TABLE position_trade_log ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN horizon_tag TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN strategy_profile TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN signal_type TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN regime_tag TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN entry_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN exit_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN position_size_fraction REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE execution_trade_log ADD COLUMN entry_price REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN exit_price REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN holding_minutes REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN holding_days REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN mfe REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN mae REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN realized_R REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN realized_pct REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN slippage_bps REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN source_decision_rank INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE execution_trade_log ADD COLUMN source_confidence REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN source_api_final_score REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE saved_watchlists ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+    ]:
+        try:
+            conn.execute(sql)
+        except Exception:  # noqa: BLE001
+            pass
     conn.commit()
 
 
@@ -252,10 +385,36 @@ def _normalize_trade_row(row: dict) -> dict:
     payload["ticker"] = str(payload.get("ticker", "")).strip().upper()
     payload["side"] = str(payload.get("side", "")).strip().lower()
     payload["position_effect"] = str(payload.get("position_effect", "")).strip().lower()
+    payload["horizon_tag"] = str(payload.get("horizon_tag", "")).strip().lower()
+    payload["strategy_profile"] = str(payload.get("strategy_profile", "")).strip().lower()
+    payload["signal_type"] = str(payload.get("signal_type", "")).strip().lower()
+    payload["regime_tag"] = str(payload.get("regime_tag", "")).strip().lower()
+    payload["theme"] = str(payload.get("theme", "")).strip()
+    payload["entry_reason"] = str(payload.get("entry_reason", "")).strip()
+    payload["exit_reason"] = str(payload.get("exit_reason", "")).strip()
+    payload["snapshot_json"] = str(payload.get("snapshot_json", "")).strip()
     payload["source"] = str(payload.get("source", "")).strip()
     payload["note"] = str(payload.get("note", "")).strip()
-    for field in ["quantity", "price", "before_qty", "after_qty", "avg_cost_after", "realized_pnl_delta"]:
-        payload[field] = float(pd.to_numeric(payload.get(field), errors="coerce") or 0.0)
+    for field in [
+        "quantity",
+        "price",
+        "before_qty",
+        "after_qty",
+        "avg_cost_after",
+        "realized_pnl_delta",
+        "position_size_fraction",
+        "holding_minutes",
+        "holding_days",
+        "slippage_bps",
+        "source_confidence",
+        "source_api_final_score",
+    ]:
+        _parsed = pd.to_numeric(payload.get(field), errors="coerce")
+        payload[field] = float(_parsed) if pd.notna(_parsed) else 0.0
+    payload["source_decision_rank"] = int(pd.to_numeric(payload.get("source_decision_rank"), errors="coerce")) if pd.notna(pd.to_numeric(payload.get("source_decision_rank"), errors="coerce")) else 0
+    for nullable_field in ["entry_price", "exit_price", "mfe", "mae", "realized_R", "realized_pct"]:
+        parsed = pd.to_numeric(payload.get(nullable_field), errors="coerce")
+        payload[nullable_field] = None if pd.isna(parsed) else float(parsed)
     return payload
 
 
@@ -297,13 +456,37 @@ def _normalize_execution_row(row: dict) -> dict:
         "timeframe",
         "tv_event",
         "signal_ts",
+        "horizon_tag",
+        "strategy_profile",
+        "signal_type",
+        "regime_tag",
+        "entry_reason",
+        "exit_reason",
+        "snapshot_json",
         "sqzmom_color",
         "signal_signature",
     ]:
         payload[field] = str(payload.get(field, "")).strip()
     payload["ticker"] = payload["ticker"].upper()
-    payload["rank"] = int(pd.to_numeric(payload.get("rank"), errors="coerce") or 0)
-    for field in ["close", "vwap", "sqzmom_value"]:
+    payload["rank"] = int(pd.to_numeric(payload.get("rank"), errors="coerce")) if pd.notna(pd.to_numeric(payload.get("rank"), errors="coerce")) else 0
+    payload["source_decision_rank"] = int(pd.to_numeric(payload.get("source_decision_rank"), errors="coerce")) if pd.notna(pd.to_numeric(payload.get("source_decision_rank"), errors="coerce")) else 0
+    for field in [
+        "close",
+        "vwap",
+        "sqzmom_value",
+        "position_size_fraction",
+        "entry_price",
+        "exit_price",
+        "holding_minutes",
+        "holding_days",
+        "mfe",
+        "mae",
+        "realized_R",
+        "realized_pct",
+        "slippage_bps",
+        "source_confidence",
+        "source_api_final_score",
+    ]:
         parsed = pd.to_numeric(payload.get(field), errors="coerce")
         payload[field] = None if pd.isna(parsed) else float(parsed)
     return payload
@@ -432,6 +615,26 @@ def append_execution_log_rows(rows: list[dict]) -> str | None:
                 payload["timeframe"],
                 payload["tv_event"],
                 payload["signal_ts"],
+                payload["horizon_tag"],
+                payload["strategy_profile"],
+                payload["signal_type"],
+                payload["regime_tag"],
+                payload["entry_reason"],
+                payload["exit_reason"],
+                payload["position_size_fraction"],
+                payload["entry_price"],
+                payload["exit_price"],
+                payload["holding_minutes"],
+                payload["holding_days"],
+                payload["mfe"],
+                payload["mae"],
+                payload["realized_R"],
+                payload["realized_pct"],
+                payload["slippage_bps"],
+                payload["source_decision_rank"],
+                payload["source_confidence"],
+                payload["source_api_final_score"],
+                payload["snapshot_json"],
                 payload["close"],
                 payload["vwap"],
                 payload["sqzmom_color"],
@@ -463,12 +666,32 @@ def append_execution_log_rows(rows: list[dict]) -> str | None:
                 timeframe,
                 tv_event,
                 signal_ts,
+                horizon_tag,
+                strategy_profile,
+                signal_type,
+                regime_tag,
+                entry_reason,
+                exit_reason,
+                position_size_fraction,
+                entry_price,
+                exit_price,
+                holding_minutes,
+                holding_days,
+                mfe,
+                mae,
+                realized_R,
+                realized_pct,
+                slippage_bps,
+                source_decision_rank,
+                source_confidence,
+                source_api_final_score,
+                snapshot_json,
                 close,
                 vwap,
                 sqzmom_color,
                 sqzmom_value,
                 signal_signature
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -514,9 +737,30 @@ def append_trade_ledger_row(row: dict) -> str | None:
                 after_qty,
                 avg_cost_after,
                 realized_pnl_delta,
+                horizon_tag,
+                strategy_profile,
+                signal_type,
+                regime_tag,
+                theme,
+                entry_reason,
+                exit_reason,
+                position_size_fraction,
+                entry_price,
+                exit_price,
+                holding_minutes,
+                holding_days,
+                mfe,
+                mae,
+                realized_R,
+                realized_pct,
+                slippage_bps,
+                source_decision_rank,
+                source_confidence,
+                source_api_final_score,
+                snapshot_json,
                 source,
                 note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -530,6 +774,27 @@ def append_trade_ledger_row(row: dict) -> str | None:
                 payload["after_qty"],
                 payload["avg_cost_after"],
                 payload["realized_pnl_delta"],
+                payload["horizon_tag"],
+                payload["strategy_profile"],
+                payload["signal_type"],
+                payload["regime_tag"],
+                payload["theme"],
+                payload["entry_reason"],
+                payload["exit_reason"],
+                payload["position_size_fraction"],
+                payload["entry_price"],
+                payload["exit_price"],
+                payload["holding_minutes"],
+                payload["holding_days"],
+                payload["mfe"],
+                payload["mae"],
+                payload["realized_R"],
+                payload["realized_pct"],
+                payload["slippage_bps"],
+                payload["source_decision_rank"],
+                payload["source_confidence"],
+                payload["source_api_final_score"],
+                payload["snapshot_json"],
                 payload["source"],
                 payload["note"],
             ),
@@ -574,6 +839,27 @@ def sync_trade_ledger_csv(source_path: Path) -> str | None:
                 payload["after_qty"],
                 payload["avg_cost_after"],
                 payload["realized_pnl_delta"],
+                payload["horizon_tag"],
+                payload["strategy_profile"],
+                payload["signal_type"],
+                payload["regime_tag"],
+                payload["theme"],
+                payload["entry_reason"],
+                payload["exit_reason"],
+                payload["position_size_fraction"],
+                payload["entry_price"],
+                payload["exit_price"],
+                payload["holding_minutes"],
+                payload["holding_days"],
+                payload["mfe"],
+                payload["mae"],
+                payload["realized_R"],
+                payload["realized_pct"],
+                payload["slippage_bps"],
+                payload["source_decision_rank"],
+                payload["source_confidence"],
+                payload["source_api_final_score"],
+                payload["snapshot_json"],
                 payload["source"],
                 payload["note"],
             )
@@ -594,9 +880,30 @@ def sync_trade_ledger_csv(source_path: Path) -> str | None:
                 after_qty,
                 avg_cost_after,
                 realized_pnl_delta,
+                horizon_tag,
+                strategy_profile,
+                signal_type,
+                regime_tag,
+                theme,
+                entry_reason,
+                exit_reason,
+                position_size_fraction,
+                entry_price,
+                exit_price,
+                holding_minutes,
+                holding_days,
+                mfe,
+                mae,
+                realized_R,
+                realized_pct,
+                slippage_bps,
+                source_decision_rank,
+                source_confidence,
+                source_api_final_score,
+                snapshot_json,
                 source,
                 note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -632,7 +939,8 @@ def load_recent_trade_ledger(limit: int = 5, ticker: str = "") -> pd.DataFrame:
     if ticker_value:
         return _load_query_df(
             """
-            SELECT recorded_at, ticker, side, quantity, price, position_effect, after_qty, avg_cost_after, realized_pnl_delta, source, note
+                 SELECT recorded_at, ticker, side, quantity, price, position_effect, after_qty, avg_cost_after, realized_pnl_delta,
+                     horizon_tag, strategy_profile, signal_type, regime_tag, source, note
             FROM position_trade_log
             WHERE ticker = ?
             ORDER BY recorded_at DESC, event_id DESC
@@ -642,7 +950,8 @@ def load_recent_trade_ledger(limit: int = 5, ticker: str = "") -> pd.DataFrame:
         )
     return _load_query_df(
         """
-        SELECT recorded_at, ticker, side, quantity, price, position_effect, after_qty, avg_cost_after, realized_pnl_delta, source, note
+         SELECT recorded_at, ticker, side, quantity, price, position_effect, after_qty, avg_cost_after, realized_pnl_delta,
+             horizon_tag, strategy_profile, signal_type, regime_tag, source, note
         FROM position_trade_log
         ORDER BY recorded_at DESC, event_id DESC
         LIMIT ?
@@ -657,7 +966,9 @@ def load_recent_execution_log(limit: int = 5, ticker: str = "") -> pd.DataFrame:
     if ticker_value:
         return _load_query_df(
             """
-            SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag, close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe, reason_summary, signal_ts
+                 SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag,
+                     horizon_tag, strategy_profile, signal_type, regime_tag,
+                     close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe, reason_summary, signal_ts
             FROM execution_trade_log
             WHERE ticker = ?
             ORDER BY execution_date DESC, execution_time DESC, recorded_at DESC
@@ -667,7 +978,9 @@ def load_recent_execution_log(limit: int = 5, ticker: str = "") -> pd.DataFrame:
         )
     return _load_query_df(
         """
-        SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag, close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe, reason_summary, signal_ts
+         SELECT recorded_at, execution_date, execution_time, ticker, action, position_effect, rank, decision_tag,
+             horizon_tag, strategy_profile, signal_type, regime_tag,
+             close, vwap, sqzmom_color, sqzmom_value, signal_source, timeframe, reason_summary, signal_ts
         FROM execution_trade_log
         ORDER BY execution_date DESC, execution_time DESC, recorded_at DESC
         LIMIT ?
@@ -706,30 +1019,32 @@ def load_saved_watchlist_state(user_id: int | str) -> list[str] | None:
 def load_all_saved_watchlist_states() -> pd.DataFrame:
     return _load_query_df(
         """
-        SELECT user_id, tickers_json, updated_at
+        SELECT user_id, tickers_json, metadata_json, updated_at
         FROM saved_watchlists
         ORDER BY updated_at DESC, user_id ASC
         """
     )
 
 
-def sync_saved_watchlist_state(user_id: int | str, tickers: list[str], updated_at: str = "") -> str | None:
+def sync_saved_watchlist_state(user_id: int | str, tickers: list[str], updated_at: str = "", metadata: dict | None = None) -> str | None:
     conn = _connect()
     if conn is None:
         return None
     normalized = [str(item or "").strip().upper() for item in tickers if str(item or "").strip()]
     payload = json.dumps(normalized, ensure_ascii=False)
+    metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
     updated_text = str(updated_at or "").strip() or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     try:
         conn.execute(
             """
-            INSERT INTO saved_watchlists (user_id, tickers_json, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO saved_watchlists (user_id, tickers_json, metadata_json, updated_at)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 tickers_json = excluded.tickers_json,
+                metadata_json = excluded.metadata_json,
                 updated_at = excluded.updated_at
             """,
-            (str(user_id), payload, updated_text),
+            (str(user_id), payload, metadata_json, updated_text),
         )
         conn.commit()
     except Exception:  # noqa: BLE001

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -13,6 +14,10 @@ from prompt_safety import sanitize_prompt_payload, sanitize_prompt_text, sanitiz
 
 
 logger = get_logger(__name__)
+
+
+_GEMINI_RATE_LIMIT_RETRIES = 2
+_GEMINI_RATE_LIMIT_BASE_SLEEP_SEC = 2.0
 
 
 API_CATALYST_COLUMNS = [
@@ -95,6 +100,75 @@ def _extract_json_block(text: str) -> Dict[str, object]:
         return {}
 
 
+def _parse_retry_after_seconds(response: requests.Response, attempt: int) -> float:
+    retry_after = response.headers.get('Retry-After', '') if response is not None else ''
+    try:
+        parsed = float(str(retry_after).strip())
+        if parsed > 0:
+            return min(parsed, 30.0)
+    except ValueError:
+        pass
+    return min(_GEMINI_RATE_LIMIT_BASE_SLEEP_SEC * (2 ** attempt), 20.0)
+
+
+def _post_gemini_json(
+    *,
+    api_key: str,
+    model: str,
+    payload: Dict[str, object],
+    timeout_sec: float,
+    purpose: str,
+) -> tuple[Dict[str, object], bool]:
+    endpoint = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+    headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': api_key,
+    }
+
+    for attempt in range(_GEMINI_RATE_LIMIT_RETRIES + 1):
+        try:
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=timeout_sec)
+        except requests.RequestException as exc:
+            logger.warning('gemini %s transport failed on model %s: %s', purpose, model, exc.__class__.__name__)
+            return {}, False
+
+        if response.status_code == 429:
+            wait_seconds = _parse_retry_after_seconds(response, attempt)
+            if attempt < _GEMINI_RATE_LIMIT_RETRIES:
+                logger.warning(
+                    'gemini %s rate limited on model %s (attempt %s/%s, retry in %.1fs)',
+                    purpose,
+                    model,
+                    attempt + 1,
+                    _GEMINI_RATE_LIMIT_RETRIES + 1,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            logger.warning(
+                'gemini %s rate limited on model %s after %s attempts',
+                purpose,
+                model,
+                _GEMINI_RATE_LIMIT_RETRIES + 1,
+            )
+            return {}, True
+
+        if response.status_code >= 400:
+            logger.warning('gemini %s failed on model %s with status %s', purpose, model, response.status_code)
+            return {}, False
+
+        try:
+            data = response.json()
+        except ValueError:
+            logger.warning('gemini %s returned invalid JSON on model %s', purpose, model)
+            return {}, False
+
+        return data if isinstance(data, dict) else {}, False
+
+    return {}, False
+
+
 def _tavily_search(query: str, api_key: str, max_results: int, timeout_sec: float) -> List[Dict[str, str]]:
     if not api_key:
         return []
@@ -137,9 +211,9 @@ def _gemini_catalyst_analyze(
     api_key: str,
     model: str,
     timeout_sec: float,
-) -> Dict[str, object]:
+) -> tuple[Dict[str, object], bool]:
     if not api_key:
-        return {}
+        return {}, False
 
     safe_ticker = sanitize_ticker(ticker)
     safe_snippets = []
@@ -165,7 +239,6 @@ def _gemini_catalyst_analyze(
         + json.dumps(sanitize_prompt_payload(safe_snippets), ensure_ascii=False)
     )
 
-    endpoint = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}'
     payload = {
         'contents': [{'parts': [{'text': prompt}]}],
         'generationConfig': {
@@ -174,22 +247,24 @@ def _gemini_catalyst_analyze(
         },
     }
 
-    try:
-        response = requests.post(endpoint, json=payload, timeout=timeout_sec)
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning('gemini catalyst analyze failed for %s: %s', safe_ticker, exc)
-        return {}
+    data, rate_limited = _post_gemini_json(
+        api_key=api_key,
+        model=model,
+        payload=payload,
+        timeout_sec=timeout_sec,
+        purpose=f'catalyst analyze for {safe_ticker}',
+    )
+    if not data:
+        return {}, rate_limited
 
     try:
         text = data['candidates'][0]['content']['parts'][0]['text']
     except (KeyError, IndexError, TypeError):
-        return {}
+        return {}, False
 
     parsed = _extract_json_block(text)
     if not parsed:
-        return {}
+        return {}, False
 
     return {
         'ticker': safe_ticker,
@@ -199,7 +274,7 @@ def _gemini_catalyst_analyze(
         'explosion_probability': int(round(_safe_float(parsed.get('explosion_probability'), 0))),
         'confidence': int(round(_safe_float(parsed.get('confidence'), 0))),
         'reason': str(parsed.get('reason', '')).strip(),
-    }
+    }, False
 
 
 def write_api_catalyst_artifacts(
@@ -411,7 +486,6 @@ def generate_api_ai_decision(
     )
 
     rows: List[Dict[str, object]] = []
-    endpoint = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}'
     payload = {
         'contents': [{'parts': [{'text': prompt}]}],
         'generationConfig': {
@@ -419,23 +493,27 @@ def generate_api_ai_decision(
             'responseMimeType': 'application/json',
         },
     }
+    data, rate_limited = _post_gemini_json(
+        api_key=api_key,
+        model=model,
+        payload=payload,
+        timeout_sec=timeout_sec,
+        purpose='api decision generation',
+    )
     try:
-        response = requests.post(endpoint, json=payload, timeout=timeout_sec)
-        response.raise_for_status()
-        data = response.json()
         text = data['candidates'][0]['content']['parts'][0]['text']
         parsed = _extract_json_block(text)
         maybe_rows = parsed.get('rows', []) if isinstance(parsed, dict) else []
         if isinstance(maybe_rows, list):
             rows = [item for item in maybe_rows if isinstance(item, dict)]
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError):
         rows = []
 
     if not rows:
         return {
             'enabled': False,
             'rows': 0,
-            'reason': 'no_gemini_decision_rows',
+            'reason': 'gemini_decision_rate_limited' if rate_limited else 'no_gemini_decision_rows',
             'file': filename,
         }
 
@@ -501,6 +579,7 @@ def run_catalyst_detector_api(
         )
 
     rows: List[Dict[str, object]] = []
+    rate_limited = False
     top_df = candidates_df.head(max(int(top_k), 1)).copy()
 
     for _, row in top_df.iterrows():
@@ -511,7 +590,7 @@ def run_catalyst_detector_api(
         query = f'{ticker} stock news catalyst earnings partnership guidance FDA contract'
         snippets = _tavily_search(query=query, api_key=tavily_api_key, max_results=tavily_max_results, timeout_sec=timeout_sec)
 
-        analysis = _gemini_catalyst_analyze(
+        analysis, is_rate_limited = _gemini_catalyst_analyze(
             ticker=ticker,
             snippets=snippets,
             api_key=gemini_api_key,
@@ -527,7 +606,7 @@ def run_catalyst_detector_api(
                 'hype_score': 0,
                 'explosion_probability': 0,
                 'confidence': 0,
-                'reason': 'analysis_unavailable',
+                'reason': 'gemini_rate_limited' if is_rate_limited else 'analysis_unavailable',
             }
 
         rank_score = _safe_float(row.get('rank_score_v1'))
@@ -547,6 +626,11 @@ def run_catalyst_detector_api(
         )
         rows.append(analysis)
 
+        if is_rate_limited:
+            rate_limited = True
+            logger.warning('gemini catalyst pass stopped early after rate limit at %s', ticker)
+            break
+
     out = pd.DataFrame(rows)
     if len(out) > 0:
         out = out.sort_values(['api_final_score', 'confidence', 'explosion_probability', 'ticker'], ascending=[False, False, False, True]).reset_index(drop=True)
@@ -560,6 +644,6 @@ def run_catalyst_detector_api(
         gemini_model=gemini_model,
         out_df=out,
         enabled=True,
-        reason='ok',
+        reason='rate_limited_partial' if rate_limited else 'ok',
         top_tickers=top_tickers,
     )

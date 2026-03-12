@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from ai_trading.strategy_context import ensure_decision_strategy_columns
 
 from config import (
     SHADOW_AI_DECISION_BASE_BONUS,
@@ -31,6 +32,10 @@ DECISION_BASE_COLUMNS = [
     "decision_tag",
     "reason_summary",
     "catalyst_summary",
+    "horizon_tag",
+    "strategy_profile",
+    "signal_type",
+    "regime_tag",
 ]
 
 
@@ -56,6 +61,7 @@ def normalize_decision_df(df: pd.DataFrame) -> pd.DataFrame:
     out["short_score_final"] = pd.to_numeric(out["short_score_final"], errors="coerce")
     out = out[(out["ticker"] != "") & out["rank"].notna()].copy()
     out["rank"] = out["rank"].astype(int)
+    out = ensure_decision_strategy_columns(out)
     return out.reset_index(drop=True)
 
 
