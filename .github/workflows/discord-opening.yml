@@ -2,10 +2,6 @@ name: Discord Opening Recap
 
 on:
   workflow_dispatch:
-  schedule:
-    # Retry once inside the same opening validation window in case GitHub drops a schedule tick.
-    - cron: '38,46 13 * * 1-5'
-    - cron: '38,46 14 * * 1-5'
 
 concurrency:
   group: discord-opening-recap

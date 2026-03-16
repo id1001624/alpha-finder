@@ -52,3 +52,20 @@ def test_bedtime_unique_candidate_line_uses_single_top_name():
     )
     line = bedtime_line(df, pd.DataFrame())
     assert "明天唯一候選新倉是 ZVRA" in line
+
+
+def test_bedtime_strategy_lines_include_swing_recommendation_line():
+    build_bedtime_strategy_lines = getattr(recap, "_build_bedtime_strategy_lines")
+    df = pd.DataFrame([
+        {"ticker": "AAPL", "rank": 1, "decision_tag": "keep", "risk_level": "中", "confidence": 55, "api_final_score": 82}
+    ])
+    context = {
+        "positions_df": pd.DataFrame(),
+        "swing_strategy_recommendation": {
+            "signal": "buy",
+            "confidence": 0.62,
+            "symbols": ["AAPL", "MSFT"],
+        },
+    }
+    lines = build_bedtime_strategy_lines(df, context)
+    assert any("Swing Core" in line for line in lines)

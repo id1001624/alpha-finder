@@ -2,8 +2,6 @@ name: Discord Morning Recap
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 23 * * *'
 
 concurrency:
   group: discord-morning-recap

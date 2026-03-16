@@ -5,6 +5,8 @@ from typing import Dict, Tuple
 import pandas as pd
 import config as settings_module
 
+from .contracts import parse_probability_mid
+
 
 def _to_float_series(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
     if col not in df.columns:
@@ -61,6 +63,19 @@ def _risk_level(risk_score: pd.Series) -> pd.Series:
     return level
 
 
+def _normalize_overnight_catalyst(df: pd.DataFrame) -> pd.Series:
+    if 'overnight_catalyst' not in df.columns:
+        return pd.Series('', index=df.index, dtype=object)
+    out = df['overnight_catalyst'].fillna('').astype(str).str.strip().str.lower()
+    return out.replace({'none': '', 'nan': '', 'null': ''})
+
+
+def _to_bool_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+    return df[col].fillna(False).astype(bool)
+
+
 def apply_decision_risk_layer(
     dataset: pd.DataFrame,
     top_k_signals: int | None = None,
@@ -71,15 +86,26 @@ def apply_decision_risk_layer(
     cfg = _resolve_decision_config()
     out = dataset.copy()
 
-    rank_score = _to_float_series(out, 'rank_score_v1')
+    rank_col = 'rank_score_v2_adjusted' if 'rank_score_v2_adjusted' in out.columns else 'rank_score_v1'
+    rank_score = _to_float_series(out, rank_col)
     price = _to_float_series(out, 'price')
     market_cap = _to_float_series(out, 'market_cap_raw')
     daily_change = _to_float_series(out, 'daily_change_pct')
     rel_volume = _to_float_series(out, 'rel_volume')
+    vol_strength = _to_float_series(out, 'xq_vol_strength')
     dollar_volume_m = _to_float_series(out, 'xq_dollar_volume_m')
     float_tightness = _to_float_series(out, 'float_tightness_proxy')
     volatility = _to_float_series(out, 'volatility_proxy_pct')
     event_score = _to_float_series(out, 'event_score_v1')
+    vwap = _to_float_series(out, 'tv_vwap')
+    sqzmom_hist = _to_float_series(out, 'tv_sqzmom_hist')
+    sqz_on = _to_bool_series(out, 'tv_sqz_on')
+    sqzmom_color = out.get('tv_sqzmom_color', pd.Series('', index=out.index)).fillna('').astype(str).str.lower()
+    momentum_accel_1d3d = _to_float_series(out, 'momentum_accel_1d3d')
+    momentum_accel_3d5d = _to_float_series(out, 'momentum_accel_3d5d')
+    overnight_catalyst = _normalize_overnight_catalyst(out)
+
+    out['overnight_catalyst'] = overnight_catalyst
 
     out['scanner_profile'] = cfg['scanner_profile'] if cfg['scanner_profile'] in {'balanced', 'monster_v1'} else 'balanced'
     out['float_rotation_proxy'] = (
@@ -116,6 +142,37 @@ def apply_decision_risk_layer(
     out['risk_level'] = _risk_level(out['risk_score_v1'])
     out['decision_action'] = _build_action(daily_change=daily_change, rel_volume=rel_volume, cfg=cfg)
 
+    close_above_vwap = (price >= vwap) & vwap.gt(0)
+    sqzmom_positive = (sqzmom_hist > 0) | sqzmom_color.isin(['green', 'lime'])
+    sqzmom_uptrend = ((sqzmom_hist > 0) & (momentum_accel_1d3d > 0)) | (
+        sqzmom_color.isin(['green', 'lime']) & (momentum_accel_1d3d >= 0) & (momentum_accel_3d5d >= 0)
+    )
+
+    out['tomorrow_entry_readiness'] = 'neutral'
+    avoid_chase_mask = (daily_change > 15.0) & (~overnight_catalyst.eq('hard_positive'))
+    ignition_ready_mask = daily_change.between(3.0, 10.0, inclusive='both') & (vol_strength > 1.5) & close_above_vwap & sqzmom_positive
+    pullback_watch_mask = (daily_change < 5.0) & sqz_on & sqzmom_uptrend
+
+    out.loc[avoid_chase_mask, 'tomorrow_entry_readiness'] = 'avoid_chase'
+    out.loc[ignition_ready_mask & (~avoid_chase_mask), 'tomorrow_entry_readiness'] = 'ignition_ready'
+    out.loc[pullback_watch_mask & (~avoid_chase_mask) & (~ignition_ready_mask), 'tomorrow_entry_readiness'] = 'pullback_watch'
+
+    base_prob = out.get('prob_next_day', pd.Series('', index=out.index)).apply(parse_probability_mid)
+    setup_type = out.get('setup_type', pd.Series('', index=out.index)).fillna('').astype(str).str.strip().str.lower()
+    overnight_missing = overnight_catalyst.eq('')
+
+    adjusted_prob = base_prob.astype(float).copy()
+    hard_positive_mask = overnight_catalyst.eq('hard_positive')
+    hard_negative_mask = overnight_catalyst.eq('hard_negative')
+    spike_no_catalyst_mask = (daily_change > 15.0) & overnight_missing
+    compression_setup_mask = (daily_change < 5.0) & setup_type.eq('compression_setup')
+
+    adjusted_prob.loc[spike_no_catalyst_mask] = base_prob.loc[spike_no_catalyst_mask] * 0.7
+    adjusted_prob.loc[compression_setup_mask] = base_prob.loc[compression_setup_mask] * 1.2
+    adjusted_prob.loc[hard_positive_mask] = (base_prob.loc[hard_positive_mask] * 1.35).clip(upper=90.0)
+    adjusted_prob.loc[hard_negative_mask] = base_prob.loc[hard_negative_mask] * 0.4
+    out['tomorrow_continuation_prob_adjusted'] = adjusted_prob.clip(lower=0.0, upper=99.0).round(2)
+
     out['decision_tag_v1'] = 'replace_candidate'
     profile = out['scanner_profile'].iloc[0]
     keep_min_score = cfg['monster_keep_min_score'] if profile == 'monster_v1' else cfg['keep_min']
@@ -141,19 +198,20 @@ def apply_decision_risk_layer(
     out.loc[out['decision_action'] == '等回踩 1-2% 再評估', 'invalidation_rule'] = '回踩後量縮且守不住 VWAP，視為失效'
 
     out = out.sort_values(
-        ['decision_tag_v1', 'rank_score_v1', 'event_score_v1', 'multi_radar_score', 'ticker'],
+        ['decision_tag_v1', rank_col, 'event_score_v1', 'multi_radar_score', 'ticker'],
         ascending=[True, False, False, False, True],
     ).reset_index(drop=True)
 
     decision_signals = out[out['decision_tag_v1'].isin(['keep', 'watch'])].copy()
     decision_signals = decision_signals.sort_values(
-        ['decision_tag_v1', 'rank_score_v1', 'risk_score_v1', 'ticker'],
+        ['decision_tag_v1', rank_col, 'risk_score_v1', 'ticker'],
         ascending=[True, False, True, True],
     ).head(int(top_k_signals or cfg['top_k']))
 
     signal_cols = [
         'ticker', 'decision_tag_v1', 'decision_action', 'risk_level', 'risk_score_v1',
-        'invalidation_rule', 'rank_score_v1', 'rank_engine_tier', 'rank_engine_rank',
+        'invalidation_rule', 'rank_score_v1', 'rank_score_v2_adjusted', 'rank_engine_tier', 'rank_engine_rank',
+        'overnight_catalyst', 'setup_type', 'tomorrow_entry_readiness', 'tomorrow_continuation_prob_adjusted',
         'scanner_profile', 'scanner_pass_v1', 'float_rotation_proxy',
         'event_score_v1', 'feature_alpha_score_v1', 'multi_radar_score',
         'daily_change_pct', 'rel_volume', 'monster_score',

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import re
@@ -45,6 +46,7 @@ from .strategy_context import (
     default_strategy_for_horizon,
     detect_regime_tag,
 )
+from .trade_memory import get_trade_memory
 
 
 ACTION_LABELS = {
@@ -122,6 +124,43 @@ def _extract_json_block(text: str) -> Dict[str, object]:
         return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _parse_similar_past_trades(value: object) -> List[dict]:
+    if isinstance(value, list):
+        items = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                parsed = ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                return []
+        items = parsed if isinstance(parsed, list) else []
+    out: List[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "ticker": str(item.get("ticker", "")).strip().upper(),
+                "action": str(item.get("action", "")).strip().lower(),
+                "signal_type": str(item.get("signal_type", "")).strip().lower(),
+                "outcome": str(item.get("outcome", "")).strip().lower(),
+                "similarity": _safe_float(item.get("similarity"), 0.0),
+                "reason_summary": _clip_text(item.get("reason_summary") or "", 100),
+                "recorded_at": str(item.get("recorded_at", "")).strip(),
+            }
+        )
+    return out[:3]
+
+
+def parse_similar_past_trades(value: object) -> List[dict]:
+    return _parse_similar_past_trades(value)
 
 
 def _parse_tickers(raw: str, limit: int = MAX_TRACKED_TICKERS) -> List[str]:
@@ -412,6 +451,7 @@ def _load_intraday_snapshot_map() -> Dict[str, dict]:
 
 def _build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
     action = str(snapshot_row.get("action", "")).strip().lower()
+    similar_past_trades = _parse_similar_past_trades(snapshot_row.get("similar_past_trades"))
     return {
         "ticker": str(snapshot_row.get("ticker", "")).strip().upper(),
         "has_data": True,
@@ -426,10 +466,20 @@ def _build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
         "sqzmom_color": str(snapshot_row.get("sqzmom_color", "")).strip(),
         "sqz_release": bool(snapshot_row.get("sqz_release", False)),
         "signal_ts": str(snapshot_row.get("signal_ts", "")).strip(),
+        "similar_past_trades": similar_past_trades,
     }
 
 
-def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision: dict | None = None) -> dict:
+def build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
+    return _build_engine_payload_from_snapshot(snapshot_row)
+
+
+def _build_engine_payload_live(
+    ticker: str,
+    positions_df: pd.DataFrame,
+    decision: dict | None = None,
+    trade_memory=None,
+) -> dict:
     bars = _fetch_intraday_bars(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, True)
     if len(bars) < 60:
         return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認"}
@@ -461,6 +511,21 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision
         }
     )
     session_context = get_intraday_active_window(datetime.now(timezone.utc))
+    similar_past_trades: List[dict] = []
+    if trade_memory is not None:
+        memory_context = {
+            "ticker": ticker,
+            "decision_tag": str((decision or {}).get("decision_tag", "")).strip().lower(),
+            "regime_tag": detect_regime_tag(),
+            "signal_type": "",
+            "sqzmom_color": str(latest.get("sqzmom_color", "")).strip().lower(),
+            "reason_summary": str((decision or {}).get("reason_summary", "")).strip(),
+        }
+        similar_past_trades = trade_memory.find_similar_trades(
+            ticker=ticker,
+            context=memory_context,
+            top_k=3,
+        )
     action, size_fraction, reason, signal_type = _classify_action(
         latest,
         previous,
@@ -474,6 +539,7 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision
         0,
         detect_regime_tag(),
         valid,
+        similar_past_trades,
     )
     return {
         "ticker": ticker,
@@ -489,14 +555,21 @@ def _build_engine_payload_live(ticker: str, positions_df: pd.DataFrame, decision
         "sqzmom_color": str(latest.get("sqzmom_color", "")).strip(),
         "sqz_release": bool(latest.get("sqz_release", False)),
         "signal_ts": signal_ts,
+        "similar_past_trades": similar_past_trades,
     }
 
 
-def _build_engine_payload(ticker: str, positions_df: pd.DataFrame, snapshot_map: Dict[str, dict], decision: dict | None = None) -> dict:
+def _build_engine_payload(
+    ticker: str,
+    positions_df: pd.DataFrame,
+    snapshot_map: Dict[str, dict],
+    decision: dict | None = None,
+    trade_memory=None,
+) -> dict:
     snapshot_row = snapshot_map.get(ticker)
     if snapshot_row is not None and _is_current_engine_signal(snapshot_row.get("signal_ts")):
         return _build_engine_payload_from_snapshot(snapshot_row)
-    return _build_engine_payload_live(ticker, positions_df, decision=decision)
+    return _build_engine_payload_live(ticker, positions_df, decision=decision, trade_memory=trade_memory)
 
 
 def _tv_payload_for(ticker: str, signal_map: Dict[str, object]) -> dict:
@@ -586,6 +659,10 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
     positions_df = load_positions()
     signal_map = _load_signal_map()
     snapshot_map = _load_intraday_snapshot_map()
+    trade_memory = get_trade_memory()
+    recent_execution_df = load_recent_execution_log(limit=600)
+    if len(recent_execution_df) > 0:
+        trade_memory.sync_completed_trades(recent_execution_df)
 
     items: List[dict] = []
     for ticker in tickers:
@@ -596,7 +673,13 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
         news = _tavily_search(f"{ticker} stock news premarket catalyst", max_results=max(1, min(int(CATALYST_TAVILY_MAX_RESULTS), 2)))
         has_position = bool(position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0)
         monitor_priority = str(decision.get("monitor_priority") or ("今天主監控" if (has_position or ticker in extra_tickers or ticker in saved_tickers) else "延續觀察")).strip()
-        engine_payload = _build_engine_payload(ticker, positions_df, snapshot_map, decision=decision)
+        engine_payload = _build_engine_payload(
+            ticker,
+            positions_df,
+            snapshot_map,
+            decision=decision,
+            trade_memory=trade_memory,
+        )
         items.append(
             {
                 "ticker": ticker,
@@ -618,6 +701,7 @@ def _build_watch_payload(tickers: List[str], saved_tickers: List[str], extra_tic
                 },
                 "tv_signal": _tv_payload_for(ticker, signal_map),
                 "engine": engine_payload,
+                "similar_past_trades": engine_payload.get("similar_past_trades", []),
                 "recent_execution": _load_recent_execution_rows(ticker, limit=3),
                 "news": [
                     {
@@ -661,6 +745,7 @@ def _gemini_watchlist_summary(payload: dict) -> dict:
         "If a ticker shows stop-loss, take-profit, or weak opening confirmation, prioritize that in risk_flags and action_plan before new long ideas. "
         "Only put clear buy candidates in priority_order. "
         "If many names are bullish, rank them from highest to lowest priority using cleaner engine continuation, stronger news, cleaner momentum, and better existing ai_decision rank. "
+        "If similar_past_trades exists for a ticker, use it as a tie-breaker: repeated loss patterns should lower priority and repeated win patterns can raise confidence. "
         "Do not recommend buying every bullish ticker. "
         "This is not a market commentary. It is a trading conclusion card. "
         "Return strict JSON only with keys: headline, decision, priority_order, risk_flags, action_plan. "
@@ -837,6 +922,7 @@ def _gemini_saved_watchlist_followup_summary(payload: dict) -> dict:
         "Do not turn this into a market commentary or a full portfolio review. "
         "Do not say a name is a formal new-entry order. "
         "Focus only on which names are still continuing cleanly, which names are rebuilding and worth re-entry observation, and which names should not be chased yet. "
+        "If similar_past_trades exists for a ticker, use it as a tie-breaker: repeated loss patterns should lower confidence for re-entry. "
         "Do not mention search process, data collection process, or raw news headlines. "
         "Return strict JSON only with keys: headline, decision, priority_order, risk_flags, action_plan. "
         "headline must be a very short Traditional Chinese title of at most 12 characters. "

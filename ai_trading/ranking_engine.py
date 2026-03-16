@@ -97,6 +97,14 @@ def _event_score_map(event_signals: pd.DataFrame) -> Dict[str, float]:
     return dict(zip(grouped['ticker'], grouped['event_score']))
 
 
+def _normalize_overnight_catalyst(df: pd.DataFrame) -> pd.Series:
+    if 'overnight_catalyst' not in df.columns:
+        return pd.Series('', index=df.index, dtype=object)
+
+    out = df['overnight_catalyst'].fillna('').astype(str).str.strip().str.lower()
+    return out.replace({'none': '', 'nan': '', 'null': ''})
+
+
 def apply_ranking_engine(
     dataset: pd.DataFrame,
     event_signals: pd.DataFrame,
@@ -142,28 +150,40 @@ def apply_ranking_engine(
         drawdown_penalty
     ).round(2)
 
+    daily_change = _to_float_series(out, 'daily_change_pct')
+    overnight_catalyst = _normalize_overnight_catalyst(out)
+    overnight_missing = overnight_catalyst.eq('')
+
+    v2_adjustment = pd.Series(0.0, index=out.index, dtype=float)
+    v2_adjustment.loc[(daily_change > 15.0) & overnight_missing] -= 30.0
+    v2_adjustment.loc[(daily_change > 10.0) & (daily_change <= 15.0) & overnight_missing] -= 15.0
+    v2_adjustment.loc[overnight_catalyst.eq('hard_positive')] += 25.0
+    v2_adjustment.loc[overnight_catalyst.eq('soft_positive')] += 12.0
+    out['rank_score_v2_adjusted'] = (out['rank_score_v1'] + v2_adjustment).round(2)
+
     out['rank_regime'] = regime
     out['rank_breadth'] = round(breadth, 4)
     out['rank_engine_tier'] = 'C'
-    out.loc[out['rank_score_v1'] >= rank_settings['tier_a_min'], 'rank_engine_tier'] = 'A'
-    out.loc[(out['rank_score_v1'] >= rank_settings['tier_b_min']) & (out['rank_score_v1'] < rank_settings['tier_a_min']), 'rank_engine_tier'] = 'B'
+    out.loc[out['rank_score_v2_adjusted'] >= rank_settings['tier_a_min'], 'rank_engine_tier'] = 'A'
+    out.loc[(out['rank_score_v2_adjusted'] >= rank_settings['tier_b_min']) & (out['rank_score_v2_adjusted'] < rank_settings['tier_a_min']), 'rank_engine_tier'] = 'B'
 
     out = out.sort_values(
-        ['rank_score_v1', 'event_score_v1', 'multi_radar_score', 'feature_alpha_score_v1', 'monster_score', 'ticker'],
-        ascending=[False, False, False, False, False, True],
+        ['rank_score_v2_adjusted', 'rank_score_v1', 'event_score_v1', 'multi_radar_score', 'feature_alpha_score_v1', 'monster_score', 'ticker'],
+        ascending=[False, False, False, False, False, False, True],
     ).reset_index(drop=True)
     out['rank_engine_rank'] = range(1, len(out) + 1)
 
     signal_mask = (out['rank_signal_count'] >= 2) | out['rank_engine_tier'].isin(['A', 'B'])
     ranking_signals = out[signal_mask].copy()
     ranking_signals = ranking_signals.sort_values(
-        ['rank_score_v1', 'rank_signal_count', 'event_score_v1', 'ticker'],
-        ascending=[False, False, False, True],
+        ['rank_score_v2_adjusted', 'rank_score_v1', 'rank_signal_count', 'event_score_v1', 'ticker'],
+        ascending=[False, False, False, False, True],
     ).head(int(top_k_signals or rank_settings['top_k']))
 
     signal_cols = [
-        'ticker', 'rank_engine_rank', 'rank_engine_tier', 'rank_score_v1',
+        'ticker', 'rank_engine_rank', 'rank_engine_tier', 'rank_score_v1', 'rank_score_v2_adjusted',
         'rank_signal_count', 'rank_regime', 'rank_breadth',
+        'overnight_catalyst',
         'event_score_v1', 'feature_alpha_score_v1', 'multi_radar_score',
         'base_alpha_score_v1', 'monster_score', 'daily_change_pct', 'rel_volume',
         'is_in_ai_focus', 'is_in_fusion', 'is_in_monster_radar', 'is_in_xq',

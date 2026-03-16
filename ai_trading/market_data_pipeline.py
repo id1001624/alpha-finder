@@ -75,6 +75,7 @@ class MarketDataPipeline:
             'core_score_source': 'core_score_source',
             'TV_SQZ_On': 'tv_sqz_on',
             'TV_SQZMOM_Color': 'tv_sqzmom_color',
+            'TV_SQZMOM_Value': 'tv_sqzmom_hist',
             'TV_VWAP': 'tv_vwap',
             'TV_Signal_Age_Min': 'tv_signal_age_min',
             'Sector': 'sector',
@@ -124,6 +125,7 @@ class MarketDataPipeline:
             'prob_next_day': 'prob_next_day',
             'prob_day2': 'prob_day2',
             'decision_tag_hint': 'decision_tag_hint',
+            'setup_type': 'setup_type',
             'ai_query_hint': 'ai_query_hint',
         }
         cols = ['ticker'] + [c for c in rename_map.keys() if c in xq.columns]

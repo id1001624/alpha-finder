@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -12,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app_logging import get_logger
 
-from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions, get_position
+from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
 from ai_trading.strategy_context import (
     HORIZON_INTRADAY_MONSTER,
     HORIZON_SWING_CORE,
@@ -22,10 +24,12 @@ from ai_trading.strategy_context import (
 from ai_trading.watchlist_brief import (
     add_saved_watchlist_tickers,
     build_watchlist_brief_message,
+    build_saved_watchlist_followup_message,
     format_saved_watchlist_message,
     load_saved_watchlist,
     remove_saved_watchlist_tickers,
 )
+from scripts.push_alerts_from_ai_decision import build_recap_message_preview
 from config import (
     DISCORD_BOT_ALLOWED_CHANNEL_IDS,
     DISCORD_BOT_ENABLED,
@@ -36,6 +40,8 @@ from config import (
 from turso_state import load_recent_execution_log, load_recent_trade_ledger
 
 logger = get_logger(__name__)
+ALERT_DIR = PROJECT_ROOT / "repo_outputs" / "backtest" / "alerts"
+RECAP_STATUS_LATEST_JSON = ALERT_DIR / "recap_status_latest.json"
 
 
 def _parse_allowed_channel_ids(raw: str) -> set[int]:
@@ -70,6 +76,12 @@ def _normalize_profile(raw: str) -> tuple[str, str]:
     return STRATEGY_MONSTER_SWING, HORIZON_INTRADAY_MONSTER
 
 
+def _strategy_to_profile_label(strategy_profile: str) -> str:
+    if str(strategy_profile).strip().lower() == STRATEGY_SWING_TREND:
+        return "swing"
+    return "monster"
+
+
 def _help_text() -> str:
     return (
         "可用指令:\n"
@@ -84,6 +96,8 @@ def _help_text() -> str:
         "/watchadd tickers\n"
         "/watchremove tickers\n"
         "/watchsaved\n\n"
+        "/recap [mode] [debug] [tickers]\n\n"
+        "/recapstatus\n\n"
         "格式規則:\n"
         "- 沒有 [] 的參數 = 必填\n"
         "- 有 [] 的參數 = 可不填\n\n"
@@ -95,6 +109,9 @@ def _help_text() -> str:
         "- profile: monster 或 swing；不填預設 monster\n"
         "- limit: 顯示幾筆，預設 5，最大 20\n"
         "- tickers: 可一次多檔，空白或逗號分隔\n\n"
+        "- recap mode: bedtime / morning / opening / watchlist\n"
+        "- debug: true/false，顯示 Gemini/Tavily 是否啟用與摘要資料量\n\n"
+        "- recapstatus: 顯示最近一次 recap 的命中摘要與原因碼（不觸發 API）\n\n"
         "也保留文字指令相容:\n"
         f"{DISCORD_BOT_PREFIX}buy AAPL 100 188.2 monster\n"
         f"{DISCORD_BOT_PREFIX}add AAPL 50 190.1 swing\n"
@@ -106,7 +123,10 @@ def _help_text() -> str:
         f"{DISCORD_BOT_PREFIX}watchlist AAPL NVDA TSLA\n"
         f"{DISCORD_BOT_PREFIX}watchadd AAPL NVDA\n"
         f"{DISCORD_BOT_PREFIX}watchremove AAPL\n"
-        f"{DISCORD_BOT_PREFIX}watchsaved\n\n"
+        f"{DISCORD_BOT_PREFIX}watchsaved\n"
+        f"{DISCORD_BOT_PREFIX}recap bedtime\n"
+        f"{DISCORD_BOT_PREFIX}recap watchlist AAPL NVDA\n\n"
+        f"{DISCORD_BOT_PREFIX}recapstatus\n\n"
         "規則提醒:\n"
         "- watchsaved 不會自動把你的成交改成 swing\n"
         "- 要做 swing 倉，請在 /buy /add /sell 明確填 profile=swing\n"
@@ -143,6 +163,70 @@ def _ctx_user_id(ctx) -> int:
     if user is not None and getattr(user, "id", None) is not None:
         return int(user.id)
     return 0
+
+
+def _save_recap_status(payload: dict) -> None:
+    ALERT_DIR.mkdir(parents=True, exist_ok=True)
+    data = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **(payload if isinstance(payload, dict) else {}),
+    }
+    RECAP_STATUS_LATEST_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_recap_status() -> dict:
+    if not RECAP_STATUS_LATEST_JSON.exists():
+        return {}
+    try:
+        data = json.loads(RECAP_STATUS_LATEST_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _derive_recap_reason_code(mode: str, pipeline_debug: dict, ai_summary_generated: bool) -> str:
+    mode_text = str(mode or "").strip().lower()
+    if mode_text == "watchlist":
+        return "watchlist_manual"
+    gemini_enabled = bool((pipeline_debug or {}).get("gemini_enabled"))
+    tavily_enabled = bool((pipeline_debug or {}).get("tavily_enabled"))
+    if gemini_enabled and ai_summary_generated:
+        return "ai_summary_ok"
+    if gemini_enabled and not ai_summary_generated:
+        return "gemini_fallback"
+    if (not gemini_enabled) and tavily_enabled:
+        return "gemini_disabled_tavily_only"
+    return "rules_only"
+
+
+def _build_recapstatus_message(status: dict) -> str:
+    if not status:
+        return "目前還沒有 recap 狀態紀錄。先執行 /recap bedtime。"
+    lines = [
+        "[Alpha Finder] Recap 狀態",
+        f"時間: {status.get('updated_at', 'NA')}",
+        f"mode: {status.get('mode', 'NA')}",
+        f"ok: {bool(status.get('ok', False))}",
+        f"reason_code: {status.get('reason_code', 'NA')}",
+        f"decision_date: {status.get('decision_date', 'NA')}",
+        f"source_id: {status.get('source_id', '')}",
+    ]
+
+    if "gemini_enabled" in status:
+        lines.append(f"gemini_enabled: {bool(status.get('gemini_enabled'))}")
+    if "tavily_enabled" in status:
+        lines.append(f"tavily_enabled: {bool(status.get('tavily_enabled'))}")
+    if "ai_summary_generated" in status:
+        lines.append(f"ai_summary_generated: {bool(status.get('ai_summary_generated'))}")
+    if "tracked_news_count" in status:
+        lines.append(f"tracked_news_count: {int(status.get('tracked_news_count', 0) or 0)}")
+    if "conflict_news_count" in status:
+        lines.append(f"conflict_news_count: {int(status.get('conflict_news_count', 0) or 0)}")
+
+    note = str(status.get("note", "")).strip()
+    if note:
+        lines.append(f"note: {note}")
+    return "\n".join(lines)
 
 
 def _format_recent_trades(ticker: str = "", limit: int = 5) -> str:
@@ -228,6 +312,40 @@ def main() -> int:
             await ctx.send(message)
         return False
 
+    async def _build_watchlist_recap_output(ctx, tickers: str, debug: bool, trigger: str) -> str:
+        saved_tickers = load_saved_watchlist(_ctx_user_id(ctx))
+        message = build_watchlist_brief_message(raw_tickers=tickers, saved_tickers=saved_tickers)
+        note = "watchlist alias output"
+        if debug:
+            followup_card = build_saved_watchlist_followup_message(saved_tickers=saved_tickers)
+            debug_lines = [
+                "",
+                "[Recap Debug]",
+                f"saved_tickers={len(saved_tickers)}",
+                "watchlist_mode=ai_decision + positions + saved_watchlist + optional extras",
+                "followup_card_enabled=true",
+            ]
+            message = message + "\n" + "\n".join(debug_lines)
+            message = message + "\n\n" + followup_card
+            note = "watchlist alias output + debug"
+
+        _save_recap_status(
+            {
+                "ok": True,
+                "mode": "watchlist",
+                "reason_code": _derive_recap_reason_code("watchlist", {}, False),
+                "decision_date": datetime.now().strftime("%Y-%m-%d"),
+                "source_id": f"saved={len(saved_tickers)}|trigger={trigger}",
+                "gemini_enabled": None,
+                "tavily_enabled": None,
+                "ai_summary_generated": None,
+                "tracked_news_count": 0,
+                "conflict_news_count": 0,
+                "note": note,
+            }
+        )
+        return message
+
     @bot.event
     async def on_ready():
         logger.info("Discord trade bot ready: %s", bot.user)
@@ -250,14 +368,18 @@ def main() -> int:
         if not await _guard_channel(ctx):
             return
         positions_df = load_positions()
-        row = positions_df[positions_df["ticker"] == ticker.strip().upper()]
-        if len(row) == 0:
+        rows = positions_df[positions_df["ticker"] == ticker.strip().upper()].copy()
+        rows = rows[pd.to_numeric(rows.get("quantity", 0.0), errors="coerce").fillna(0.0) > 0].copy()
+        if len(rows) == 0:
             await ctx.send(f"{ticker.upper()} 目前沒有開倉部位。")
             return
-        record = row.iloc[0]
-        await ctx.send(
-            f"{record['ticker']} | qty={float(record['quantity']):g} | avg={float(record['avg_cost']):.2f} | realized={float(record['realized_pnl']):.2f}"
-        )
+        lines = [f"{ticker.upper()} 目前部位:"]
+        for _, record in rows.sort_values(["horizon_tag", "strategy_profile", "updated_at"], ascending=[True, True, False]).iterrows():
+            lines.append(
+                f"- {record['horizon_tag']}/{record['strategy_profile']} (profile={_strategy_to_profile_label(str(record.get('strategy_profile', '')))})"
+                f" | qty={float(record['quantity']):g} | avg={float(record['avg_cost']):.2f} | realized={float(record['realized_pnl']):.2f}"
+            )
+        await ctx.send("\n".join(lines))
 
     @bot.hybrid_command(name="trades", description="查詢最近成交紀錄（Turso）")
     @app_commands.describe(ticker="可選，股票代號，例如 AAPL", limit="最多幾筆，預設 5")
@@ -275,16 +397,16 @@ def main() -> int:
         limit_value = max(1, min(int(limit), 20))
         await ctx.send(_format_recent_executions(ticker=ticker, limit=limit_value))
 
-    @bot.hybrid_command(name="watchlist", description="整合 ai_decision、持倉與你的關注股，輸出乾淨的盤前排序")
+    @bot.hybrid_command(name="watchlist", description="同 /recap watchlist：整合 ai_decision、持倉與關注股的結論卡")
     @app_commands.describe(tickers="可選，額外加入的股票代號，例如 AAPL NVDA TSLA")
     async def watchlist(ctx, *, tickers: str = ""):
         if not await _guard_channel(ctx):
             return
-        if getattr(ctx, "interaction", None) is not None:
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None and not interaction.response.is_done():
             await ctx.defer()
-        saved_tickers = load_saved_watchlist(_ctx_user_id(ctx))
         try:
-            message = build_watchlist_brief_message(raw_tickers=tickers, saved_tickers=saved_tickers)
+            message = await _build_watchlist_recap_output(ctx, tickers=tickers, debug=False, trigger="watchlist")
         except ValueError as exc:
             await ctx.send(f"指令失敗: {exc}")
             return
@@ -323,9 +445,106 @@ def main() -> int:
             return
         await ctx.send(format_saved_watchlist_message(_ctx_user_id(ctx)))
 
+    @bot.hybrid_command(name="recap", description="手動觸發 recap 結論卡（bedtime/morning/opening/watchlist）")
+    @app_commands.describe(
+        mode="bedtime/morning/opening/watchlist",
+        debug="是否附上 Gemini/Tavily/新聞覆蓋檢查資訊",
+        tickers="mode=watchlist 時可選，額外加入股票，例如 AAPL NVDA",
+    )
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="睡前 bedtime", value="bedtime"),
+            app_commands.Choice(name="早晨 morning", value="morning"),
+            app_commands.Choice(name="開盤 opening", value="opening"),
+            app_commands.Choice(name="追蹤 watchlist", value="watchlist"),
+        ]
+    )
+    async def recap(ctx, mode: str = "bedtime", debug: bool = False, *, tickers: str = ""):
+        if not await _guard_channel(ctx):
+            return
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None and not interaction.response.is_done():
+            await ctx.defer()
+
+        mode_text = str(mode or "bedtime").strip().lower() or "bedtime"
+        if mode_text == "watchlist":
+            try:
+                message = await _build_watchlist_recap_output(ctx, tickers=tickers, debug=bool(debug), trigger="recap")
+            except ValueError as exc:
+                await ctx.send(f"指令失敗: {exc}")
+                return
+            await _send_long_message(ctx, message)
+            return
+
+        try:
+            preview = build_recap_message_preview(mode=mode_text, top_n=5, tags={"keep", "watch"}, respect_mode_window=False)
+        except ValueError as exc:
+            await ctx.send(f"指令失敗: {exc}")
+            return
+
+        if not bool(preview.get("ok")):
+            _save_recap_status(
+                {
+                    "ok": False,
+                    "mode": mode_text,
+                    "reason_code": str(preview.get("skip_reason", "preview_error")).strip() or "preview_error",
+                    "decision_date": str(preview.get("decision_date", "unknown")),
+                    "source_id": str(preview.get("source_id", "")),
+                    "note": "preview not ok",
+                }
+            )
+            await ctx.send(f"無法產生 recap: {preview.get('skip_reason', 'unknown')}")
+            return
+
+        message = str(preview.get("message", "")).strip()
+        pipe = preview.get("pipeline_debug", {}) if isinstance(preview.get("pipeline_debug"), dict) else {}
+        _save_recap_status(
+            {
+                "ok": True,
+                "mode": str(preview.get("mode", mode_text)),
+                "reason_code": _derive_recap_reason_code(str(preview.get("mode", mode_text)), pipe, bool(pipe.get("ai_summary_generated"))),
+                "decision_date": str(preview.get("decision_date", "unknown")),
+                "source_id": str(preview.get("source_id", "")),
+                "gemini_enabled": bool(pipe.get("gemini_enabled")),
+                "tavily_enabled": bool(pipe.get("tavily_enabled")),
+                "ai_summary_generated": bool(pipe.get("ai_summary_generated")),
+                "tracked_news_count": int(pipe.get("tracked_news_count", 0) or 0),
+                "conflict_news_count": int(pipe.get("conflict_news_count", 0) or 0),
+                "note": "manual recap",
+            }
+        )
+
+        if debug:
+            debug_lines = [
+                "",
+                "[Recap Debug]",
+                f"mode={preview.get('mode', mode_text)}",
+                f"decision_date={preview.get('decision_date', 'unknown')}",
+                f"source_id={preview.get('source_id', '')}",
+                f"gemini_enabled={bool(pipe.get('gemini_enabled'))}",
+                f"tavily_enabled={bool(pipe.get('tavily_enabled'))}",
+                f"ai_summary_generated={bool(pipe.get('ai_summary_generated'))}",
+                f"tracked_news_count={int(pipe.get('tracked_news_count', 0) or 0)}",
+                f"conflict_news_count={int(pipe.get('conflict_news_count', 0) or 0)}",
+            ]
+            message = message + "\n" + "\n".join(debug_lines)
+
+        await _send_long_message(ctx, message)
+
+    @bot.hybrid_command(name="recapstatus", description="查看最近一次 recap 命中摘要與原因碼（不觸發 API）")
+    async def recapstatus(ctx):
+        if not await _guard_channel(ctx):
+            return
+        status = _load_recap_status()
+        await ctx.send(_build_recapstatus_message(status))
+
     async def _record_trade(ctx, side: str, ticker: str, quantity: float, price: float, note: str = "", profile: str = "monster"):
         if not await _guard_channel(ctx):
             return
+        # Slash command needs an early ACK to avoid the "application did not respond" toast.
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None and not interaction.response.is_done():
+            await ctx.defer()
         positions_df = load_positions()
         strategy_profile, horizon_tag = _normalize_profile(profile)
         try:
@@ -342,36 +561,28 @@ def main() -> int:
                 note=note,
             )
         except ValueError as exc:
-            # If selling and we couldn't find an open position for the given profile,
-            # try a fallback: locate any existing position for the ticker (ticker-only match)
-            # and reuse its horizon/profile so the sell can apply to the real open position.
-            if str(side).strip().lower() == "sell" and "no open position for" in str(exc).lower():
-                existing_any = get_position(positions_df, ticker)
-                if existing_any is not None:
-                    fallback_strategy = existing_any.get("strategy_profile", "")
-                    fallback_horizon = existing_any.get("horizon_tag", "")
-                    try:
-                        updated_df, ledger_row = apply_trade_fill(
-                            positions_df=positions_df,
-                            ticker=ticker,
-                            side=side,
-                            quantity=float(quantity),
-                            price=float(price),
-                            horizon_tag=fallback_horizon,
-                            strategy_profile=fallback_strategy,
-                            signal_type=f"manual_{side}",
-                            source="discord_bot",
-                            note=note,
+            if side == "sell" and "no open position for" in str(exc):
+                ticker_norm = str(ticker or "").strip().upper()
+                open_rows = positions_df[
+                    (positions_df["ticker"] == ticker_norm)
+                    & (pd.to_numeric(positions_df.get("quantity", 0.0), errors="coerce").fillna(0.0) > 0)
+                ].copy()
+                if len(open_rows) > 0:
+                    lines = [
+                        f"指令失敗: {exc}",
+                        f"你現在送的是 profile={str(profile or 'monster').strip().lower() or 'monster'}，但 {ticker_norm} 可用部位是：",
+                    ]
+                    for _, row in open_rows.sort_values(["horizon_tag", "strategy_profile"]).iterrows():
+                        lines.append(
+                            f"- {row.get('horizon_tag', '')}/{row.get('strategy_profile', '')}"
+                            f" (profile={_strategy_to_profile_label(str(row.get('strategy_profile', '')))})"
+                            f" | qty={float(row.get('quantity', 0.0)):g} | avg={float(row.get('avg_cost', 0.0)):.2f}"
                         )
-                    except ValueError as exc2:
-                        await ctx.send(f"指令失敗: {exc2}")
-                        return
-                else:
-                    await ctx.send(f"指令失敗: {exc}")
+                    lines.append("請用相同 profile 重送 /sell，或先用 /position ticker 確認。")
+                    await ctx.send("\n".join(lines))
                     return
-            else:
-                await ctx.send(f"指令失敗: {exc}")
-                return
+            await ctx.send(f"指令失敗: {exc}")
+            return
 
         save_positions(updated_df)
         append_trade_ledger(ledger_row)

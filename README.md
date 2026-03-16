@@ -5,7 +5,8 @@
 1. 每天產出最新決策
 2. 有真實成交時立刻回報 Discord
 
-其他像盤中監控、風控提醒、早晨摘要、開盤摘要、Swing 掃描，都是系統自動跑。
+盤中監控、風控提醒、Swing 掃描都維持自動。
+Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動觸發，避免排程延遲。
 
 ## 每天怎麼操作
 
@@ -39,6 +40,10 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 ```
 
 做完這 4 步，接下來只要看 Discord。
+
+欄位契約延伸說明（final_impact / swing_strategy_recommendation / similar_past_trades）：
+
+- docs/ai_decision_contract_extensions.md
 
 ## 回測要看什麼
 
@@ -133,7 +138,8 @@ profile 要怎麼選：
 ### Watchlist 類
 
 - /watchlist [tickers]
-  把最新 ai_decision、你的持倉、保存關注股、臨時輸入股票整合成乾淨排序。
+  輸出樣式已併入 /recap watchlist（同一種結論卡格式）。
+  把最新 ai_decision、你的持倉、保存關注股、臨時輸入股票整合成結論卡。
   tickers 可不填；如果要填，就是臨時多加幾檔一起比較。
 
 - /watchadd tickers
@@ -147,6 +153,16 @@ profile 要怎麼選：
 - /watchsaved
   看你目前保存的關注股。
 
+- /recap [mode] [debug] [tickers]
+  手動觸發 recap。
+  mode 可選 bedtime / morning / opening / watchlist。
+  debug 可選 true/false；true 時會附上 Gemini/Tavily 啟用狀態與新聞覆蓋數。
+  tickers 只在 mode=watchlist 有效，可臨時加股票一起看。
+
+- /recapstatus
+  顯示最近一次 recap 的命中摘要與原因碼。
+  這個指令不會觸發 Gemini/Tavily API，只讀最新狀態檔。
+
 ## 參數到底怎麼填
 
 - ticker：股票代號，例如 MU、NVDA、AAPL。
@@ -156,6 +172,8 @@ profile 要怎麼選：
 - profile：monster 或 swing；不填時預設 monster。
 - limit：要顯示幾筆資料；/trades 與 /executions 預設 5，最大 20。
 - tickers：可一次放多檔股票，空白或逗號分隔都可以。
+- mode：bedtime / morning / opening / watchlist。
+- debug：true / false；true 會顯示模型與搜尋管線檢查資訊。
 
 範例：
 
@@ -168,6 +186,10 @@ profile 要怎麼選：
 /executions NVDA 8
 /watchadd MU, NVDA, TSLA
 /watchlist MU NVDA
+/recap bedtime
+/recap morning debug=true
+/recap watchlist tickers=MU NVDA
+/recapstatus
 ```
 
 ## 最簡單的使用流程
@@ -175,27 +197,39 @@ profile 要怎麼選：
 ```text
 開盤前先看 /positions
 有成交就回報 /buy /add /sell
-想快速整理今天重點就看 /watchlist
+想看今晚或盤前結論就用 /recap bedtime 或 /recap morning
+想看開盤驗證就用 /recap opening
+想看 ai_decision + 持倉 + watchsaved 整合排序就用 /recap watchlist（/watchlist 也是同樣輸出）
+想看上一張 recap 是否真的命中 AI/搜尋層就用 /recapstatus
 看最近你自己怎麼買賣就用 /trades
 看系統最近怎麼判斷就用 /executions
 ```
 
+## Recap 使用方式（手動）
+
+- `/recap bedtime`：睡前結論卡（含今晚決策與明早執行重點）
+- `/recap morning`：隔夜結論卡（含過夜變化與盤前計畫）
+- `/recap opening`：開盤驗證結論卡（先驗證再動作）
+- `/recap watchlist`：watchsaved + ai_decision + 持倉整合卡
+
+`/watchlist` 現在是 `/recap watchlist` 的同輸出別名，方便舊習慣繼續用。
+
+補充：bedtime / morning / opening recap 都會把 watchsaved 與 ai_decision 一起納入追蹤查核，不是只看單一來源。
+
+### 如何驗證有走 Gemini + Tavily
+
+用 `/recap ... debug=true`，回傳尾端會有 `[Recap Debug]`：
+
+- `gemini_enabled=true/false`
+- `tavily_enabled=true/false`
+- `ai_summary_generated=true/false`
+- `tracked_news_count` / `conflict_news_count`
+
+這代表「本次執行時」是否具備模型與搜尋層，以及這次卡片是否有新聞查核資料。
+
 ## Discord 通知時間（台灣時間）
 
-### 固定摘要
-
-- Bedtime recap：每天 22:17
-- Morning recap：每天 07:17
-- Watchlist follow-up：每天 07:22
-
-### Opening recap
-
-- 夏令時間：約 21:38、21:46
-- 冬令時間：約 22:38、22:46
-
-這個摘要本來就不是一開盤立刻發，而是故意等開盤後幾分鐘再驗證一次。
-
-### 盤中風控提醒
+### 盤中風控提醒（自動）
 
 - 夏令時間：約 21:20 到隔天 05:10 之間，每 5 分鐘掃一次
 - 冬令時間：約 22:20 到隔天 06:10 之間，每 5 分鐘掃一次

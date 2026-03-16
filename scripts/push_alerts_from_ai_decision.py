@@ -38,11 +38,13 @@ from app_logging import get_logger
 from prompt_safety import sanitize_prompt_payload
 
 from ai_trading.position_state import load_positions
+from ai_trading.quantmuse_bridge import generate_bedtime_swing_recommendation
 from ai_trading.strategy_context import (
     HORIZON_SWING_CORE,
     classify_watch_horizon,
     default_strategy_for_horizon,
 )
+from ai_trading.watchlist_brief import load_all_saved_watchlist_tickers
 from config import (
     DISCORD_WEBHOOK_URL,
     GEMINI_API_KEY,
@@ -1009,6 +1011,21 @@ def _strategy_conclusion_for_summary(item: dict) -> str:
     return f"{ticker}{tag}: 先觀察，不主動追價。"
 
 
+def _swing_reco_to_plan_line(reco: dict) -> str:
+    if not isinstance(reco, dict) or not reco:
+        return ""
+    signal = str(reco.get("signal", "")).strip().lower()
+    confidence = _safe_float(reco.get("confidence"), 0.0)
+    symbols = [str(item).strip().upper() for item in reco.get("symbols", []) if str(item).strip()]
+    symbols_text = ", ".join(symbols[:3]) if symbols else "swing 核心名單"
+
+    if signal in {"buy", "add"}:
+        return f"Swing Core: 優先看 {symbols_text}，若明早續強再分批處理（信心 {confidence:.2f}）。"
+    if signal in {"reduce", "sell"}:
+        return f"Swing Core: {symbols_text} 先保守，若開盤偏弱先減碼降風險（信心 {confidence:.2f}）。"
+    return f"Swing Core: {symbols_text} 先觀察，不預設追價（信心 {confidence:.2f}）。"
+
+
 def _load_swing_watchlist_top1() -> Optional[str]:
     """讀取 swing_signal_latest.csv 快照，回傳最強 swing 候選的格式化文字行；找不到則回傳 None。"""
     snapshot_path = BACKTEST_DIR / "swing" / "swing_signal_latest.csv"
@@ -1167,11 +1184,15 @@ def _bedtime_unique_candidate_plan_line(df: pd.DataFrame, positions_df: pd.DataF
 
 def _build_bedtime_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
     positions_df = recap_context.get("positions_df") if isinstance(recap_context.get("positions_df"), pd.DataFrame) else pd.DataFrame()
+    swing_reco = recap_context.get("swing_strategy_recommendation", {}) if isinstance(recap_context, dict) else {}
+    swing_plan_line = _swing_reco_to_plan_line(swing_reco)
     lines = ["自動策略結論:"]
     if len(positions_df) > 0:
         lines.append("- 既有部位明天先交給 opening recap 驗證，不因隔夜雜訊預設全出。")
     lines.append(f"- {_bedtime_unique_candidate_plan_line(df, positions_df)}")
-    return lines[:3]
+    if swing_plan_line:
+        lines.append(f"- {swing_plan_line}")
+    return lines[:4]
 
 
 def build_morning_strategy_lines(df: pd.DataFrame, recap_context: dict) -> List[str]:
@@ -1423,6 +1444,7 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
     )
     execution_summaries = _summarize_execution_window(execution_window_df, positions_df, df)
     morning_rule_ai_summary: dict = {}
+    swing_strategy_recommendation: dict = {}
     if mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED:
         full_engine_summaries = _summarize_execution_window(
             execution_window_df,
@@ -1434,8 +1456,20 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
         execution_summaries = ranked_full_engine[:max(1, int(RECAP_MORNING_FULL_ENGINE_MAX_TICKERS))]
         morning_rule_ai_summary = _build_morning_rule_ai_summary(execution_summaries, prior_bedtime_lines)
 
+    if mode == "bedtime":
+        swing_strategy_recommendation = generate_bedtime_swing_recommendation(
+            decision_df=df,
+            positions_df=positions_df,
+            execution_summaries=execution_summaries,
+            max_symbols=max(1, int(RECAP_SWING_PLAN_MAX_TICKERS)),
+        )
+
     conflict_news = _fetch_conflict_news(execution_summaries)
     tracked_tickers = [str(row.get("ticker", "")).strip().upper() for _, row in df.head(3).iterrows() if str(row.get("ticker", "")).strip()]
+    for ticker in load_all_saved_watchlist_tickers():
+        clean_ticker = str(ticker or "").strip().upper()
+        if clean_ticker and clean_ticker not in tracked_tickers:
+            tracked_tickers.append(clean_ticker)
     for _, row in positions_df.iterrows():
         ticker = str(row.get("ticker", "")).strip().upper()
         if ticker and ticker not in tracked_tickers:
@@ -1462,16 +1496,28 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
         "execution_summary_source": "morning_full_engine" if mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED else "tracked",
         "morning_full_engine_enabled": bool(mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED),
         "morning_rule_ai_summary": morning_rule_ai_summary,
+        "swing_strategy_recommendation": swing_strategy_recommendation,
     }
 
     ai_summary = _generate_recap_ai_summary(mode, payload)
     if mode == "bedtime":
         candidate_plan_line = _bedtime_unique_candidate_plan_line(df, positions_df)
+        swing_plan_line = _swing_reco_to_plan_line(swing_strategy_recommendation)
         if ai_summary:
             existing_plan = ai_summary.get("opening_plan", []) if isinstance(ai_summary.get("opening_plan", []), list) else []
             merged_plan = [candidate_plan_line]
+            if swing_plan_line:
+                merged_plan.append(swing_plan_line)
             merged_plan.extend(str(item).strip() for item in existing_plan if str(item).strip() and str(item).strip() != candidate_plan_line)
             ai_summary["opening_plan"] = merged_plan[:3]
+        elif swing_plan_line:
+            ai_summary = {
+                "headline": "睡前策略卡",
+                "summary": "先確認明早風險，再驗證 Swing 延續。",
+                "focus": [],
+                "risk_flags": [],
+                "opening_plan": [candidate_plan_line, swing_plan_line],
+            }
     if mode == "morning" and isinstance(morning_rule_ai_summary, dict) and morning_rule_ai_summary:
         if not ai_summary:
             ai_summary = morning_rule_ai_summary
@@ -1488,6 +1534,7 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
                 ai_summary["opening_plan"] = [str(item).strip() for item in morning_rule_ai_summary.get("opening_plan", []) if str(item).strip()][:3]
 
     payload["ai_summary"] = ai_summary
+    payload["swing_strategy_recommendation"] = swing_strategy_recommendation
     payload["positions_df"] = positions_df
     payload["execution_summaries_full"] = execution_summaries
     return payload
@@ -1507,6 +1554,10 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
     validation_rows = _build_opening_validation(reference_context, opening_summaries)
     engine_snapshot = _load_engine_snapshot()
     tracked_tickers = [str(row.get("ticker", "")).strip().upper() for _, row in df.head(3).iterrows() if str(row.get("ticker", "")).strip()]
+    for ticker in load_all_saved_watchlist_tickers():
+        clean_ticker = str(ticker or "").strip().upper()
+        if clean_ticker and clean_ticker not in tracked_tickers:
+            tracked_tickers.append(clean_ticker)
     for _, row in positions_df.iterrows():
         ticker = str(row.get("ticker", "")).strip().upper()
         if ticker and ticker not in tracked_tickers:
@@ -1855,6 +1906,74 @@ def _render_message(
     return _build_message(selected, tv_map, top_n=top_n, tags=tags, title_date=title_date)
 
 
+def build_recap_message_preview(
+    mode: str = "bedtime",
+    top_n: int = 5,
+    tags: Optional[set[str]] = None,
+    respect_mode_window: bool = False,
+) -> dict:
+    normalized_mode = str(mode or "").strip().lower() or "bedtime"
+    if normalized_mode not in {"full", "bedtime", "morning", "opening"}:
+        raise ValueError(f"unsupported mode: {mode}")
+
+    df, source_id = _load_latest_decision_df()
+    if source_id is None:
+        raise ValueError("No ai_decision latest state found in Turso / backtest latest / inbox / ai_ready/latest / daily_refresh/latest")
+
+    selected_tags = tags or {"keep", "watch"}
+    decision_date = "unknown"
+    if "decision_date" in df.columns and df["decision_date"].notna().any():
+        decision_date = str(df["decision_date"].dropna().iloc[0])
+
+    if normalized_mode == "opening" and respect_mode_window:
+        now_dt = _utc_now_naive()
+        if not _is_in_opening_dispatch_window(now_dt):
+            open_start, open_end = _opening_dispatch_bounds(now_dt)
+            return {
+                "ok": False,
+                "skip_reason": "outside_opening_dispatch_window",
+                "window_local": f"{_format_utc_to_active_local(open_start)} -> {_format_utc_to_active_local(open_end)}",
+                "decision_date": decision_date,
+                "source_id": source_id,
+                "mode": normalized_mode,
+            }
+
+    tv_map = _load_tv_map()
+    recap_context = None
+    filtered_df = df[df["decision_tag"].isin(selected_tags)].copy()
+    if normalized_mode in {"bedtime", "morning"}:
+        recap_context = _build_recap_context(df=filtered_df, tv_map=tv_map, title_date=decision_date, mode=normalized_mode)
+    elif normalized_mode == "opening":
+        recap_context = _build_opening_context(df=filtered_df, tv_map=tv_map, title_date=decision_date)
+
+    message = _render_message(
+        df=df,
+        tv_map=tv_map,
+        top_n=max(1, int(top_n)),
+        tags=selected_tags,
+        title_date=decision_date,
+        mode=normalized_mode,
+        recap_context=recap_context,
+    )
+
+    pipeline_debug = {
+        "gemini_enabled": bool(RECAP_GEMINI_ENABLED and GEMINI_API_KEY),
+        "tavily_enabled": bool(RECAP_TAVILY_ENABLED and TAVILY_API_KEY),
+        "ai_summary_generated": bool((recap_context or {}).get("ai_summary")) if isinstance(recap_context, dict) else False,
+        "tracked_news_count": len((recap_context or {}).get("tracked_news", [])) if isinstance(recap_context, dict) else 0,
+        "conflict_news_count": len((recap_context or {}).get("conflict_news", [])) if isinstance(recap_context, dict) else 0,
+    }
+    return {
+        "ok": True,
+        "mode": normalized_mode,
+        "message": message,
+        "decision_date": decision_date,
+        "source_id": source_id,
+        "recap_context": recap_context,
+        "pipeline_debug": pipeline_debug,
+    }
+
+
 def _post_json(url: str, payload: dict, headers: Optional[dict] = None, timeout: int = 15) -> tuple[bool, str]:
     req_headers = {"Content-Type": "application/json", "User-Agent": "AlphaFinder/1.0"}
     if headers:
@@ -1941,53 +2060,50 @@ def main() -> int:
     args = parser.parse_args()
 
     csv_path = Path(args.csv_file).resolve() if args.csv_file.strip() else None
-    source_id: str | None = None
-    if args.auto_latest or csv_path is None:
-        df, source_id = _load_latest_decision_df()
-        if source_id is None:
-            logger.error("No ai_decision latest state found in Turso / backtest latest / inbox / ai_ready/latest / daily_refresh/latest")
-            return 1
-    else:
+    tags = {x.strip().lower() for x in str(args.tags).split(",") if x.strip()} or {"keep", "watch"}
+
+    if csv_path is not None and not args.auto_latest:
         if not csv_path.exists():
             logger.error("CSV not found: %s", csv_path)
             return 2
         df = _load_decision_df(csv_path)
         source_id = str(csv_path)
-
-    tags = {x.strip().lower() for x in str(args.tags).split(",") if x.strip()}
-    if not tags:
-        tags = {"keep", "watch"}
-
-    decision_date = "unknown"
-    if "decision_date" in df.columns and df["decision_date"].notna().any():
-        decision_date = str(df["decision_date"].dropna().iloc[0])
-
-    if args.mode == "opening" and args.respect_mode_window and not args.dry_run:
-        now_dt = _utc_now_naive()
-        if not _is_in_opening_dispatch_window(now_dt):
-            open_start, open_end = _opening_dispatch_bounds(now_dt)
-            logger.warning(
-                "[SKIP] opening mode outside dispatch window: %s -> %s",
-                _format_utc_to_active_local(open_start),
-                _format_utc_to_active_local(open_end),
-            )
-            return 0
-
-    tv_map = _load_tv_map()
-    recap_context = None
-    if str(args.mode) in {"bedtime", "morning"}:
-        recap_context = _build_recap_context(df=df[df["decision_tag"].isin(tags)].copy(), tv_map=tv_map, title_date=decision_date, mode=str(args.mode))
-    elif str(args.mode) == "opening":
-        recap_context = _build_opening_context(df=df[df["decision_tag"].isin(tags)].copy(), tv_map=tv_map, title_date=decision_date)
-    message = _render_message(
-        df=df,
-        tv_map=tv_map,
-        top_n=max(1, int(args.top_n)),
-        tags=tags,
-        title_date=decision_date,
-        mode=str(args.mode),
-        recap_context=recap_context,
-    )
+        decision_date = "unknown"
+        if "decision_date" in df.columns and df["decision_date"].notna().any():
+            decision_date = str(df["decision_date"].dropna().iloc[0])
+        tv_map = _load_tv_map()
+        recap_context = None
+        if str(args.mode) in {"bedtime", "morning"}:
+            recap_context = _build_recap_context(df=df[df["decision_tag"].isin(tags)].copy(), tv_map=tv_map, title_date=decision_date, mode=str(args.mode))
+        elif str(args.mode) == "opening":
+            recap_context = _build_opening_context(df=df[df["decision_tag"].isin(tags)].copy(), tv_map=tv_map, title_date=decision_date)
+        message = _render_message(
+            df=df,
+            tv_map=tv_map,
+            top_n=max(1, int(args.top_n)),
+            tags=tags,
+            title_date=decision_date,
+            mode=str(args.mode),
+            recap_context=recap_context,
+        )
+    else:
+        preview = build_recap_message_preview(
+            mode=str(args.mode),
+            top_n=max(1, int(args.top_n)),
+            tags=tags,
+            respect_mode_window=bool(args.respect_mode_window and not args.dry_run),
+        )
+        if not preview.get("ok"):
+            if preview.get("skip_reason") == "outside_opening_dispatch_window":
+                logger.warning("[SKIP] opening mode outside dispatch window: %s", preview.get("window_local", "NA"))
+                return 0
+            logger.error("recap preview failed: %s", preview)
+            return 1
+        message = str(preview.get("message", ""))
+        decision_date = str(preview.get("decision_date", "unknown"))
+        source_id = str(preview.get("source_id", ""))
+        recap_context = preview.get("recap_context") if isinstance(preview.get("recap_context"), dict) else None
+        df, _ = _load_latest_decision_df()
 
     ALERT_DIR.mkdir(parents=True, exist_ok=True)
     ALERT_MESSAGE_TXT.write_text(message, encoding="utf-8")

@@ -305,6 +305,12 @@ CATALYST_TOP_K = int(os.getenv("CATALYST_TOP_K", "12"))
 CATALYST_TAVILY_MAX_RESULTS = int(os.getenv("CATALYST_TAVILY_MAX_RESULTS", "4"))
 CATALYST_HTTP_TIMEOUT_SEC = float(os.getenv("CATALYST_HTTP_TIMEOUT_SEC", "15.0"))
 
+# ============ QuantMuse 整合（選用）===========
+QUANTMUSE_ENABLED = _getenv_bool("QUANTMUSE_ENABLED", "true")
+QUANTMUSE_PATH = _getenv("QUANTMUSE_PATH", "")
+QUANTMUSE_LLM_PROVIDER = _getenv("QUANTMUSE_LLM_PROVIDER", "local").strip().lower() or "local"
+QUANTMUSE_VECTOR_DB_PATH = _getenv("QUANTMUSE_VECTOR_DB_PATH", "repo_outputs/backtest/trade_memory_vector.db")
+
 TAVILY_API_KEY = _getenv("TAVILY_API_KEY", _getenv("TAVILY_API", ""))
 GEMINI_API_KEY = _getenv("GEMINI_API_KEY", _getenv("GEMINI_API", ""))
 GEMINI_MODEL = _getenv("GEMINI_MODEL", "gemini-2.5-flash")

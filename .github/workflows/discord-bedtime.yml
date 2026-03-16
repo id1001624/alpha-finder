@@ -2,8 +2,6 @@ name: Discord Bedtime Recap
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 14 * * *'
 
 concurrency:
   group: discord-bedtime-recap

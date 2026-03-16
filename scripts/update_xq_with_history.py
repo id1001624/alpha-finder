@@ -6,7 +6,7 @@ XQ 選股清單更新腳本
 - 掃描 XQ_exports 資料夾下所有 CSV 檔案
 - 抓取每支股票最近 1/3/5 日的歷史價格與量能指標
 - 新增欄位: chg_1d_pct, chg_3d_pct, chg_5d_pct, vol_strength, short_trade_score,
-  swing_score, momentum_mix, continuation_grade, prob_next_day, prob_day2, decision_tag_hint
+    swing_score, momentum_mix, continuation_grade, prob_next_day, prob_day2, decision_tag_hint, setup_type
 - 執行完畢後顯示各檔案短炒分數 Top 5
 - 不在 XQ_exports 產生 *_updated.csv，統一更新 `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
 - 自動處理中文編碼問題
@@ -102,6 +102,7 @@ COL_PROB_NEXT_DAY = "prob_next_day"
 COL_PROB_DAY2 = "prob_day2"
 COL_REVERSAL_FLAGS = "reversal_flags"
 COL_DECISION_TAG_HINT = "decision_tag_hint"
+COL_SETUP_TYPE = "setup_type"
 COL_AI_QUERY_HINT = "ai_query_hint"
 
 # 自動尋找 XQ_exports 資料夾 (優先順序: 腳本同層 > 腳本上層 > 當前工作目錄)
@@ -451,6 +452,64 @@ def build_ai_query_hint(ticker):
     )
 
 
+def _load_tv_signal_lookup() -> dict[str, dict[str, object]]:
+    lookup: dict[str, dict[str, object]] = {}
+    try:
+        raw_market_path = _resolve_ai_ready_base_dir() / "latest" / "raw_market_daily.csv"
+    except NameError:
+        raw_market_path = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest" / "raw_market_daily.csv"
+
+    if not raw_market_path.exists():
+        return lookup
+
+    try:
+        raw_df = pd.read_csv(raw_market_path, encoding='utf-8-sig')
+    except UnicodeDecodeError:
+        raw_df = pd.read_csv(raw_market_path)
+    except (OSError, ValueError, TypeError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        return lookup
+
+    if 'Ticker' not in raw_df.columns:
+        return lookup
+
+    for _, row in raw_df.iterrows():
+        ticker = str(row.get('Ticker', '')).strip().upper().replace('.US', '')
+        if not ticker:
+            continue
+
+        sqz_raw = row.get('TV_SQZ_On', False)
+        sqz_on = False
+        if isinstance(sqz_raw, bool):
+            sqz_on = sqz_raw
+        else:
+            sqz_on = str(sqz_raw).strip().lower() in {'1', 'true', 'yes', 'y'}
+
+        sqzmom_hist = pd.to_numeric(row.get('TV_SQZMOM_Value'), errors='coerce')
+        lookup[ticker] = {
+            'sqz_on': bool(sqz_on),
+            'sqzmom_hist': float(sqzmom_hist) if pd.notna(sqzmom_hist) else 0.0,
+        }
+
+    return lookup
+
+
+def _derive_setup_type(chg_1d, vol_strength, sqz_on: bool, sqzmom_hist: float) -> str:
+    if chg_1d is None or pd.isna(chg_1d):
+        return 'neutral'
+
+    daily_change = float(chg_1d)
+    volume_strength = float(vol_strength) if (vol_strength is not None and pd.notna(vol_strength)) else 0.0
+    sqzmom_hist_val = float(sqzmom_hist) if sqzmom_hist is not None else 0.0
+
+    if daily_change > 12.0:
+        return 'momentum_chase'
+    if 3.0 <= daily_change <= 10.0 and volume_strength > 1.5 and sqzmom_hist_val > 0:
+        return 'continuation_candidate'
+    if daily_change < 5.0 and bool(sqz_on):
+        return 'compression_setup'
+    return 'neutral'
+
+
 def calculate_metrics(hist):
     """
     計算歷史數據的統計指標
@@ -482,6 +541,7 @@ def calculate_metrics(hist):
             COL_PROB_DAY2: None,
             COL_REVERSAL_FLAGS: "none",
             COL_DECISION_TAG_HINT: "watch",
+            COL_SETUP_TYPE: "neutral",
         }
     
     recent = hist.tail(MAX_LOOKBACK + 1)
@@ -529,6 +589,7 @@ def calculate_metrics(hist):
         COL_PROB_DAY2: continuation_outlook[COL_PROB_DAY2],
         COL_REVERSAL_FLAGS: continuation_outlook[COL_REVERSAL_FLAGS],
         COL_DECISION_TAG_HINT: decision_tag_hint,
+        COL_SETUP_TYPE: 'neutral',
     }
 
 
@@ -670,6 +731,7 @@ def build_top_picks_snapshot(df, ticker_column, source_name, top_n=TOP_PICKS_PER
         COL_PROB_DAY2,
         COL_REVERSAL_FLAGS,
         COL_DECISION_TAG_HINT,
+        COL_SETUP_TYPE,
         COL_1D_CHANGE_PCT,
         COL_3D_CHANGE_PCT,
         COL_5D_CHANGE_PCT,
@@ -825,9 +887,12 @@ def update_csv_with_history(file_path, ticker_column=None):
         COL_PROB_DAY2,
         COL_REVERSAL_FLAGS,
         COL_DECISION_TAG_HINT,
+        COL_SETUP_TYPE,
         COL_AI_QUERY_HINT,
     ]:
         df[col] = None
+
+    tv_signal_lookup = _load_tv_signal_lookup()
     
     # 逐筆處理股票
     total = len(df)
@@ -844,6 +909,14 @@ def update_csv_with_history(file_path, ticker_column=None):
             metrics = calculate_metrics(hist)
             for key, value in metrics.items():
                 df.at[idx, key] = value
+
+            tv_signal = tv_signal_lookup.get(ticker, {})
+            df.at[idx, COL_SETUP_TYPE] = _derive_setup_type(
+                metrics.get(COL_1D_CHANGE_PCT),
+                metrics.get(COL_VOL_STRENGTH),
+                bool(tv_signal.get('sqz_on', False)),
+                float(tv_signal.get('sqzmom_hist', 0.0) or 0.0),
+            )
             df.at[idx, COL_AI_QUERY_HINT] = build_ai_query_hint(ticker)
             
             print("✅ 完成")

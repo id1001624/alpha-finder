@@ -4,6 +4,10 @@
 
 目前正式主機已切到 Oracle Cloud Ubuntu，systemd service 名稱是 `alpha-finder-discord-bot.service`。
 
+若要啟用 QuantMuse native runtime，請搭配：
+
+- `docs/quantmuse_cloud_deploy.md`
+
 ## 建議主機
 
 - Ubuntu 22.04 或 24.04 小型 VPS

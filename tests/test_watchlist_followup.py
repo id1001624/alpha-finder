@@ -99,3 +99,29 @@ def test_build_saved_watchlist_followup_message_uses_saved_names(monkeypatch):
 
     assert "追蹤名單: AAOI, NVDA" in message
     assert "AAOI: 重回站上，可列再進場觀察。" in message
+
+
+def test_engine_payload_from_snapshot_injects_similar_past_trades():
+    builder = getattr(wb, "build_engine_payload_from_snapshot")
+    payload = builder(
+        {
+            "ticker": "AAPL",
+            "action": "entry",
+            "reason": "站回 AVWAP",
+            "size_fraction": 0.25,
+            "signal_type": "entry_ignition",
+            "close": 200.1,
+            "vwap": 199.8,
+            "sqzmom_value": 0.4,
+            "sqzmom_color": "green",
+            "sqz_release": True,
+            "signal_ts": "2026-03-16 21:40:00",
+            "similar_past_trades": '[{"ticker":"AAPL","action":"entry","signal_type":"entry_ignition","outcome":"win","similarity":0.81,"reason_summary":"同型態突破成功"}]',
+        }
+    )
+
+    assert isinstance(payload.get("similar_past_trades"), list)
+    assert len(payload["similar_past_trades"]) == 1
+    first = payload["similar_past_trades"][0]
+    assert first["ticker"] == "AAPL"
+    assert first["outcome"] == "win"

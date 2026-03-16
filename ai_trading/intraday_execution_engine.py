@@ -15,7 +15,6 @@ from turso_state import (
     STATE_KEY_INTRADAY_SNAPSHOT,
     append_execution_log_rows,
     load_recent_trade_ledger,
-    load_runtime_df,
     load_runtime_df_with_fallback,
     sync_runtime_df,
     sync_execution_latest as sync_execution_latest_to_turso,
@@ -80,6 +79,7 @@ from .strategy_context import (
     ensure_decision_strategy_columns,
     normalize_horizon_tag,
 )
+from .trade_memory import get_trade_memory
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -685,6 +685,42 @@ def _build_reason(signal_type: str) -> str:
     return reasons.get(signal_type, "")
 
 
+def _build_trade_memory_context(latest: pd.Series, meta: pd.Series, signal_type: str = "") -> dict:
+    return {
+        "ticker": str(meta.get("ticker", "")).strip().upper(),
+        "decision_tag": str(meta.get("decision_tag", "")).strip().lower(),
+        "regime_tag": str(meta.get("regime_tag", "")).strip().lower(),
+        "signal_type": str(signal_type or "").strip().lower(),
+        "sqzmom_color": str(latest.get("sqzmom_color", "")).strip().lower(),
+        "reason_summary": _build_reason(signal_type),
+    }
+
+
+def _build_trade_memory_hint(similar_past_trades: List[dict]) -> str:
+    if not similar_past_trades:
+        return ""
+    top = similar_past_trades[0]
+    outcome = str(top.get("outcome", "")).strip().lower()
+    similarity = float(pd.to_numeric(top.get("similarity", 0.0), errors="coerce") or 0.0)
+    if similarity < 0.55:
+        return ""
+    if outcome == "loss":
+        return "近似歷史偏弱，務必嚴格風控。"
+    if outcome == "win":
+        return "近似歷史偏強，可按紀律執行。"
+    return ""
+
+
+def _merge_reason_with_hint(reason: str, hint: str) -> str:
+    base = str(reason or "").strip()
+    memo = str(hint or "").strip()
+    if not memo:
+        return base
+    if not base:
+        return memo
+    return f"{base} {memo}".strip()
+
+
 def _theme_exposure_count(positions_df: pd.DataFrame, theme: str) -> int:
     if len(positions_df) == 0:
         return 0
@@ -802,6 +838,7 @@ def _classify_action(
     new_entries_today: int,
     regime_tag: str,
     valid_history: pd.DataFrame,
+    similar_past_trades: Optional[List[dict]] = None,
 ) -> tuple[str, float, str, str]:
     close_val = float(pd.to_numeric(latest.get("Close"), errors="coerce"))
     avwap = float(pd.to_numeric(latest.get("dynamic_avwap"), errors="coerce"))
@@ -810,6 +847,7 @@ def _classify_action(
     sqz_release = bool(latest.get("sqz_release", False))
     color = str(latest.get("sqzmom_color", "")).strip().lower()
     signal_ts = _coerce_utc_timestamp(latest.get("Datetime"))
+    memory_hint = _build_trade_memory_hint(similar_past_trades or [])
 
     if pd.isna(close_val) or pd.isna(avwap) or pd.isna(hist):
         return "", 0.0, "", ""
@@ -834,11 +872,21 @@ def _classify_action(
             return "", 0.0, "", ""
 
         if _is_ignition_entry(close_val, avwap, hist, prev_hist, sqz_release, color):
-            return "entry", INTRADAY_ENTRY_SIZE_FRACTION, _build_reason(SIGNAL_ENTRY_IGNITION), SIGNAL_ENTRY_IGNITION
+            return (
+                "entry",
+                INTRADAY_ENTRY_SIZE_FRACTION,
+                _merge_reason_with_hint(_build_reason(SIGNAL_ENTRY_IGNITION), memory_hint),
+                SIGNAL_ENTRY_IGNITION,
+            )
 
         if _is_pullback_entry(latest, previous, avwap, hist, prev_hist, color, valid_history):
             pullback_size = min(float(INTRADAY_ENTRY_SIZE_FRACTION), 0.30)
-            return "entry", pullback_size, _build_reason(SIGNAL_ENTRY_PULLBACK), SIGNAL_ENTRY_PULLBACK
+            return (
+                "entry",
+                pullback_size,
+                _merge_reason_with_hint(_build_reason(SIGNAL_ENTRY_PULLBACK), memory_hint),
+                SIGNAL_ENTRY_PULLBACK,
+            )
 
         return "", 0.0, "", ""
 
@@ -849,13 +897,23 @@ def _classify_action(
     in_noise_grace = _is_in_noise_exit_grace(signal_ts, last_fill_ts)
 
     if unrealized_pct <= float(INTRADAY_HARD_STOP_LOSS_PCT):
-        return "stop_loss", 1.0, _build_reason(SIGNAL_STOP_LOSS), SIGNAL_STOP_LOSS
+        return "stop_loss", 1.0, _merge_reason_with_hint(_build_reason(SIGNAL_STOP_LOSS), memory_hint), SIGNAL_STOP_LOSS
 
     if unrealized_pct >= INTRADAY_TAKE_PROFIT_PCT and hist < prev_hist:
-        return "take_profit", INTRADAY_REDUCE_SIZE_FRACTION, _build_reason(SIGNAL_TAKE_PROFIT), SIGNAL_TAKE_PROFIT
+        return (
+            "take_profit",
+            INTRADAY_REDUCE_SIZE_FRACTION,
+            _merge_reason_with_hint(_build_reason(SIGNAL_TAKE_PROFIT), memory_hint),
+            SIGNAL_TAKE_PROFIT,
+        )
 
     if not in_noise_grace and close_val < avwap and hist < 0 and color in {"red", "maroon"}:
-        return "take_profit", INTRADAY_REDUCE_SIZE_FRACTION, _build_reason(SIGNAL_TAKE_PROFIT), SIGNAL_TAKE_PROFIT
+        return (
+            "take_profit",
+            INTRADAY_REDUCE_SIZE_FRACTION,
+            _merge_reason_with_hint(_build_reason(SIGNAL_TAKE_PROFIT), memory_hint),
+            SIGNAL_TAKE_PROFIT,
+        )
 
     if (
         add_count < INTRADAY_MAX_ADD_COUNT
@@ -866,7 +924,7 @@ def _classify_action(
         and hist > prev_hist
         and color in {"lime", "green"}
     ):
-        return "add", INTRADAY_ADD_SIZE_FRACTION, _build_reason(SIGNAL_ADD), SIGNAL_ADD
+        return "add", INTRADAY_ADD_SIZE_FRACTION, _merge_reason_with_hint(_build_reason(SIGNAL_ADD), memory_hint), SIGNAL_ADD
 
     return "", 0.0, "", ""
 
@@ -923,6 +981,13 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
     state = _load_state()
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     regime_tag = detect_regime_tag()
+    trade_memory = get_trade_memory()
+    try:
+        memory_seed = _safe_read_csv(EXECUTION_LOG)
+        if len(memory_seed) > 0:
+            trade_memory.sync_completed_trades(memory_seed.tail(1200))
+    except (OSError, ValueError, pd.errors.EmptyDataError):
+        pass
 
     snapshot_rows: List[dict] = []
     action_rows: List[dict] = []
@@ -945,6 +1010,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         latest = valid.iloc[-1]
         previous = valid.iloc[-2]
         position = get_position_by_profile(positions_df, ticker, horizon_tag=HORIZON_INTRADAY_MONSTER, strategy_profile=STRATEGY_MONSTER_SWING)
+        memory_context = _build_trade_memory_context(latest=latest, meta=meta)
+        similar_past_trades = trade_memory.find_similar_trades(
+            ticker=ticker,
+            context=memory_context,
+            top_k=3,
+        )
         action, size_fraction, reason, signal_type = _classify_action(
             latest,
             previous,
@@ -958,6 +1029,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             new_entries_today,
             regime_tag,
             valid,
+            similar_past_trades,
         )
 
         snapshot_payload = {
@@ -967,6 +1039,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             "sqzmom_color": str(latest.get("sqzmom_color", "")),
             "sqz_release": bool(latest.get("sqz_release", False)),
             "signal_ts": str(latest.get("Datetime", "")),
+            "similar_past_trades": similar_past_trades,
         }
 
         snapshot_rows.append(
@@ -1110,6 +1183,8 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
     if action_rows and not dry_run:
         _append_action_log(action_rows)
         _write_execution_outputs(execution_rows)
+        if execution_rows:
+            trade_memory.sync_completed_trades(pd.DataFrame(execution_rows))
         state.update(state_updates)
         _save_state(state)
 
