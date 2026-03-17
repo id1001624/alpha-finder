@@ -301,6 +301,7 @@ def main() -> int:
             logger.info("Discord trade bot synced %s guild command(s) to %s.", len(synced), sync_guild_raw)
 
     bot = TradeBot(command_prefix=DISCORD_BOT_PREFIX, intents=intents, help_command=None)
+    startup_quantmuse_caps = get_quantmuse_capabilities()
 
     async def _guard_channel(ctx) -> bool:
         if not allowed_channel_ids:
@@ -355,7 +356,7 @@ def main() -> int:
     @bot.event
     async def on_ready():
         logger.info("Discord trade bot ready: %s", bot.user)
-        caps = await asyncio.to_thread(get_quantmuse_capabilities)
+        caps = startup_quantmuse_caps
         logger.info(
             "QuantMuse capabilities | enabled=%s available=%s has_langchain=%s reason=%s module=%s provider=%s path=%s",
             bool(caps.get("enabled")),
