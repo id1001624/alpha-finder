@@ -125,3 +125,27 @@ def test_engine_payload_from_snapshot_injects_similar_past_trades():
     first = payload["similar_past_trades"][0]
     assert first["ticker"] == "AAPL"
     assert first["outcome"] == "win"
+
+
+def test_watchlist_brief_message_uses_conclusion_sections(monkeypatch):
+    monkeypatch.setattr(wb, "_resolve_universe", lambda saved, extra: ["AAOI", "NVDA"])
+    monkeypatch.setattr(wb, "_build_watch_payload", lambda tickers, saved_tickers, extra_tickers: {"generated_at": "2026-03-17 09:30:00", "items": []})
+    monkeypatch.setattr(wb, "_gemini_watchlist_summary", lambda payload: {})
+    monkeypatch.setattr(
+        wb,
+        "_fallback_watchlist_summary",
+        lambda payload: {
+            "headline": "交易結論卡",
+            "summary": "只看結論。",
+            "priority_order": ["AAOI: 今天主監控，待確認"],
+            "risk_flags": ["NVDA: 跌破 AVWAP 先不追"],
+            "action_plan": ["AAOI: 開盤守住 AVWAP 才考慮進"],
+        },
+    )
+
+    message = wb.build_watchlist_brief_message(raw_tickers="AAOI", saved_tickers=["NVDA"])
+
+    assert "現在應該做什麼:" in message
+    assert "失效條件:" in message
+    assert "結論:" in message
+    assert "本輪整合清單:" not in message

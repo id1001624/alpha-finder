@@ -22,6 +22,7 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -67,10 +68,12 @@ from config import (
     RECAP_INTRADAY_PLAN_MAX_TICKERS,
     RECAP_MARKET_OPEN_TIME,
     RECAP_MARKET_TIMEZONE,
+    RECAP_MAX_LINE_CHARS,
     RECAP_MORNING_FULL_ENGINE_ENABLED,
     RECAP_MORNING_FULL_ENGINE_MAX_TICKERS,
     RECAP_MORNING_GEMINI_REWRITE_ONLY,
     RECAP_MORNING_LOOKBACK_HOURS,
+    RECAP_PLAN_LOAD_TIMEOUT_SEC,
     RECAP_OPENING_LOOKBACK_MINUTES,
     RECAP_OPENING_RUN_AFTER_MINUTES,
     RECAP_OPENING_RUN_GRACE_MINUTES,
@@ -412,6 +415,30 @@ def _load_persisted_bedtime_plan(decision_date: str) -> dict:
 
 def _load_persisted_morning_plan(decision_date: str) -> dict:
     return _load_persisted_recap_plan("morning", decision_date)
+
+
+def _load_persisted_recap_plan_safe(mode: str, decision_date: str, timeout_sec: float = RECAP_PLAN_LOAD_TIMEOUT_SEC) -> tuple[dict, str]:
+    result: dict = {"value": {}, "error": None}
+
+    def _worker() -> None:
+        try:
+            result["value"] = _load_persisted_recap_plan(mode, decision_date)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout=max(float(timeout_sec), 1.0))
+    if thread.is_alive():
+        return {}, "timeout"
+    if result.get("error") is not None:
+        exc = result.get("error")
+        logger.warning("load persisted recap plan failed mode=%s date=%s err=%s", mode, decision_date, exc)
+        return {}, "error"
+    value = result.get("value", {})
+    if not isinstance(value, dict):
+        return {}, "invalid"
+    return value, "ok"
 
 
 def _load_previous_top1(current_date: str) -> str:
@@ -1317,7 +1344,10 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         return morning_rule_summary if isinstance(morning_rule_summary, dict) and morning_rule_summary else {}
 
     if mode == "bedtime":
-        mode_instruction = "Focus on what changed before sleep and which names change tomorrow's first action."
+        mode_instruction = (
+            "Focus on what changed before sleep and which names change tomorrow's first action. "
+            "If prior_morning_plan exists, carry those items unless new data clearly invalidates them."
+        )
     elif mode == "morning":
         mode_instruction = (
             "This is the overnight recap. The operator was asleep and needs to know what happened. "
@@ -1362,6 +1392,11 @@ def _generate_recap_ai_summary(mode: str, recap_payload: dict) -> dict:
         "Use focus for the few charts worth opening first, risk_flags for true risks, and opening_plan for concrete first actions. "
         "Keep focus narrow and action-relevant, not a broad inventory. "
         "Keep opening_plan imperative and executable, not analytical. "
+        "Every opening_plan line should include what to do now; every risk_flags line should include an invalidation or exit trigger. "
+        "Keep each line concise and trade-ready. "
+        "Do not output long continuous analysis paragraphs. "
+        "Each focus/risk_flags/opening_plan item must contain only one viewpoint in one line. "
+        "Never use semicolons or conjunction chains to merge multiple viewpoints into one line. "
         "If tracked_news exists, use it to judge catalyst quality for each ticker. "
         "If engine_snapshot exists, use VWAP and SQZMOM state to validate or invalidate prior plans. "
         "Rank tickers by actionable strength: risk-first, then continuation strength, then new opportunity. "
@@ -1436,11 +1471,23 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
     positions_df = load_positions()
     execution_df = _load_execution_df(RECAP_EXECUTION_LOOKBACK_LIMIT)
     execution_window_df = _filter_execution_window(execution_df, start_dt, now_dt)
-    bedtime_reference = _load_persisted_bedtime_plan(title_date) if mode == "morning" else {}
+    bedtime_reference: dict = {}
+    morning_reference: dict = {}
+    bedtime_load_state = "not_required"
+    morning_load_state = "not_required"
+    if mode == "morning":
+        bedtime_reference, bedtime_load_state = _load_persisted_recap_plan_safe("bedtime", title_date)
+    if mode == "bedtime":
+        morning_reference, morning_load_state = _load_persisted_recap_plan_safe("morning", title_date)
     prior_bedtime_lines = _merge_lines(
         bedtime_reference.get("opening_plan", []),
         bedtime_reference.get("risk_flags", []),
         bedtime_reference.get("focus", []),
+    )
+    prior_morning_lines = _merge_lines(
+        morning_reference.get("opening_plan", []),
+        morning_reference.get("risk_flags", []),
+        morning_reference.get("focus", []),
     )
     execution_summaries = _summarize_execution_window(execution_window_df, positions_df, df)
     morning_rule_ai_summary: dict = {}
@@ -1493,6 +1540,14 @@ def _build_recap_context(df: pd.DataFrame, tv_map: Dict[str, object], title_date
         "prior_bedtime_focus": bedtime_reference.get("focus", []) if isinstance(bedtime_reference, dict) else [],
         "prior_bedtime_risk_flags": bedtime_reference.get("risk_flags", []) if isinstance(bedtime_reference, dict) else [],
         "prior_bedtime_lines": prior_bedtime_lines,
+        "prior_morning_plan": morning_reference.get("opening_plan", []) if isinstance(morning_reference, dict) else [],
+        "prior_morning_focus": morning_reference.get("focus", []) if isinstance(morning_reference, dict) else [],
+        "prior_morning_risk_flags": morning_reference.get("risk_flags", []) if isinstance(morning_reference, dict) else [],
+        "prior_morning_lines": prior_morning_lines,
+        "has_prior_bedtime_plan": bool(prior_bedtime_lines),
+        "has_prior_morning_plan": bool(prior_morning_lines),
+        "prior_bedtime_load_state": bedtime_load_state,
+        "prior_morning_load_state": morning_load_state,
         "execution_summary_source": "morning_full_engine" if mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED else "tracked",
         "morning_full_engine_enabled": bool(mode == "morning" and RECAP_MORNING_FULL_ENGINE_ENABLED),
         "morning_rule_ai_summary": morning_rule_ai_summary,
@@ -1544,8 +1599,11 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
     now_dt = _utc_now_naive()
     opening_start_dt, opening_end_dt = _opening_window_bounds(now_dt)
     reference_context = _build_recap_context(df=df, tv_map=tv_map, title_date=title_date, mode="morning", end_dt=opening_start_dt)
-    bedtime_reference = _load_persisted_bedtime_plan(title_date)
-    persisted_morning = _load_persisted_morning_plan(title_date)
+    bedtime_reference, bedtime_load_state = _load_persisted_recap_plan_safe("bedtime", title_date)
+    persisted_morning, morning_load_state = _load_persisted_recap_plan_safe("morning", title_date)
+    prior_morning_warning = ""
+    if morning_load_state in {"timeout", "error", "invalid"}:
+        prior_morning_warning = "⚠️ 今天 morning recap 未能讀取，開盤判斷以即時資料為主"
 
     positions_df = load_positions()
     execution_df = _load_execution_df(RECAP_EXECUTION_LOOKBACK_LIMIT)
@@ -1581,6 +1639,15 @@ def _build_opening_context(df: pd.DataFrame, tv_map: Dict[str, object], title_da
         "prior_bedtime_plan": bedtime_reference.get("opening_plan", []) if isinstance(bedtime_reference, dict) else [],
         "prior_bedtime_focus": bedtime_reference.get("focus", []) if isinstance(bedtime_reference, dict) else [],
         "prior_bedtime_risk_flags": bedtime_reference.get("risk_flags", []) if isinstance(bedtime_reference, dict) else [],
+        "prior_morning_plan": persisted_morning.get("opening_plan", []) if isinstance(persisted_morning, dict) else [],
+        "prior_morning_focus": persisted_morning.get("focus", []) if isinstance(persisted_morning, dict) else [],
+        "prior_morning_risk_flags": persisted_morning.get("risk_flags", []) if isinstance(persisted_morning, dict) else [],
+        "has_prior_bedtime_plan": bool(bedtime_reference),
+        "has_prior_morning_plan": bool(persisted_morning) and morning_load_state == "ok",
+        "prior_bedtime_load_state": bedtime_load_state,
+        "prior_morning_load_state": morning_load_state,
+        "prior_morning_warning": prior_morning_warning,
+        "execution_summary_source": "opening_window",
         "reference_summary": _summaries_to_payload(reference_context.get("execution_summaries_full", [])),
         "opening_execution_summary": _summaries_to_payload(opening_summaries),
         "opening_validation": validation_rows,
@@ -1687,6 +1754,71 @@ def _build_ai_summary_lines(
     return lines
 
 
+def _short_lines(items: List[object], limit: int = 3, clip: int = RECAP_MAX_LINE_CHARS) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = _clip_text(item, max(12, int(clip)))
+        text = re.sub(r"^[-*]\s+", "", text).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
+def _execution_focus_lines(execution_summaries: List[dict], limit: int = 3) -> List[str]:
+    rows: List[str] = []
+    for item in execution_summaries:
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        status = str(item.get("status_label", "待確認")).strip() or "待確認"
+        guidance = _clip_text(item.get("guidance") or "", max(12, int(RECAP_MAX_LINE_CHARS) - 8))
+        if guidance:
+            rows.append(f"{ticker}: {status} | {guidance}")
+        else:
+            rows.append(f"{ticker}: {status}")
+    return _short_lines(rows, limit=limit)
+
+
+def _execution_risk_lines(execution_summaries: List[dict], limit: int = 3) -> List[str]:
+    rows: List[str] = []
+    for item in execution_summaries:
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        latest_action = str(item.get("latest_action", "")).strip().lower()
+        if bool(item.get("has_conflict")) or latest_action in {"stop_loss", "take_profit"}:
+            status = str(item.get("status_label", "風險")).strip() or "風險"
+            rows.append(f"{ticker}: {status}")
+    return _short_lines(rows, limit=limit)
+
+
+def _opening_risk_lines(validation_rows: List[dict], limit: int = 3) -> List[str]:
+    risky = {"確認風險", "開盤失敗", "開盤雜訊", "反向轉強"}
+    rows: List[str] = []
+    for row in validation_rows:
+        ticker = str(row.get("ticker", "")).strip().upper()
+        label = str(row.get("validation_label", "")).strip()
+        if not ticker or label not in risky:
+            continue
+        next_step = _clip_text(row.get("next_step") or "", max(12, int(RECAP_MAX_LINE_CHARS) - 8))
+        rows.append(f"{ticker}: {label} | {next_step}" if next_step else f"{ticker}: {label}")
+    return _short_lines(rows, limit=limit)
+
+
+def _section_lines(title: str, items: List[str], empty_line: str) -> List[str]:
+    lines = [f"{title}:"]
+    if items:
+        lines.extend(f"- {_clip_text(item, max(12, int(RECAP_MAX_LINE_CHARS)))}" for item in items)
+    else:
+        lines.append(f"- {_clip_text(empty_line, max(12, int(RECAP_MAX_LINE_CHARS)))}")
+    return lines
+
+
 def _build_reference_lines(reference_lines: List[str], label: str) -> List[str]:
     cleaned = [str(item).strip() for item in reference_lines if str(item or "").strip()]
     if not cleaned:
@@ -1773,88 +1905,99 @@ def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_d
     strategy_lines = _build_bedtime_strategy_lines(df, recap_context)
     selected = df.head(3).copy()
     top1 = selected.iloc[0] if len(selected) > 0 else None
-    prev_top1 = _load_previous_top1(title_date)
-    changed = "NA"
+
+    ai_summary = recap_context.get("ai_summary", {}) if isinstance(recap_context.get("ai_summary"), dict) else {}
+    execution_summaries = recap_context.get("execution_summaries_full", []) if isinstance(recap_context, dict) else []
+    prior_morning_lines = recap_context.get("prior_morning_lines", []) if isinstance(recap_context, dict) else []
+
+    focus_lines = _short_lines(ai_summary.get("focus", []), limit=3)
+    if not focus_lines:
+        focus_lines = _execution_focus_lines(execution_summaries, limit=3)
     if top1 is not None:
-        changed = "是" if prev_top1 and str(top1.get("ticker", "")).upper() != prev_top1 else "否"
+        top1_line = f"Top1 {top1.get('ticker', 'NA')} 風險{top1.get('risk_level', 'NA')}"
+        focus_lines = _short_lines([top1_line] + focus_lines, limit=3)
+    if prior_morning_lines:
+        focus_lines = _short_lines([f"承接早晨: {prior_morning_lines[0]}"] + focus_lines, limit=3)
 
-    lines = [
-        f"[Alpha Finder] 睡前結論卡 {title_date}",
-        "",
-    ]
-    if top1 is not None:
-        lines.append(
-            f"Top 1: {top1.get('ticker', 'NA')} | tag={top1.get('decision_tag', 'NA')} | risk={top1.get('risk_level', 'NA')} | 變動={changed}"
-        )
-        lines.append("")
-    else:
-        lines.append("No candidates available.")
-        lines.append("")
+    action_lines = _short_lines(ai_summary.get("opening_plan", []), limit=3)
+    if not action_lines:
+        action_lines = _short_lines(strategy_lines[1:] if len(strategy_lines) > 1 else [], limit=3)
 
-    if strategy_lines:
-        lines.extend(strategy_lines)
-        lines.append("")
+    risk_lines = _short_lines(ai_summary.get("risk_flags", []), limit=3)
+    if not risk_lines:
+        risk_lines = _execution_risk_lines(execution_summaries, limit=3)
 
-    ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="明早先做")
-    if ai_lines:
-        lines.extend(ai_lines)
-    else:
-        lines.extend(_build_recap_fallback_lines(recap_context, plan_label="明早先做"))
+    summary_line = _clip_text(ai_summary.get("summary") or "今晚先控風險，明早再驗證。", 36)
+
+    lines = [f"[Bedtime {title_date}]", ""]
+    lines.extend(_section_lines("重點", focus_lines, "今天沒有關鍵變化"))
+    lines.extend(_section_lines("現在應該做什麼", action_lines, "今晚不加新單"))
+    lines.extend(_section_lines("失效條件", risk_lines, "開盤轉弱先降風險"))
+    lines.append(f"結論: {summary_line}")
     return "\n".join(lines)
 
 
 def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_date: str, recap_context: dict) -> str:
     strategy_lines = _build_morning_strategy_lines(_df, recap_context)
     del _tv_map
-    lines = [
-        f"[Alpha Finder] 隔夜結論卡 {title_date}",
-        "",
-    ]
-
+    ai_summary = recap_context.get("ai_summary", {}) if isinstance(recap_context.get("ai_summary"), dict) else {}
+    execution_summaries = recap_context.get("execution_summaries_full", []) if isinstance(recap_context, dict) else []
+    lines = [f"[Morning {title_date}]", ""]
     prior_bedtime_lines = recap_context.get("prior_bedtime_lines", []) if isinstance(recap_context, dict) else []
+
+    focus_lines = _short_lines(ai_summary.get("focus", []), limit=3)
+    if not focus_lines:
+        focus_lines = _execution_focus_lines(execution_summaries, limit=3)
     if prior_bedtime_lines:
-        lines.extend(_build_reference_lines(prior_bedtime_lines, "延續昨晚待驗證"))
-        lines.append("")
+        focus_lines = _short_lines([f"承接昨晚: {prior_bedtime_lines[0]}"] + focus_lines, limit=3)
+    lines.extend(_section_lines("重點", focus_lines, "隔夜沒有新風險"))
 
-    if strategy_lines:
-        lines.extend(strategy_lines)
-        lines.append("")
+    action_lines = _short_lines(ai_summary.get("opening_plan", []), limit=3)
+    if not action_lines:
+        action_lines = _short_lines(strategy_lines[1:] if len(strategy_lines) > 1 else [], limit=3)
+    lines.extend(_section_lines("現在應該做什麼", action_lines, "開盤前先觀望"))
 
-    ai_lines = _build_ai_summary_lines(recap_context.get("ai_summary", {}), plan_label="今日盤前計畫")
-    if ai_lines:
-        lines.extend(ai_lines)
-    else:
-        lines.extend(_build_recap_fallback_lines(recap_context, plan_label="今日盤前計畫"))
+    risk_lines = _short_lines(ai_summary.get("risk_flags", []), limit=3)
+    if not risk_lines:
+        risk_lines = _execution_risk_lines(execution_summaries, limit=3)
+    lines.extend(_section_lines("失效條件", risk_lines, "開盤走弱先不追價"))
+
+    summary_line = _clip_text(ai_summary.get("summary") or "先驗證，再決定要不要進。", 36)
+    lines.append(f"結論: {summary_line}")
     return "\n".join(lines)
 
 
 def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_date: str, recap_context: dict) -> str:
     strategy_lines = _build_opening_strategy_lines(_df, recap_context)
     del _tv_map
-    lines = [
-        f"[Alpha Finder] 開盤驗證結論卡 {title_date}",
-        "",
-    ]
+    ai_summary = recap_context.get("ai_summary", {}) if isinstance(recap_context.get("ai_summary"), dict) else {}
+    validation_rows = recap_context.get("validation_rows", []) if isinstance(recap_context, dict) else []
+    lines = [f"[Opening {title_date}]", ""]
+    prior_morning_warning = str(recap_context.get("prior_morning_warning", "")).strip() if isinstance(recap_context, dict) else ""
+    if prior_morning_warning:
+        lines.append(prior_morning_warning)
 
     reference_plan = recap_context.get("reference_plan_lines", []) if isinstance(recap_context, dict) else []
+
+    focus_lines = _short_lines(ai_summary.get("focus", []), limit=3)
+    if not focus_lines:
+        focus_lines = _short_lines([f"{row.get('ticker', 'NA')}: {row.get('validation_label', '待確認')}" for row in validation_rows], limit=3)
     if reference_plan:
-        lines.extend(_build_reference_lines(reference_plan, "待驗證計畫"))
-        lines.append("")
+        focus_lines = _short_lines([f"承接早晨: {reference_plan[0]}"] + focus_lines, limit=3)
+    lines.extend(_section_lines("重點", focus_lines, "首輪資料不足"))
 
-    if strategy_lines:
-        lines.extend(strategy_lines)
-        lines.append("")
+    action_lines = _short_lines(ai_summary.get("opening_plan", []), limit=3)
+    if not action_lines:
+        action_lines = _short_lines(strategy_lines[1:] if len(strategy_lines) > 1 else ["先等下一輪驗證"], limit=3)
+    lines.extend(_section_lines("現在應該做什麼", action_lines, "先觀望不追第一根"))
 
-    ai_lines = _build_ai_summary_lines(
-        recap_context.get("ai_summary", {}),
-        plan_label="現在先做",
-        focus_label="劇本驗證",
-        risk_first=True,
-    )
-    if ai_lines:
-        lines.extend(ai_lines)
-    else:
-        lines.extend(_build_opening_fallback_lines(recap_context))
+    risk_lines = _short_lines(ai_summary.get("risk_flags", []), limit=3)
+    if not risk_lines:
+        risk_lines = _opening_risk_lines(validation_rows, limit=3)
+    lines.extend(_section_lines("失效條件", risk_lines, "跌破關鍵位就先退場"))
+
+    summary_line = _clip_text(ai_summary.get("summary") or "先驗證再動作，未確認不加碼。", 36)
+    lines.append(f"結論: {summary_line}")
     return "\n".join(lines)
 
 
@@ -1962,6 +2105,9 @@ def build_recap_message_preview(
         "ai_summary_generated": bool((recap_context or {}).get("ai_summary")) if isinstance(recap_context, dict) else False,
         "tracked_news_count": len((recap_context or {}).get("tracked_news", [])) if isinstance(recap_context, dict) else 0,
         "conflict_news_count": len((recap_context or {}).get("conflict_news", [])) if isinstance(recap_context, dict) else 0,
+        "has_prior_bedtime_plan": bool((recap_context or {}).get("has_prior_bedtime_plan")) if isinstance(recap_context, dict) else False,
+        "has_prior_morning_plan": bool((recap_context or {}).get("has_prior_morning_plan")) if isinstance(recap_context, dict) else False,
+        "execution_summary_source": str((recap_context or {}).get("execution_summary_source", "")) if isinstance(recap_context, dict) else "",
     }
     return {
         "ok": True,

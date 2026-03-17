@@ -69,3 +69,68 @@ def test_bedtime_strategy_lines_include_swing_recommendation_line():
     }
     lines = build_bedtime_strategy_lines(df, context)
     assert any("Swing Core" in line for line in lines)
+
+
+def test_morning_message_contains_required_sections_and_prior_link():
+    build_morning_message = getattr(recap, "_build_morning_message")
+    df = pd.DataFrame([{"ticker": "ZVRA", "rank": 1, "decision_tag": "keep", "risk_level": "中"}])
+    context = {
+        "prior_bedtime_lines": ["ZVRA: 昨晚待驗證"],
+        "ai_summary": {
+            "summary": "今天先等開盤確認。",
+            "focus": ["ZVRA: 隔夜維持強勢"],
+            "risk_flags": ["ZVRA: 跌破 AVWAP 先不追"],
+            "opening_plan": ["ZVRA: 開盤守住 AVWAP 才考慮進"],
+        },
+        "execution_summaries_full": [],
+        "positions_df": pd.DataFrame(),
+    }
+
+    message = build_morning_message(df, {}, "2026-03-17", context)
+    assert "承接昨晚計畫:" in message
+    assert "現在應該做什麼:" in message
+    assert "失效條件:" in message
+    assert "結論:" in message
+
+
+def test_opening_message_contains_required_sections_and_prior_link():
+    build_opening_message = getattr(recap, "_build_opening_message")
+    df = pd.DataFrame([{"ticker": "ZVRA", "rank": 1, "decision_tag": "keep", "risk_level": "中"}])
+    context = {
+        "reference_plan_lines": ["ZVRA: 早晨計畫待驗證"],
+        "validation_rows": [{"ticker": "ZVRA", "validation_label": "確認續強", "next_step": "守住 AVWAP 才能續抱"}],
+        "ai_summary": {
+            "summary": "先驗證，不追第一根。",
+            "focus": ["ZVRA: 開盤續強"],
+            "risk_flags": ["ZVRA: 量縮失敗就退"],
+            "opening_plan": ["ZVRA: 只在拉回守住 AVWAP 時進"],
+        },
+    }
+
+    message = build_opening_message(df, {}, "2026-03-17", context)
+    assert "承接早晨計畫:" in message
+    assert "開盤驗證結果:" in message
+    assert "現在應該做什麼:" in message
+    assert "失效條件:" in message
+    assert "結論:" in message
+
+
+def test_bedtime_message_carries_prior_morning_plan():
+    build_bedtime_message = getattr(recap, "_build_bedtime_message")
+    df = pd.DataFrame([{"ticker": "ZVRA", "rank": 1, "decision_tag": "keep", "risk_level": "中"}])
+    context = {
+        "prior_morning_lines": ["ZVRA: 早晨計畫"],
+        "ai_summary": {
+            "summary": "今晚不追價，等明早。",
+            "focus": ["ZVRA: 今天維持強勢"],
+            "risk_flags": ["ZVRA: 若轉弱先降風險"],
+            "opening_plan": ["ZVRA: 明早只在守住 AVWAP 時續抱"],
+        },
+        "execution_summaries_full": [],
+        "positions_df": pd.DataFrame(),
+    }
+
+    message = build_bedtime_message(df, {}, "2026-03-17", context)
+    assert "承接早晨計畫:" in message
+    assert "現在應該做什麼:" in message
+    assert "失效條件:" in message

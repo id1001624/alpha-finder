@@ -83,6 +83,13 @@ python .\scripts\generate_backtest_metrics.py
 
 你如果只想問「為什麼 bot 這樣提醒」或「這筆為什麼停損」，通常前 3 個就夠了。
 
+## QuantMuse 狀態確認
+如果 ai_decision_log.csv 裡 decision_tag 全部是 rule_based，
+代表 QuantMuse 掉回 fallback，執行以下指令確認：
+sudo systemctl status alpha-finder-discord-bot --no-pager
+tail -50 /var/log/alpha-finder/discord-bot.log | grep -i "has_langchain\|quantmuse"
+
+
 ## Discord 指令
 
 說明：

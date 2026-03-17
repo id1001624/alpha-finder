@@ -225,6 +225,12 @@ def _build_recapstatus_message(status: dict) -> str:
         lines.append(f"tracked_news_count: {int(status.get('tracked_news_count', 0) or 0)}")
     if "conflict_news_count" in status:
         lines.append(f"conflict_news_count: {int(status.get('conflict_news_count', 0) or 0)}")
+    if "has_prior_bedtime_plan" in status:
+        lines.append(f"has_prior_bedtime_plan: {bool(status.get('has_prior_bedtime_plan'))}")
+    if "has_prior_morning_plan" in status:
+        lines.append(f"has_prior_morning_plan: {bool(status.get('has_prior_morning_plan'))}")
+    if "execution_summary_source" in status and str(status.get("execution_summary_source", "")).strip():
+        lines.append(f"execution_summary_source: {status.get('execution_summary_source', '')}")
 
     note = str(status.get("note", "")).strip()
     if note:
@@ -556,6 +562,9 @@ def main() -> int:
                 "ai_summary_generated": bool(pipe.get("ai_summary_generated")),
                 "tracked_news_count": int(pipe.get("tracked_news_count", 0) or 0),
                 "conflict_news_count": int(pipe.get("conflict_news_count", 0) or 0),
+                "has_prior_bedtime_plan": bool(pipe.get("has_prior_bedtime_plan")),
+                "has_prior_morning_plan": bool(pipe.get("has_prior_morning_plan")),
+                "execution_summary_source": str(pipe.get("execution_summary_source", "")),
                 "note": "manual recap",
             }
         )
@@ -572,6 +581,9 @@ def main() -> int:
                 f"ai_summary_generated={bool(pipe.get('ai_summary_generated'))}",
                 f"tracked_news_count={int(pipe.get('tracked_news_count', 0) or 0)}",
                 f"conflict_news_count={int(pipe.get('conflict_news_count', 0) or 0)}",
+                f"has_prior_bedtime_plan={bool(pipe.get('has_prior_bedtime_plan'))}",
+                f"has_prior_morning_plan={bool(pipe.get('has_prior_morning_plan'))}",
+                f"execution_summary_source={str(pipe.get('execution_summary_source', ''))}",
             ]
             message = message + "\n" + "\n".join(debug_lines)
 

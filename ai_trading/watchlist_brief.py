@@ -1129,10 +1129,7 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
         for item in (payload.get("items", []) if isinstance(payload.get("items"), list) else [])
     )
 
-    lines = [
-        f"[Alpha Finder] 交易結論卡 {payload.get('generated_at', '')}",
-        "",
-    ]
+    lines = [f"[Watchlist {payload.get('generated_at', '')}]", ""]
     headline = str(summary.get("headline", "")).strip()
     message_summary = str(summary.get("summary", "")).strip()
     if headline:
@@ -1140,26 +1137,34 @@ def build_watchlist_brief_message(raw_tickers: str = "", saved_tickers: List[str
     if message_summary:
         lines.append(message_summary)
     if not _engine_data_available and "⚠️" not in message_summary:
-        lines.append("⚠️ 目前無盤中指標資料，排序依 AI 排名與新聞。開盤 30 分鐘後再看一次。")
-    context_lines = _build_universe_context_lines(payload, saved, extra)
-    if context_lines:
-        lines.append("")
-        lines.extend(context_lines)
+        lines.append("⚠️ 目前無盤中指標資料，先觀望，開盤 30 分鐘後再驗證。")
     priority_order = [_decorate_priority_item(item, priority_map) for item in (summary.get("priority_order", []) if isinstance(summary.get("priority_order", []), list) else [])]
     risk_flags = [_decorate_priority_item(item, priority_map) for item in (summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else [])]
     action_plan = [_decorate_priority_item(item, priority_map) for item in (summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else [])]
-    if priority_order:
-        lines.append("先看標的:")
-        for idx, item in enumerate(priority_order, 1):
-            lines.append(f"- {idx}. {item}")
-    if risk_flags:
-        lines.append("先避開 / 先處理:")
-        for item in risk_flags:
-            lines.append(f"- {item}")
+
+    lines.append("現在應該做什麼:")
     if action_plan:
-        lines.append("執行動作:")
-        for item in action_plan:
-            lines.append(f"- {item}")
+        for item in action_plan[:4]:
+            lines.append(f"- {_clip_text(item, 84)}")
+    elif priority_order:
+        for item in priority_order[:2]:
+            lines.append(f"- {_clip_text(item, 84)}")
+    else:
+        lines.append("- 今天先不開新倉，等待更乾淨訊號。")
+
+    lines.append("失效條件:")
+    if risk_flags:
+        for item in risk_flags[:4]:
+            lines.append(f"- {_clip_text(item, 84)}")
+    else:
+        lines.append("- 任一候選若跌破 AVWAP 或動能翻負，先觀望不追。")
+
+    if priority_order:
+        lines.append("結論:")
+        for idx, item in enumerate(priority_order[:3], 1):
+            lines.append(f"- {idx}. {_clip_text(item, 84)}")
+    else:
+        lines.append("結論: 今天沒有高把握標的，維持觀望。")
     return "\n".join(lines)
 
 
@@ -1175,10 +1180,7 @@ def build_saved_watchlist_followup_message(saved_tickers: List[str] | None = Non
         for item in (payload.get("items", []) if isinstance(payload.get("items"), list) else [])
     )
 
-    lines = [
-        f"[Alpha Finder] Watchlist Follow-up {payload.get('generated_at', '')}",
-        "",
-    ]
+    lines = [f"[Watchlist Follow-up {payload.get('generated_at', '')}]", ""]
     headline = str(summary.get("headline", "")).strip()
     message_summary = str(summary.get("summary", "")).strip()
     if headline:
@@ -1193,16 +1195,27 @@ def build_saved_watchlist_followup_message(saved_tickers: List[str] | None = Non
     risk_flags = summary.get("risk_flags", []) if isinstance(summary.get("risk_flags", []), list) else []
     action_plan = summary.get("action_plan", []) if isinstance(summary.get("action_plan", []), list) else []
 
-    if priority_order:
-        lines.append("續強 / 再進場觀察:")
-        for idx, item in enumerate(priority_order, 1):
-            lines.append(f"- {idx}. {item}")
-    if risk_flags:
-        lines.append("先別追 / 先處理:")
-        for item in risk_flags:
-            lines.append(f"- {item}")
+    lines.append("現在應該做什麼:")
     if action_plan:
-        lines.append("現在先做:")
-        for item in action_plan:
-            lines.append(f"- {item}")
+        for item in action_plan[:4]:
+            lines.append(f"- {_clip_text(item, 84)}")
+    elif priority_order:
+        for item in priority_order[:2]:
+            lines.append(f"- {_clip_text(item, 84)}")
+    else:
+        lines.append("- 今天沒有重啟條件，維持追蹤觀察。")
+
+    lines.append("失效條件:")
+    if risk_flags:
+        for item in risk_flags[:4]:
+            lines.append(f"- {_clip_text(item, 84)}")
+    else:
+        lines.append("- 若未站回 AVWAP 或量能不足，不做再進場。")
+
+    if priority_order:
+        lines.append("結論:")
+        for idx, item in enumerate(priority_order[:3], 1):
+            lines.append(f"- {idx}. {_clip_text(item, 84)}")
+    else:
+        lines.append("結論: 目前先不交易，只保留觀察。")
     return "\n".join(lines)
