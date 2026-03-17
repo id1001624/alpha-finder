@@ -28,6 +28,23 @@ def _getenv_bool(name: str, default: str = "false") -> bool:
     return _getenv(name, default).strip().lower() == "true"
 
 
+def _parse_symbol_map(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    text = str(raw or "").strip()
+    if not text:
+        return out
+    for chunk in text.split(","):
+        part = str(chunk or "").strip()
+        if not part or ":" not in part:
+            continue
+        left, right = part.split(":", 1)
+        key = str(left or "").strip().upper()
+        value = str(right or "").strip().upper()
+        if key and value:
+            out[key] = value
+    return out
+
+
 ALPHA_FINDER_LOG_LEVEL = _getenv("ALPHA_FINDER_LOG_LEVEL", _getenv("LOG_LEVEL", "INFO")).upper()
 
 # ============ 市場和指數配置 ============
@@ -454,6 +471,7 @@ PORTFOLIO_DAILY_MAX_STRATEGY_LOSS = float(_getenv("PORTFOLIO_DAILY_MAX_STRATEGY_
 PORTFOLIO_DAILY_MAX_TOTAL_LOSS = float(_getenv("PORTFOLIO_DAILY_MAX_TOTAL_LOSS", "-600.0"))
 PORTFOLIO_MAX_THEME_EXPOSURE = int(_getenv("PORTFOLIO_MAX_THEME_EXPOSURE", "2"))
 PORTFOLIO_MAX_NEW_ENTRIES_PER_STRATEGY = int(_getenv("PORTFOLIO_MAX_NEW_ENTRIES_PER_STRATEGY", "2"))
+LEVERAGED_ETF_MAP = _parse_symbol_map(_getenv("LEVERAGED_ETF_MAP", "MULL:MU,LITX:LITE"))
 
 # ============ Swing Core Engine ============
 SWING_ENGINE_ENABLED = _getenv_bool("SWING_ENGINE_ENABLED", "true")

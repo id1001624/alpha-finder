@@ -45,6 +45,7 @@ from ai_trading.strategy_context import (
     classify_watch_horizon,
     default_strategy_for_horizon,
 )
+from ai_trading.ticker_mapping import format_ticker_with_underlying, resolve_underlying_ticker
 from ai_trading.watchlist_brief import load_all_saved_watchlist_tickers
 from config import (
     DISCORD_WEBHOOK_URL,
@@ -129,6 +130,7 @@ EXECUTION_COLS = [
     "execution_date",
     "execution_time",
     "ticker",
+    "underlying_ticker",
     "action",
     "position_effect",
     "rank",
@@ -262,6 +264,16 @@ def _safe_int(value: object, default: int = 0) -> int:
     if pd.isna(parsed):
         return int(default)
     return int(parsed)
+
+
+def _ticker_label(ticker: str, underlying_ticker: str) -> str:
+    return format_ticker_with_underlying(str(ticker or "").strip().upper(), str(underlying_ticker or "").strip().upper())
+
+
+def _is_mapped_ticker(ticker: str, underlying_ticker: str) -> bool:
+    display = str(ticker or "").strip().upper()
+    underlying = str(underlying_ticker or "").strip().upper()
+    return bool(display and underlying and display != underlying)
 
 
 def _sanitize_webhook_url(value: str) -> str:
@@ -542,6 +554,7 @@ def _load_execution_df(limit: int) -> pd.DataFrame:
         if col not in normalized.columns:
             normalized[col] = ""
     normalized["ticker"] = normalized["ticker"].astype(str).str.strip().str.upper()
+    normalized["underlying_ticker"] = normalized["underlying_ticker"].astype(str).str.strip().str.upper()
     normalized["action"] = normalized["action"].astype(str).str.strip().str.lower()
     normalized["decision_tag"] = normalized["decision_tag"].astype(str).str.strip().str.lower()
     normalized["rank"] = pd.to_numeric(normalized["rank"], errors="coerce").fillna(9999).astype(int)
@@ -652,6 +665,7 @@ def _summarize_execution_window(
         latest_action = str(latest.get("action", "")).strip().lower()
         latest_ts = latest.get("recorded_at_ts")
         latest_ts_text = latest_ts.strftime("%m-%d %H:%M") if isinstance(latest_ts, pd.Timestamp) and not pd.isna(latest_ts) else "NA"
+        underlying_ticker = str(latest.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
         position = position_map.get(ticker)
         has_position = position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0
         status_label, guidance = _derive_status_and_guidance(latest_action, has_conflict, reversal_count, has_position)
@@ -673,6 +687,8 @@ def _summarize_execution_window(
         out.append(
             {
                 "ticker": ticker,
+                "underlying_ticker": underlying_ticker,
+                "ticker_display": _ticker_label(ticker, underlying_ticker),
                 "latest_action": latest_action,
                 "latest_label": ACTION_LABELS.get(latest_action, latest_action or "NA"),
                 "latest_time": latest_ts_text,
@@ -692,6 +708,7 @@ def _summarize_execution_window(
                 "close": _safe_float(latest.get("close"), 0.0),
                 "vwap": _safe_float(latest.get("vwap"), 0.0),
                 "sqzmom_color": str(latest.get("sqzmom_color", "")).strip(),
+                "sqzmom_hist": _safe_float(latest.get("sqzmom_value", latest.get("sqzmom_hist")), 0.0),
                 "reason_summary": _clip_text(latest.get("reason_summary") or "", 120),
                 "sort_ts": latest_ts,
             }
@@ -760,14 +777,16 @@ def _build_morning_rule_ai_summary(execution_summaries: List[dict], prior_bedtim
 
     for item in execution_summaries[:max(1, int(RECAP_MORNING_FULL_ENGINE_MAX_TICKERS))]:
         ticker = str(item.get("ticker", "")).strip().upper()
+        underlying_ticker = str(item.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
+        label_ticker = _ticker_label(ticker, underlying_ticker)
         if not ticker:
             continue
         status = str(item.get("status_label", "待確認")).strip() or "待確認"
         bucket = _morning_priority_bucket(item)
         if len(focus_items) < 3:
-            focus_items.append(f"{ticker}({status})")
+            focus_items.append(f"{label_ticker}({status})")
         if bucket <= 3 and len(risk_items) < 3:
-            risk_items.append(f"{ticker}({status})")
+            risk_items.append(f"{label_ticker}({status})")
 
         guidance = _clip_text(item.get("guidance") or "", 72)
         if guidance and guidance not in seen_plan_items and len(plan_items) < 3:
@@ -920,6 +939,7 @@ def _load_engine_snapshot() -> List[dict]:
         action = str(row.get("tv_event") or row.get("action") or "").strip().lower()
         out.append({
             "ticker": ticker,
+            "underlying_ticker": str(row.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker),
             "action": action,
             "close": _safe_float(row.get("close"), 0.0),
             "vwap": _safe_float(row.get("vwap"), 0.0),
@@ -955,6 +975,8 @@ def _summaries_to_payload(items: List[dict], limit: int = 6) -> List[dict]:
         out.append(
             {
                 "ticker": item.get("ticker", ""),
+                "underlying_ticker": item.get("underlying_ticker", ""),
+                "ticker_display": item.get("ticker_display", ""),
                 "latest_action": item.get("latest_action", ""),
                 "status_label": item.get("status_label", ""),
                 "latest_time": item.get("latest_time", ""),
@@ -1021,10 +1043,21 @@ def _find_auto_entry_candidate(df: pd.DataFrame, positions_df: pd.DataFrame) -> 
 
 def _strategy_conclusion_for_summary(item: dict) -> str:
     ticker = str(item.get("ticker", "")).strip().upper() or "NA"
+    underlying_ticker = str(item.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
+    ticker_label = _ticker_label(ticker, underlying_ticker)
     latest_action = str(item.get("latest_action", "")).strip().lower()
     has_position = bool(item.get("has_position"))
     horizon = str(item.get("horizon_tag", "")).strip()
     tag = "[Swing]" if horizon == HORIZON_SWING_CORE else "[Monster]"
+    if has_position and _is_mapped_ticker(ticker, underlying_ticker):
+        close_val = _safe_float(item.get("close"), 0.0)
+        vwap_val = _safe_float(item.get("vwap"), 0.0)
+        hist_val = _safe_float(item.get("sqzmom_hist", item.get("sqzmom_value")), 0.0)
+        color = str(item.get("sqzmom_color", "")).strip().lower()
+        vwap_text = "VWAP 守住" if vwap_val > 0 and close_val >= vwap_val else "VWAP 跌破"
+        sqz_text = "SQZMOM 發動中" if hist_val > 0 and color in {"green", "lime"} else "SQZMOM 轉弱"
+        hold_text = "先降風險" if latest_action in {"stop_loss", "take_profit"} else "繼續持有"
+        return f"{ticker_label}: {vwap_text}，{sqz_text}，{hold_text}"
     if latest_action == "stop_loss" and has_position:
         return f"{ticker}{tag}: 直接全出，這不是雜訊等級，屬於硬風控。"
     if latest_action == "take_profit" and has_position:
@@ -1773,7 +1806,18 @@ def _execution_focus_lines(execution_summaries: List[dict], limit: int = 3) -> L
     rows: List[str] = []
     for item in execution_summaries:
         ticker = str(item.get("ticker", "")).strip().upper()
+        underlying_ticker = str(item.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
         if not ticker:
+            continue
+        if bool(item.get("has_position")) and _is_mapped_ticker(ticker, underlying_ticker):
+            close_val = _safe_float(item.get("close"), 0.0)
+            vwap_val = _safe_float(item.get("vwap"), 0.0)
+            hist_val = _safe_float(item.get("sqzmom_hist", item.get("sqzmom_value")), 0.0)
+            color = str(item.get("sqzmom_color", "")).strip().lower()
+            vwap_text = "VWAP 守住" if vwap_val > 0 and close_val >= vwap_val else "VWAP 跌破"
+            sqz_text = "SQZMOM 發動中" if hist_val > 0 and color in {"green", "lime"} else "SQZMOM 轉弱"
+            hold_text = "先降風險" if str(item.get("latest_action", "")).strip().lower() in {"stop_loss", "take_profit"} else "繼續持有"
+            rows.append(f"{_ticker_label(ticker, underlying_ticker)}：{vwap_text}，{sqz_text}，{hold_text}")
             continue
         status = str(item.get("status_label", "待確認")).strip() or "待確認"
         guidance = _clip_text(item.get("guidance") or "", max(12, int(RECAP_MAX_LINE_CHARS) - 8))
@@ -1788,7 +1832,11 @@ def _execution_risk_lines(execution_summaries: List[dict], limit: int = 3) -> Li
     rows: List[str] = []
     for item in execution_summaries:
         ticker = str(item.get("ticker", "")).strip().upper()
+        underlying_ticker = str(item.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
         if not ticker:
+            continue
+        if bool(item.get("has_position")) and _is_mapped_ticker(ticker, underlying_ticker):
+            rows.append(f"失效條件: {underlying_ticker} 跌破 VWAP 則 {ticker} 出場")
             continue
         latest_action = str(item.get("latest_action", "")).strip().lower()
         if bool(item.get("has_conflict")) or latest_action in {"stop_loss", "take_profit"}:
@@ -1913,6 +1961,9 @@ def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_d
     focus_lines = _short_lines(ai_summary.get("focus", []), limit=3)
     if not focus_lines:
         focus_lines = _execution_focus_lines(execution_summaries, limit=3)
+    mapped_focus_lines = [line for line in _execution_focus_lines(execution_summaries, limit=3) if "標的：" in str(line)]
+    if mapped_focus_lines:
+        focus_lines = _short_lines(mapped_focus_lines + focus_lines, limit=3)
     if top1 is not None:
         top1_line = f"Top1 {top1.get('ticker', 'NA')} 風險{top1.get('risk_level', 'NA')}"
         focus_lines = _short_lines([top1_line] + focus_lines, limit=3)
@@ -1926,6 +1977,9 @@ def _build_bedtime_message(df: pd.DataFrame, _tv_map: Dict[str, object], title_d
     risk_lines = _short_lines(ai_summary.get("risk_flags", []), limit=3)
     if not risk_lines:
         risk_lines = _execution_risk_lines(execution_summaries, limit=3)
+    mapped_risk_lines = [line for line in _execution_risk_lines(execution_summaries, limit=3) if str(line).startswith("失效條件:")]
+    if mapped_risk_lines:
+        risk_lines = _short_lines(mapped_risk_lines + risk_lines, limit=3)
 
     summary_line = _clip_text(ai_summary.get("summary") or "今晚先控風險，明早再驗證。", 36)
 
@@ -1948,6 +2002,9 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     focus_lines = _short_lines(ai_summary.get("focus", []), limit=3)
     if not focus_lines:
         focus_lines = _execution_focus_lines(execution_summaries, limit=3)
+    mapped_focus_lines = [line for line in _execution_focus_lines(execution_summaries, limit=3) if "標的：" in str(line)]
+    if mapped_focus_lines:
+        focus_lines = _short_lines(mapped_focus_lines + focus_lines, limit=3)
     if prior_bedtime_lines:
         focus_lines = _short_lines([f"承接昨晚: {prior_bedtime_lines[0]}"] + focus_lines, limit=3)
     lines.extend(_section_lines("重點", focus_lines, "隔夜沒有新風險"))
@@ -1960,6 +2017,9 @@ def _build_morning_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     risk_lines = _short_lines(ai_summary.get("risk_flags", []), limit=3)
     if not risk_lines:
         risk_lines = _execution_risk_lines(execution_summaries, limit=3)
+    mapped_risk_lines = [line for line in _execution_risk_lines(execution_summaries, limit=3) if str(line).startswith("失效條件:")]
+    if mapped_risk_lines:
+        risk_lines = _short_lines(mapped_risk_lines + risk_lines, limit=3)
     lines.extend(_section_lines("失效條件", risk_lines, "開盤走弱先不追價"))
 
     summary_line = _clip_text(ai_summary.get("summary") or "先驗證，再決定要不要進。", 36)
@@ -1982,6 +2042,9 @@ def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     focus_lines = _short_lines(ai_summary.get("focus", []), limit=3)
     if not focus_lines:
         focus_lines = _short_lines([f"{row.get('ticker', 'NA')}: {row.get('validation_label', '待確認')}" for row in validation_rows], limit=3)
+    mapped_focus_lines = [line for line in _execution_focus_lines(recap_context.get("execution_summaries_full", []) if isinstance(recap_context, dict) else [], limit=3) if "標的：" in str(line)]
+    if mapped_focus_lines:
+        focus_lines = _short_lines(mapped_focus_lines + focus_lines, limit=3)
     if reference_plan:
         focus_lines = _short_lines([f"承接早晨: {reference_plan[0]}"] + focus_lines, limit=3)
     lines.extend(_section_lines("重點", focus_lines, "首輪資料不足"))
@@ -1994,6 +2057,9 @@ def _build_opening_message(_df: pd.DataFrame, _tv_map: Dict[str, object], title_
     risk_lines = _short_lines(ai_summary.get("risk_flags", []), limit=3)
     if not risk_lines:
         risk_lines = _opening_risk_lines(validation_rows, limit=3)
+    mapped_risk_lines = [line for line in _execution_risk_lines(recap_context.get("execution_summaries_full", []) if isinstance(recap_context, dict) else [], limit=3) if str(line).startswith("失效條件:")]
+    if mapped_risk_lines:
+        risk_lines = _short_lines(mapped_risk_lines + risk_lines, limit=3)
     lines.extend(_section_lines("失效條件", risk_lines, "跌破關鍵位就先退場"))
 
     summary_line = _clip_text(ai_summary.get("summary") or "先驗證再動作，未確認不加碼。", 36)

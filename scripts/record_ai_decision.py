@@ -32,6 +32,7 @@ from ai_trading.strategy_context import (
     detect_regime_tag,
     ensure_decision_strategy_columns,
 )
+from ai_trading.ticker_mapping import resolve_underlying_ticker
 
 from turso_state import sync_ai_decision_latest as sync_ai_decision_latest_to_turso
 
@@ -50,6 +51,7 @@ BASE_COLUMNS = [
     "decision_date",
     "rank",
     "ticker",
+    "underlying_ticker",
     "short_score_final",
     "swing_score",
     "core_score",
@@ -210,6 +212,8 @@ def normalize_decision_df(df: pd.DataFrame, fallback_date: str) -> pd.DataFrame:
     out = enrich_with_api_catalyst(out)
     out["decision_date"] = out["decision_date"].replace("", pd.NA).fillna(fallback_date)
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    out["underlying_ticker"] = out["underlying_ticker"].astype(str).str.strip().str.upper()
+    out["underlying_ticker"] = out["underlying_ticker"].where(out["underlying_ticker"] != "", out["ticker"].apply(resolve_underlying_ticker))
     out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
     out["tech_status"] = out["tech_status"].astype(str).str.strip()
     out["research_mode"] = out["research_mode"].astype(str).str.strip().str.lower()

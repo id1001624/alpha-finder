@@ -105,7 +105,8 @@ def test_engine_payload_from_snapshot_injects_similar_past_trades():
     builder = getattr(wb, "build_engine_payload_from_snapshot")
     payload = builder(
         {
-            "ticker": "AAPL",
+            "ticker": "MULL",
+            "underlying_ticker": "MU",
             "action": "entry",
             "reason": "站回 AVWAP",
             "size_fraction": 0.25,
@@ -116,15 +117,17 @@ def test_engine_payload_from_snapshot_injects_similar_past_trades():
             "sqzmom_color": "green",
             "sqz_release": True,
             "signal_ts": "2026-03-16 21:40:00",
-            "similar_past_trades": '[{"ticker":"AAPL","action":"entry","signal_type":"entry_ignition","outcome":"win","similarity":0.81,"reason_summary":"同型態突破成功"}]',
+            "similar_past_trades": '[{"ticker":"MULL","action":"entry","signal_type":"entry_ignition","outcome":"win","similarity":0.81,"reason_summary":"同型態突破成功"}]',
         }
     )
 
     assert isinstance(payload.get("similar_past_trades"), list)
     assert len(payload["similar_past_trades"]) == 1
     first = payload["similar_past_trades"][0]
-    assert first["ticker"] == "AAPL"
+    assert first["ticker"] == "MULL"
     assert first["outcome"] == "win"
+    assert payload["underlying_ticker"] == "MU"
+    assert payload["ticker_display"] == "MULL（標的：MU）"
 
 
 def test_watchlist_brief_message_uses_conclusion_sections(monkeypatch):

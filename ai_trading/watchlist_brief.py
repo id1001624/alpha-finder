@@ -46,6 +46,7 @@ from .strategy_context import (
     default_strategy_for_horizon,
     detect_regime_tag,
 )
+from .ticker_mapping import format_ticker_with_underlying, resolve_underlying_ticker
 from .trade_memory import get_trade_memory
 
 
@@ -452,8 +453,12 @@ def _load_intraday_snapshot_map() -> Dict[str, dict]:
 def _build_engine_payload_from_snapshot(snapshot_row: dict) -> dict:
     action = str(snapshot_row.get("action", "")).strip().lower()
     similar_past_trades = _parse_similar_past_trades(snapshot_row.get("similar_past_trades"))
+    ticker = str(snapshot_row.get("ticker", "")).strip().upper()
+    underlying_ticker = str(snapshot_row.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
     return {
-        "ticker": str(snapshot_row.get("ticker", "")).strip().upper(),
+        "ticker": ticker,
+        "underlying_ticker": underlying_ticker,
+        "ticker_display": format_ticker_with_underlying(ticker, underlying_ticker),
         "has_data": True,
         "action": action,
         "action_label": ACTION_LABELS.get(action, "待確認"),
@@ -480,20 +485,43 @@ def _build_engine_payload_live(
     decision: dict | None = None,
     trade_memory=None,
 ) -> dict:
-    bars = _fetch_intraday_bars(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, True)
+    underlying_ticker = resolve_underlying_ticker(ticker)
+    bars = _fetch_intraday_bars(underlying_ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, True)
     if len(bars) < 60:
-        return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認"}
+        return {
+            "ticker": ticker,
+            "underlying_ticker": underlying_ticker,
+            "ticker_display": format_ticker_with_underlying(ticker, underlying_ticker),
+            "has_data": False,
+            "action": "",
+            "action_label": "待確認",
+        }
 
     enriched = add_intraday_indicators(bars)
     valid = enriched.dropna(subset=["dynamic_avwap", "sqzmom_hist"]).copy()
     if len(valid) < 2:
-        return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認"}
+        return {
+            "ticker": ticker,
+            "underlying_ticker": underlying_ticker,
+            "ticker_display": format_ticker_with_underlying(ticker, underlying_ticker),
+            "has_data": False,
+            "action": "",
+            "action_label": "待確認",
+        }
 
     latest = valid.iloc[-1]
     previous = valid.iloc[-2]
     signal_ts = str(latest.get("Datetime", "")).strip()
     if not _is_current_engine_signal(signal_ts):
-        return {"ticker": ticker, "has_data": False, "action": "", "action_label": "待確認", "signal_ts": signal_ts}
+        return {
+            "ticker": ticker,
+            "underlying_ticker": underlying_ticker,
+            "ticker_display": format_ticker_with_underlying(ticker, underlying_ticker),
+            "has_data": False,
+            "action": "",
+            "action_label": "待確認",
+            "signal_ts": signal_ts,
+        }
 
     horizon = classify_watch_horizon(ticker, decision)
     strategy = default_strategy_for_horizon(horizon)
@@ -526,6 +554,13 @@ def _build_engine_payload_live(
             context=memory_context,
             top_k=3,
         )
+    position_mark_price = float(pd.to_numeric(latest.get("Close"), errors="coerce") or 0.0)
+    if underlying_ticker != ticker and position is not None and _safe_float(position.get("quantity", 0.0), 0.0) > 0:
+        mapped_bars = _fetch_intraday_bars(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, True)
+        if len(mapped_bars) > 0:
+            mapped_close = pd.to_numeric(mapped_bars.iloc[-1].get("Close"), errors="coerce")
+            if pd.notna(mapped_close):
+                position_mark_price = float(mapped_close)
     action, size_fraction, reason, signal_type = _classify_action(
         latest,
         previous,
@@ -540,9 +575,12 @@ def _build_engine_payload_live(
         detect_regime_tag(),
         valid,
         similar_past_trades,
+        position_mark_price=position_mark_price,
     )
     return {
         "ticker": ticker,
+        "underlying_ticker": underlying_ticker,
+        "ticker_display": format_ticker_with_underlying(ticker, underlying_ticker),
         "has_data": True,
         "action": action,
         "action_label": ACTION_LABELS.get(action, "待確認"),

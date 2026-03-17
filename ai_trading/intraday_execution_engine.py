@@ -79,6 +79,7 @@ from .strategy_context import (
     ensure_decision_strategy_columns,
     normalize_horizon_tag,
 )
+from .ticker_mapping import resolve_underlying_ticker
 from .trade_memory import get_trade_memory
 
 
@@ -100,6 +101,7 @@ EXECUTION_LOG_FIELDS = [
     "execution_time",
     "decision_date",
     "ticker",
+    "underlying_ticker",
     "rank",
     "action",
     "position_effect",
@@ -503,6 +505,7 @@ def _load_watchlist(top_n: int) -> pd.DataFrame:
 
     if len(watch) == 0:
         return pd.DataFrame()
+    watch["underlying_ticker"] = watch["ticker"].astype(str).str.strip().str.upper().apply(resolve_underlying_ticker)
     watch = watch.drop_duplicates(subset=["ticker"], keep="first")
     watch = watch.head(max(1, INTRADAY_MAX_SYMBOLS)).reset_index(drop=True)
     return watch
@@ -674,6 +677,13 @@ def _fetch_intraday_bars(ticker: str, period: str, interval: str, prepost: bool)
     return _fetch_intraday_bars_from_yfinance(ticker, period, interval, prepost)
 
 
+def _latest_close_for_ticker(ticker: str, period: str, interval: str, prepost: bool) -> float:
+    bars = _fetch_intraday_bars(ticker, period, interval, prepost)
+    if len(bars) == 0:
+        return float("nan")
+    return float(pd.to_numeric(bars.iloc[-1].get("Close"), errors="coerce"))
+
+
 def _build_reason(signal_type: str) -> str:
     reasons = {
         SIGNAL_ENTRY_IGNITION: "Ignition 模式：突破 AVWAP 且 SQZMOM 放量轉強，先開小倉抓第一波。",
@@ -839,6 +849,7 @@ def _classify_action(
     regime_tag: str,
     valid_history: pd.DataFrame,
     similar_past_trades: Optional[List[dict]] = None,
+    position_mark_price: Optional[float] = None,
 ) -> tuple[str, float, str, str]:
     close_val = float(pd.to_numeric(latest.get("Close"), errors="coerce"))
     avwap = float(pd.to_numeric(latest.get("dynamic_avwap"), errors="coerce"))
@@ -892,7 +903,8 @@ def _classify_action(
 
     avg_cost = float(position.get("avg_cost", 0.0))
     add_count = int(pd.to_numeric(position.get("add_count", 0), errors="coerce"))
-    unrealized_pct = ((close_val / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
+    mark_close = float(position_mark_price) if position_mark_price is not None and pd.notna(position_mark_price) else close_val
+    unrealized_pct = ((mark_close / avg_cost) - 1.0) * 100.0 if avg_cost > 0 else 0.0
     last_fill_ts = _latest_buy_fill_ts(trade_df, str(meta.get("ticker", "")))
     in_noise_grace = _is_in_noise_exit_grace(signal_ts, last_fill_ts)
 
@@ -944,8 +956,12 @@ def _format_user_line(row: dict) -> str:
     fraction = pd.to_numeric(row.get("size_fraction"), errors="coerce")
     if pd.notna(fraction) and float(fraction) > 0:
         qty_part = f" | 建議比例={int(round(float(fraction) * 100))}%"
+    display_ticker = str(row.get("ticker", "")).strip().upper()
+    underlying_ticker = str(row.get("underlying_ticker", "")).strip().upper()
+    if display_ticker and underlying_ticker and display_ticker != underlying_ticker:
+        display_ticker = f"{display_ticker}(標的:{underlying_ticker})"
     return (
-        f"- {row.get('ticker')} | {action_map.get(str(row.get('action')), str(row.get('action')))}"
+        f"- {display_ticker or row.get('ticker')} | {action_map.get(str(row.get('action')), str(row.get('action')))}"
         f" | rank={row.get('rank', 'NA')}{qty_part} | {row.get('signal_type', 'watch')} | {row.get('reason_summary', '')}"
     )
 
@@ -996,10 +1012,11 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
 
     for _, meta in watch_df.iterrows():
         ticker = str(meta.get("ticker", "")).strip().upper()
+        underlying_ticker = str(meta.get("underlying_ticker", "")).strip().upper() or resolve_underlying_ticker(ticker)
         if not ticker:
             continue
 
-        bars = _fetch_intraday_bars(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, INTRADAY_PREPOST)
+        bars = _fetch_intraday_bars(underlying_ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, INTRADAY_PREPOST)
         if len(bars) < 60:
             continue
 
@@ -1016,6 +1033,11 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             context=memory_context,
             top_k=3,
         )
+        position_mark_price = float(pd.to_numeric(latest.get("Close"), errors="coerce") or 0.0)
+        if underlying_ticker != ticker and position is not None and float(position.get("quantity", 0.0)) > 0:
+            mapped_close = _latest_close_for_ticker(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, INTRADAY_PREPOST)
+            if pd.notna(mapped_close):
+                position_mark_price = float(mapped_close)
         action, size_fraction, reason, signal_type = _classify_action(
             latest,
             previous,
@@ -1030,9 +1052,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             regime_tag,
             valid,
             similar_past_trades,
+            position_mark_price=position_mark_price,
         )
 
         snapshot_payload = {
+            "ticker": ticker,
+            "underlying_ticker": underlying_ticker,
             "close": float(pd.to_numeric(latest.get("Close"), errors="coerce") or 0.0),
             "dynamic_avwap": float(pd.to_numeric(latest.get("dynamic_avwap"), errors="coerce") or 0.0),
             "sqzmom_hist": float(pd.to_numeric(latest.get("sqzmom_hist"), errors="coerce") or 0.0),
@@ -1046,6 +1071,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             {
                 "generated_at": now_ts,
                 "ticker": ticker,
+                "underlying_ticker": underlying_ticker,
                 "rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") if pd.notna(pd.to_numeric(meta.get("rank"), errors="coerce")) else 0),
                 "decision_tag": str(meta.get("decision_tag", "")),
                 "monitor_priority": str(meta.get("monitor_priority", "今天主監控")),
@@ -1092,6 +1118,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         action_row = {
             "alert_ts": now_ts,
             "ticker": ticker,
+            "underlying_ticker": underlying_ticker,
             "rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") if pd.notna(pd.to_numeric(meta.get("rank"), errors="coerce")) else 0),
             "action": action,
             "signal_type": signal_type,
@@ -1133,6 +1160,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                 "execution_time": execution_time,
                 "decision_date": str(meta.get("decision_date", "")),
                 "ticker": ticker,
+                "underlying_ticker": underlying_ticker,
                 "rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") if pd.notna(pd.to_numeric(meta.get("rank"), errors="coerce")) else 0),
                 "action": action,
                 "position_effect": _position_effect(action),

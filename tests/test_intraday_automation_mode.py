@@ -134,3 +134,26 @@ def test_bedtime_message_carries_prior_morning_plan():
     assert "承接早晨計畫:" in message
     assert "現在應該做什麼:" in message
     assert "失效條件:" in message
+
+
+def test_recap_mapped_ticker_focus_and_risk_lines():
+    execution_summaries = [
+        {
+            "ticker": "MULL",
+            "underlying_ticker": "MU",
+            "has_position": True,
+            "latest_action": "add",
+            "close": 120.0,
+            "vwap": 118.0,
+            "sqzmom_hist": 0.35,
+            "sqzmom_color": "green",
+            "status_label": "續強加碼",
+            "guidance": "先觀察",
+        }
+    ]
+
+    focus_lines = getattr(recap, "_execution_focus_lines")(execution_summaries, limit=3)
+    risk_lines = getattr(recap, "_execution_risk_lines")(execution_summaries, limit=3)
+
+    assert any("MULL（標的：MU）" in line and "VWAP 守住" in line for line in focus_lines)
+    assert any("MU 跌破 VWAP 則 MULL 出場" in line for line in risk_lines)
