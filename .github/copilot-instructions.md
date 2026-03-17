@@ -4,6 +4,8 @@
 
 Alpha Finder 現在是一條完整的 AI 研究、決策、盤中執行提醒、持倉追蹤工作流。
 
+目前專案已完成核心建置，進入維運與優化階段（post-delivery hardening）。
+
 主流程：
 
 ```text
@@ -78,6 +80,8 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 - 基礎決策欄位：decision_date, rank, ticker, short_score_final, swing_score, core_score, risk_level, tech_status, theme, decision_tag, reason_summary, source_ref
 - 催化欄位：research_mode, catalyst_type, catalyst_sentiment, explosion_probability, hype_score, confidence, api_final_score, catalyst_source, catalyst_summary
+- 若使用 `decision_signals_daily.csv` 與 `overnight_catalyst_check.csv` 輔助網頁 AI，必須遵守：`final_impact` 優先於 `impact`、`decision_tag_v1` 篩選欄位名稱不可混用成 `decision_tag`。
+- `tomorrow_continuation_prob_adjusted` 的數值語意為 0-99，不可改寫成 0-1 比例。
 
 修改流程時優先維持這份契約穩定。
 
@@ -168,6 +172,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 ## Current Direction
 
+- 專案狀態：核心目標已達成，預設進入維運優化，不再擴張大範圍新架構，除非使用者明確要求
 - 目前基礎工作流已完成：研究、決策、盤中 intraday engine、盤後 swing engine、recap 整合、Discord 回報與追蹤
 - 兩層通知已實裝：風控出場（stop_loss/take_profit/swing_exit/swing_reduce）立即推 Discord；進場事件（entry/add/swing_entry/swing_add）由 recap 整合報告
 - Swing Core Engine 每日 21:15 UTC 自動觸發，早晨 recap 整合 Swing Top1 進決策卡

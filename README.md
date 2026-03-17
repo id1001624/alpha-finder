@@ -41,6 +41,8 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 做完這 4 步，接下來只要看 Discord。
 
+如果有買槓桿請在config.py:474 的 LEVERAGED_ETF_MAP 加入對應映射。
+
 欄位契約延伸說明（final_impact / swing_strategy_recommendation / similar_past_trades）：
 
 - docs/ai_decision_contract_extensions.md
