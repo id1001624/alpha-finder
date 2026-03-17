@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 import sys
@@ -15,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app_logging import get_logger
 
 from ai_trading.position_state import append_trade_ledger, apply_trade_fill, load_positions, save_positions
+from ai_trading.quantmuse_bridge import get_quantmuse_capabilities
 from ai_trading.strategy_context import (
     HORIZON_INTRADAY_MONSTER,
     HORIZON_SWING_CORE,
@@ -42,6 +44,7 @@ from turso_state import load_recent_execution_log, load_recent_trade_ledger
 logger = get_logger(__name__)
 ALERT_DIR = PROJECT_ROOT / "repo_outputs" / "backtest" / "alerts"
 RECAP_STATUS_LATEST_JSON = ALERT_DIR / "recap_status_latest.json"
+BLOCKING_API_TIMEOUT_SEC = 120
 
 
 def _parse_allowed_channel_ids(raw: str) -> set[int]:
@@ -313,11 +316,14 @@ def main() -> int:
         return False
 
     async def _build_watchlist_recap_output(ctx, tickers: str, debug: bool, trigger: str) -> str:
-        saved_tickers = load_saved_watchlist(_ctx_user_id(ctx))
-        message = build_watchlist_brief_message(raw_tickers=tickers, saved_tickers=saved_tickers)
+        saved_tickers = await asyncio.to_thread(load_saved_watchlist, _ctx_user_id(ctx))
+        message = await asyncio.wait_for(
+            asyncio.to_thread(build_watchlist_brief_message, raw_tickers=tickers, saved_tickers=saved_tickers),
+            timeout=BLOCKING_API_TIMEOUT_SEC,
+        )
         note = "watchlist alias output"
         if debug:
-            followup_card = build_saved_watchlist_followup_message(saved_tickers=saved_tickers)
+            followup_card = await asyncio.to_thread(build_saved_watchlist_followup_message, saved_tickers=saved_tickers)
             debug_lines = [
                 "",
                 "[Recap Debug]",
@@ -349,6 +355,17 @@ def main() -> int:
     @bot.event
     async def on_ready():
         logger.info("Discord trade bot ready: %s", bot.user)
+        caps = await asyncio.to_thread(get_quantmuse_capabilities)
+        logger.info(
+            "QuantMuse capabilities | enabled=%s available=%s has_langchain=%s reason=%s module=%s provider=%s path=%s",
+            bool(caps.get("enabled")),
+            bool(caps.get("available")),
+            bool(caps.get("has_langchain")),
+            str(caps.get("reason", "")),
+            str(caps.get("module_name", "")),
+            str(caps.get("llm_provider", "")),
+            str(caps.get("quantmuse_path", "")),
+        )
 
     @bot.hybrid_command(name="tradehelp", description="顯示可用的交易指令")
     async def tradehelp(ctx):
@@ -407,6 +424,9 @@ def main() -> int:
             await ctx.defer()
         try:
             message = await _build_watchlist_recap_output(ctx, tickers=tickers, debug=False, trigger="watchlist")
+        except asyncio.TimeoutError:
+            await ctx.send("指令逾時：watchlist 外部資料回應太慢，請稍後再試。")
+            return
         except ValueError as exc:
             await ctx.send(f"指令失敗: {exc}")
             return
@@ -470,6 +490,9 @@ def main() -> int:
         if mode_text == "watchlist":
             try:
                 message = await _build_watchlist_recap_output(ctx, tickers=tickers, debug=bool(debug), trigger="recap")
+            except asyncio.TimeoutError:
+                await ctx.send("指令逾時：watchlist 外部資料回應太慢，請稍後再試。")
+                return
             except ValueError as exc:
                 await ctx.send(f"指令失敗: {exc}")
                 return
@@ -477,7 +500,29 @@ def main() -> int:
             return
 
         try:
-            preview = build_recap_message_preview(mode=mode_text, top_n=5, tags={"keep", "watch"}, respect_mode_window=False)
+            preview = await asyncio.wait_for(
+                asyncio.to_thread(
+                    build_recap_message_preview,
+                    mode=mode_text,
+                    top_n=5,
+                    tags={"keep", "watch"},
+                    respect_mode_window=False,
+                ),
+                timeout=BLOCKING_API_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            _save_recap_status(
+                {
+                    "ok": False,
+                    "mode": mode_text,
+                    "reason_code": "timeout_blocking_api",
+                    "decision_date": "unknown",
+                    "source_id": "",
+                    "note": "manual recap timeout",
+                }
+            )
+            await ctx.send("指令逾時：recap 外部資料回應太慢，請稍後再試。")
+            return
         except ValueError as exc:
             await ctx.send(f"指令失敗: {exc}")
             return

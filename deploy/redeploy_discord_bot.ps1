@@ -72,6 +72,12 @@ try {
     }
 
     if ($SyncEnv) {
+        $quantmuseModel = if ([string]::IsNullOrWhiteSpace($env:QUANTMUSE_LLM_MODEL)) {
+            "sshleifer/tiny-gpt2"
+        } else {
+            $env:QUANTMUSE_LLM_MODEL
+        }
+
         $requiredEnvNames = @(
             "DISCORD_BOT_TOKEN",
             "TURSO_DATABASE_URL",
@@ -101,7 +107,7 @@ GEMINI_API_KEY=$($env:GEMINI_API_KEY)
 QUANTMUSE_ENABLED=$($env:QUANTMUSE_ENABLED)
 QUANTMUSE_PATH=$($env:QUANTMUSE_PATH)
 QUANTMUSE_LLM_PROVIDER=$($env:QUANTMUSE_LLM_PROVIDER)
-QUANTMUSE_LLM_MODEL=$($env:QUANTMUSE_LLM_MODEL)
+QUANTMUSE_LLM_MODEL=$quantmuseModel
 QUANTMUSE_VECTOR_DB_PATH=$($env:QUANTMUSE_VECTOR_DB_PATH)
 "@
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -125,6 +131,44 @@ QUANTMUSE_VECTOR_DB_PATH=$($env:QUANTMUSE_VECTOR_DB_PATH)
         ""
     }
 
+    $quantmuseHotfixCommand = @'
+if [ -f /opt/quantmuse/data_service/ai/llm_integration.py ]; then
+  sudo python3 - <<'PY'
+from pathlib import Path
+
+target = Path('/opt/quantmuse/data_service/ai/llm_integration.py')
+text = target.read_text(encoding='utf-8')
+changed = False
+needle = '                    max_length=kwargs.get(\'max_length\', 200),'
+
+if 'import torch\n' not in text:
+    anchor = 'from abc import ABC, abstractmethod\n'
+    if anchor in text:
+        text = text.replace(anchor, anchor + 'import torch\n', 1)
+        changed = True
+
+if needle in text and 'target_max_len' not in text:
+    text = text.replace(
+        '            with torch.no_grad():',
+        '            input_len = int(inputs.shape[-1]) if hasattr(inputs, \'shape\') else 0\\n'
+        '            target_max_len = int(kwargs.get(\'max_length\', max(256, input_len + 120)))\\n\\n'
+        '            with torch.no_grad():',
+        1,
+    )
+    text = text.replace(needle, '                    max_length=target_max_len,', 1)
+    changed = True
+
+if changed:
+    target.write_text(text, encoding='utf-8')
+    print('Applied QuantMuse llm_integration hotfix')
+else:
+    print('QuantMuse llm_integration hotfix already applied or not needed')
+PY
+
+    sudo -u alphafinder /opt/alpha-finder/.venv/bin/python -m py_compile /opt/quantmuse/data_service/ai/llm_integration.py
+fi
+'@
+
     $remoteCommand = @"
 set -e
 sudo mkdir -p $RemoteAppDir /etc/alpha-finder /var/log/alpha-finder
@@ -138,6 +182,7 @@ fi
 sudo -u alphafinder $RemoteAppDir/.venv/bin/pip install --upgrade pip
 $pipCommand
 $envInstallCommand
+$quantmuseHotfixCommand
 sudo install -o root -g root -m 644 /tmp/alpha-finder-discord-bot.service /etc/systemd/system/$RemoteServiceName
 sudo systemctl daemon-reload
 sudo systemctl restart $RemoteServiceName

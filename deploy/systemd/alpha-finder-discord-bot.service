@@ -8,6 +8,8 @@ Type=simple
 User=alphafinder
 WorkingDirectory=/opt/alpha-finder
 EnvironmentFile=/etc/alpha-finder/discord-bot.env
+Environment="PYTHONPATH=/opt/quantmuse:/opt/alpha-finder"
+Environment="QUANTMUSE_PATH=/opt/quantmuse"
 ExecStart=/opt/alpha-finder/.venv/bin/python /opt/alpha-finder/scripts/run_discord_trade_bot.py
 Restart=always
 RestartSec=5
