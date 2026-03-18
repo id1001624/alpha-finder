@@ -15,40 +15,15 @@ import functools
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# ===== 最優先：修復 SSL 憑證路徑（中文路徑導致 curl 失敗）=====
-# 必須在任何 import 之前執行，確保環境變數生效
-def _fix_ssl_cert_path():
-    """修復 SSL 憑證路徑中文問題"""
-    try:
-        import certifi
-        original = certifi.where()
-        # 只有當路徑含非 ASCII 字元時才需要修復
-        try:
-            original.encode('ascii')
-            return  # 路徑是純 ASCII，無需修復
-        except UnicodeEncodeError:
-            pass
+from ai_trading.utils.yfinance_ssl import ensure_ascii_cert_bundle
 
-        # 複製到使用者 home 目錄下的純英文路徑
-        safe_dir = os.path.join(os.path.expanduser('~'), '.alpha_finder_certs')
-        os.makedirs(safe_dir, exist_ok=True)
-        safe_cert = os.path.join(safe_dir, 'cacert.pem')
 
-        # 只在檔案不存在或原始檔案更新時才複製
-        if not os.path.exists(safe_cert) or \
-           os.path.getmtime(original) > os.path.getmtime(safe_cert):
-            shutil.copy2(original, safe_cert)
+def _fix_ssl_cert_path() -> str:
+    """保留舊介面相容，統一走共用 yfinance SSL bootstrap。"""
+    return ensure_ascii_cert_bundle()
 
-        # 設定環境變數讓 curl 和 requests 都能找到
-        os.environ['CURL_CA_BUNDLE'] = safe_cert
-        os.environ['SSL_CERT_FILE'] = safe_cert
-        os.environ['REQUESTS_CA_BUNDLE'] = safe_cert
-        os.environ['SSL_NO_VERIFY'] = '0'  # 確保不跳過驗證
-    except (ImportError, ModuleNotFoundError, OSError, PermissionError, shutil.Error):
-        # 非關鍵，失敗就跳過
-        pass
 
-_fix_ssl_cert_path()
+_YFINANCE_CA_BUNDLE = _fix_ssl_cert_path()
 
 # 現在才 import 其他依賴
 import pandas as pd

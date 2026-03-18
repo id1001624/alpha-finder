@@ -36,7 +36,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
-import yfinance as yf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -49,9 +48,14 @@ from ai_trading.market_data_pipeline import MarketDataPipeline
 from ai_trading.quantmuse_bridge import analyze_overnight_sentiment, blend_overnight_impact
 from ai_trading.ranking_engine import apply_ranking_engine
 from ai_trading.research_bridge import build_research_bridge
+from ai_trading.utils.yfinance_ssl import ensure_ascii_cert_bundle
 import config as app_config
 
 from app_logging import install_builtin_print_logging
+
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
+
+import yfinance as yf
 
 install_builtin_print_logging()
 
@@ -288,6 +292,693 @@ def _build_overnight_catalyst_check(
     out['rank_tmp'] = out['ticker'].map(rank_map).fillna(9999)
     out = out.sort_values(['rank_tmp', 'ticker'], ascending=[True, True]).drop(columns=['rank_tmp']).reset_index(drop=True)
     return out
+
+
+PRE_EVENT_WATCHLIST_COLUMNS = [
+    'ticker',
+    'event_date',
+    'days_to_event',
+    'earnings_session',
+    'sector',
+    'theme_tags',
+    'prior_gap_profile',
+    'analyst_count',
+    'target_price',
+    'upside_pct',
+    'float_proxy',
+    'market_cap',
+    'liquidity_proxy',
+    'pre_event_score',
+    'watch_reason',
+    'source_ts',
+]
+
+LIVE_EVENT_FEED_COLUMNS = [
+    'event_id',
+    'ts',
+    'ticker',
+    'source_name',
+    'source_tier',
+    'headline',
+    'url',
+    'event_type_raw',
+    'primary_event_type',
+    'sentiment_raw',
+    'price_at_event',
+    'market_cap',
+    'session',
+    'dedupe_key',
+]
+
+EVENT_SCORE_LOG_COLUMNS = [
+    'event_id',
+    'ticker',
+    'source_score',
+    'catalyst_score',
+    'theme_score',
+    'preearn_score',
+    'market_structure_score',
+    'dilution_risk',
+    'noise_penalty',
+    'trigger_score',
+    'score_reason',
+    'high_priority_flag',
+    'scoring_version',
+    'ts',
+]
+
+TRADE_TRIGGER_QUEUE_COLUMNS = [
+    'event_id',
+    'ticker',
+    'trigger_score',
+    'decision_mode',
+    'trigger_source',
+    'primary_event_type',
+    'price_at_event',
+    'current_price',
+    'price_extension_pct',
+    'relvol_1m',
+    'relvol_5m',
+    'vwap_dist',
+    'sqzmom_1m',
+    'sqzmom_5m',
+    'entry_signal_status',
+    'execution_window',
+    'invalidate_if',
+    'queue_rank',
+    'ts',
+]
+
+AI_DECISION_CONTRACT_V2_COLUMNS = [
+    'as_of_date',
+    'ticker',
+    'company_name',
+    'decision_mode',
+    'final_priority',
+    'decision_status',
+    'decision_score',
+    'decision_reason',
+    'primary_event_type',
+    'trigger_source',
+    'trigger_score',
+    'continuation_rank',
+    'tomorrow_continuation_prob',
+    'confidence_tier',
+    'entry_plan',
+    'execution_window',
+    'avoid_chase_flag',
+    'preferred_entry_type',
+    'vwap_status',
+    'sqzmom_status',
+    'volume_status',
+    'invalidation_rule',
+    'risk_level',
+    'risk_note',
+    'dilution_flag',
+    'halt_risk_flag',
+    'source_sheet_trace',
+    'protocol_version',
+    'data_version',
+    'decision_ts',
+]
+
+
+def _normalize_event_type(raw: object) -> str:
+    text = str(raw or '').strip().lower()
+    if not text:
+        return 'neutral_other'
+
+    mapping = [
+        ('earnings', 'earnings_beat'),
+        ('guidance raise', 'guidance_raise'),
+        ('guidance', 'guidance_init'),
+        ('contract', 'major_contract'),
+        ('customer', 'major_customer'),
+        ('fda', 'fda_update'),
+        ('upgrade', 'analyst_upgrade'),
+        ('target', 'analyst_target_raise'),
+        ('8-k', 'sec_8k_positive'),
+        ('10-q', 'sec_10q_positive'),
+        ('10-k', 'sec_10k_positive'),
+        ('insider', 'insider_buy'),
+        ('offering', 'offering'),
+        ('atm', 'atm_program'),
+        ('warrant', 'warrant'),
+        ('convertible', 'convertible'),
+        ('reverse split', 'reverse_split'),
+        ('shelf', 'shelf_registration'),
+        ('rumor', 'rumor_unverified'),
+    ]
+    for key, value in mapping:
+        if key in text:
+            return value
+    return 'neutral_other'
+
+
+def _source_tier_from_name(source_name: object) -> str:
+    text = str(source_name or '').strip().lower()
+    if any(k in text for k in ['sec', '8-k', '10-k', '10-q', 'fda', 'government', 'contract']):
+        return 'A'
+    if any(k in text for k in ['analyst', 'earnings', 'benzinga']):
+        return 'B'
+    return 'C'
+
+
+def _resolve_optional_path(path_str: str) -> Path | None:
+    text = str(path_str or '').strip()
+    if not text:
+        return None
+    p = Path(text)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p
+
+
+def _safe_series(df: pd.DataFrame, col: str, default=0.0) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index)
+    return df[col]
+
+
+def _build_pre_event_watchlist(dataset: pd.DataFrame, scan_date: str, top_n: int) -> pd.DataFrame:
+    if dataset is None or len(dataset) == 0:
+        return pd.DataFrame(columns=PRE_EVENT_WATCHLIST_COLUMNS)
+
+    df = dataset.copy()
+    days_to_event = pd.to_numeric(_safe_series(df, 'days_to_earnings', pd.NA), errors='coerce')
+    event_score = pd.to_numeric(_safe_series(df, 'event_score_v1', 0.0), errors='coerce').fillna(0.0)
+    rel_volume = pd.to_numeric(_safe_series(df, 'rel_volume', 0.0), errors='coerce').fillna(0.0)
+    rank_score = pd.to_numeric(_safe_series(df, 'rank_score_v2_adjusted', 0.0), errors='coerce').fillna(0.0)
+    pre_event_score = (
+        ((15.0 - days_to_event.clip(lower=1.0, upper=14.0)).fillna(0.0) * 2.0)
+        + event_score * 0.35
+        + rel_volume.clip(lower=0.0, upper=8.0) * 5.0
+        + rank_score * 0.15
+    )
+
+    candidate_mask = days_to_event.between(1, 14, inclusive='both')
+    out = df[candidate_mask].copy()
+    if len(out) == 0:
+        out = df.copy()
+
+    out = out.assign(_pre_event_score=pre_event_score.reindex(out.index).fillna(0.0))
+    out = out.sort_values('_pre_event_score', ascending=False).head(max(1, int(top_n)))
+
+    out_df = pd.DataFrame(
+        {
+            'ticker': out.get('ticker', pd.Series('', index=out.index)).astype(str).str.upper(),
+            'event_date': '',
+            'days_to_event': pd.to_numeric(out.get('days_to_earnings'), errors='coerce'),
+            'earnings_session': out.get('earnings_status', pd.Series('', index=out.index)).astype(str).str.lower(),
+            'sector': out.get('sector', pd.Series('', index=out.index)).astype(str),
+            'theme_tags': (
+                out.get('sector', pd.Series('', index=out.index)).astype(str)
+                + '|'
+                + out.get('industry', pd.Series('', index=out.index)).astype(str)
+            ).str.strip('|'),
+            'prior_gap_profile': pd.to_numeric(out.get('premarket_gap_pct'), errors='coerce').fillna(0.0).round(2),
+            'analyst_count': pd.to_numeric(out.get('num_analysts'), errors='coerce').fillna(0).astype(int),
+            'target_price': pd.to_numeric(out.get('price'), errors='coerce').fillna(0.0).round(4),
+            'upside_pct': pd.to_numeric(out.get('upside_pct'), errors='coerce').fillna(0.0).round(2),
+            'float_proxy': pd.to_numeric(out.get('float_rotation_proxy'), errors='coerce').fillna(0.0).round(4),
+            'market_cap': pd.to_numeric(out.get('market_cap_raw'), errors='coerce').fillna(0.0).round(2),
+            'liquidity_proxy': pd.to_numeric(out.get('xq_dollar_volume_m'), errors='coerce').fillna(0.0).round(2),
+            'pre_event_score': pd.to_numeric(out.get('_pre_event_score'), errors='coerce').fillna(0.0).round(2),
+            'watch_reason': 'pre_event_or_high_eventscore',
+            'source_ts': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    )
+    out_df['event_date'] = out_df['days_to_event'].apply(
+        lambda d: (datetime.strptime(scan_date, '%Y-%m-%d') + timedelta(days=int(d))).strftime('%Y-%m-%d') if pd.notna(d) and int(d) >= 0 else ''
+    )
+    return out_df[PRE_EVENT_WATCHLIST_COLUMNS].reset_index(drop=True)
+
+
+def _load_external_live_event_feed() -> pd.DataFrame:
+    feed_specs = [
+        (str(getattr(app_config, 'AI_SNIPER_EVENT_FEED_CSV', '')), 'external_event_feed'),
+        (str(getattr(app_config, 'AI_SNIPER_NEWS_FEED_CSV', '')), 'Stock Titan News'),
+        (str(getattr(app_config, 'AI_SNIPER_SEC_FEED_CSV', '')), 'Stock Titan SEC'),
+        (str(getattr(app_config, 'AI_SNIPER_ANALYST_FEED_CSV', '')), 'Benzinga Pro'),
+    ]
+    frames = []
+
+    for path_str, source_name in feed_specs:
+        path = _resolve_optional_path(path_str)
+        if path is None or not path.exists():
+            continue
+
+        src = _read_csv_fallback(path)
+        if len(src) == 0:
+            continue
+
+        out = src.copy()
+        rename_map = {
+            'timestamp': 'ts',
+            'time': 'ts',
+            'symbol': 'ticker',
+            'type': 'event_type_raw',
+            'event_type': 'event_type_raw',
+            'source': 'source_name',
+            'title': 'headline',
+            'link': 'url',
+            'price': 'price_at_event',
+            'sentiment': 'sentiment_raw',
+        }
+        out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+
+        if 'source_name' not in out.columns:
+            out['source_name'] = source_name
+        out['source_name'] = out['source_name'].astype(str).replace('', source_name)
+
+        if 'event_id' not in out.columns:
+            out['event_id'] = [f"ext_{int(time.time())}_{i}" for i in range(len(out))]
+        if 'ts' not in out.columns:
+            out['ts'] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        if 'ticker' not in out.columns:
+            out['ticker'] = ''
+        out['ticker'] = out['ticker'].astype(str).str.upper().str.replace('.US', '', regex=False).str.strip()
+        out = out[out['ticker'] != ''].copy()
+
+        if 'event_type_raw' not in out.columns:
+            out['event_type_raw'] = 'neutral_other'
+        if 'primary_event_type' not in out.columns:
+            out['primary_event_type'] = out['event_type_raw'].apply(_normalize_event_type)
+        if 'source_tier' not in out.columns:
+            out['source_tier'] = out['source_name'].apply(_source_tier_from_name)
+        if 'headline' not in out.columns:
+            out['headline'] = ''
+        if 'url' not in out.columns:
+            out['url'] = ''
+        if 'sentiment_raw' not in out.columns:
+            out['sentiment_raw'] = 'neutral'
+        if 'price_at_event' not in out.columns:
+            out['price_at_event'] = 0.0
+        if 'market_cap' not in out.columns:
+            out['market_cap'] = 0.0
+        if 'session' not in out.columns:
+            out['session'] = 'intraday'
+        if 'dedupe_key' not in out.columns:
+            out['dedupe_key'] = out['ticker'].astype(str) + '|' + out['ts'].astype(str) + '|' + out['primary_event_type'].astype(str)
+
+        frames.append(out[LIVE_EVENT_FEED_COLUMNS])
+
+    if not frames:
+        return pd.DataFrame(columns=LIVE_EVENT_FEED_COLUMNS)
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=['dedupe_key'], keep='last')
+    return merged.reset_index(drop=True)
+
+
+def _build_live_event_feed(
+    dataset: pd.DataFrame,
+    overnight_df: pd.DataFrame,
+    event_signals: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    external = _load_external_live_event_feed()
+    if len(external) > 0:
+        return external, {'mode': 'external', 'rows': int(len(external))}
+
+    price_map = {}
+    mcap_map = {}
+    if dataset is not None and len(dataset) > 0:
+        price_map = dict(zip(dataset['ticker'].astype(str).str.upper(), pd.to_numeric(dataset.get('price'), errors='coerce').fillna(0.0)))
+        mcap_map = dict(zip(dataset['ticker'].astype(str).str.upper(), pd.to_numeric(dataset.get('market_cap_raw'), errors='coerce').fillna(0.0)))
+
+    proxy_rows = []
+    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    if overnight_df is not None and len(overnight_df) > 0:
+        for idx, row in overnight_df.iterrows():
+            ticker = str(row.get('ticker', '')).strip().upper()
+            if not ticker:
+                continue
+            event_type_raw = str(row.get('catalyst_type', '')).strip().lower() or str(row.get('final_impact', '')).strip().lower()
+            ts = str(row.get('catalyst_time', '')).strip() or now_str
+            primary = _normalize_event_type(event_type_raw)
+            proxy_rows.append(
+                {
+                    'event_id': f'proxy_overnight_{ticker}_{idx + 1}',
+                    'ts': ts,
+                    'ticker': ticker,
+                    'source_name': 'overnight_catalyst_proxy',
+                    'source_tier': 'C',
+                    'headline': str(row.get('source_snippet', '')).strip(),
+                    'url': '',
+                    'event_type_raw': event_type_raw or 'neutral_other',
+                    'primary_event_type': primary,
+                    'sentiment_raw': str(row.get('final_impact', row.get('impact', 'neutral'))).strip().lower() or 'neutral',
+                    'price_at_event': float(price_map.get(ticker, 0.0)),
+                    'market_cap': float(mcap_map.get(ticker, 0.0)),
+                    'session': 'premarket',
+                    'dedupe_key': f'{ticker}|{ts}|{primary}',
+                }
+            )
+
+    if not proxy_rows and event_signals is not None and len(event_signals) > 0:
+        for idx, row in event_signals.iterrows():
+            ticker = str(row.get('ticker', '')).strip().upper()
+            if not ticker:
+                continue
+            event_type_raw = str(row.get('event_type', 'neutral_other')).strip().lower()
+            primary = _normalize_event_type(event_type_raw)
+            proxy_rows.append(
+                {
+                    'event_id': f'proxy_event_{ticker}_{idx + 1}',
+                    'ts': now_str,
+                    'ticker': ticker,
+                    'source_name': 'event_signals_proxy',
+                    'source_tier': 'C',
+                    'headline': str(row.get('event_reason', '')).strip(),
+                    'url': '',
+                    'event_type_raw': event_type_raw,
+                    'primary_event_type': primary,
+                    'sentiment_raw': 'neutral',
+                    'price_at_event': float(price_map.get(ticker, 0.0)),
+                    'market_cap': float(mcap_map.get(ticker, 0.0)),
+                    'session': 'intraday',
+                    'dedupe_key': f'{ticker}|{now_str}|{primary}',
+                }
+            )
+
+    if not proxy_rows:
+        return pd.DataFrame(columns=LIVE_EVENT_FEED_COLUMNS), {'mode': 'none', 'rows': 0}
+
+    out = pd.DataFrame(proxy_rows)[LIVE_EVENT_FEED_COLUMNS].drop_duplicates(subset=['dedupe_key'], keep='first')
+    return out.reset_index(drop=True), {'mode': 'proxy', 'rows': int(len(out))}
+
+
+def _build_event_score_log(live_event_feed: pd.DataFrame, pre_event_watchlist: pd.DataFrame, dataset: pd.DataFrame) -> pd.DataFrame:
+    if live_event_feed is None or len(live_event_feed) == 0:
+        return pd.DataFrame(columns=EVENT_SCORE_LOG_COLUMNS)
+
+    pre_event_days = {}
+    if pre_event_watchlist is not None and len(pre_event_watchlist) > 0:
+        pre_event_days = dict(zip(pre_event_watchlist['ticker'].astype(str).str.upper(), pd.to_numeric(pre_event_watchlist.get('days_to_event'), errors='coerce')))
+
+    rel_vol_map = {}
+    market_cap_map = {}
+    sector_map = {}
+    if dataset is not None and len(dataset) > 0:
+        rel_vol_map = dict(zip(dataset['ticker'].astype(str).str.upper(), pd.to_numeric(dataset.get('rel_volume'), errors='coerce').fillna(0.0)))
+        market_cap_map = dict(zip(dataset['ticker'].astype(str).str.upper(), pd.to_numeric(dataset.get('market_cap_raw'), errors='coerce').fillna(0.0)))
+        sector_map = dict(zip(dataset['ticker'].astype(str).str.upper(), dataset.get('sector', pd.Series('', index=dataset.index)).astype(str)))
+
+    source_score_map = {'A': 4.0, 'B': 2.0, 'C': 1.0}
+    catalyst_score_map = {
+        'guidance_raise': 4.0,
+        'earnings_beat': 4.0,
+        'major_contract': 3.0,
+        'major_customer': 3.0,
+        'fda_update': 3.0,
+        'analyst_upgrade': 2.0,
+        'analyst_target_raise': 2.0,
+        'sec_8k_positive': 3.0,
+        'sec_10q_positive': 3.0,
+        'sec_10k_positive': 2.0,
+        'theme_breakout': 2.0,
+        'rumor_unverified': 0.0,
+    }
+    dilution_map = {
+        'offering': 6.0,
+        'atm_program': 6.0,
+        'warrant': 6.0,
+        'reverse_split': 6.0,
+        'convertible': 4.0,
+        'shelf_registration': 3.0,
+        'dilution_other': 4.0,
+    }
+
+    dedupe_count = live_event_feed['dedupe_key'].astype(str).value_counts().to_dict()
+
+    rows = []
+    for _, row in live_event_feed.iterrows():
+        ticker = str(row.get('ticker', '')).strip().upper()
+        if not ticker:
+            continue
+
+        primary = _normalize_event_type(row.get('primary_event_type', row.get('event_type_raw', '')))
+        tier = str(row.get('source_tier', _source_tier_from_name(row.get('source_name')))).strip().upper()
+        source_score = source_score_map.get(tier, 1.0)
+        catalyst_score = catalyst_score_map.get(primary, 1.0)
+
+        sector_text = str(sector_map.get(ticker, '')).lower()
+        theme_score = 2.0 if any(k in sector_text for k in ['technology', 'semiconductor', 'defense', 'energy']) else 1.0
+        days_to_event = pd.to_numeric(pre_event_days.get(ticker, pd.NA), errors='coerce')
+        preearn_score = 2.0 if pd.notna(days_to_event) and 1 <= float(days_to_event) <= 14 else 0.0
+        rel_vol = float(rel_vol_map.get(ticker, 0.0))
+        market_cap = float(market_cap_map.get(ticker, 0.0))
+        market_structure_score = 0.0
+        if market_cap > 0 and market_cap <= 8_000_000_000:
+            market_structure_score += 1.0
+        if rel_vol >= 1.8:
+            market_structure_score += 1.0
+
+        dilution_risk = float(dilution_map.get(primary, 0.0))
+        noise_penalty = 0.0
+        if primary == 'rumor_unverified':
+            noise_penalty += 2.0
+        if dedupe_count.get(str(row.get('dedupe_key', '')), 0) > 1:
+            noise_penalty += 1.0
+        if not str(row.get('headline', '')).strip():
+            noise_penalty += 1.0
+
+        trigger_score = source_score + catalyst_score + theme_score + preearn_score + market_structure_score - dilution_risk - noise_penalty
+
+        rows.append(
+            {
+                'event_id': row.get('event_id', ''),
+                'ticker': ticker,
+                'source_score': round(source_score, 2),
+                'catalyst_score': round(catalyst_score, 2),
+                'theme_score': round(theme_score, 2),
+                'preearn_score': round(preearn_score, 2),
+                'market_structure_score': round(market_structure_score, 2),
+                'dilution_risk': round(dilution_risk, 2),
+                'noise_penalty': round(noise_penalty, 2),
+                'trigger_score': round(trigger_score, 2),
+                'score_reason': f"src={source_score};cat={catalyst_score};theme={theme_score};pre={preearn_score};ms={market_structure_score};dil={dilution_risk};noise={noise_penalty}",
+                'high_priority_flag': bool(trigger_score >= float(getattr(app_config, 'AI_SNIPER_HIGH_PRIORITY_MIN_SCORE', 9.0))),
+                'scoring_version': 'event_sniper_protocol_v1',
+                'ts': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if len(out) == 0:
+        return pd.DataFrame(columns=EVENT_SCORE_LOG_COLUMNS)
+    out = out.sort_values(['trigger_score', 'high_priority_flag'], ascending=[False, False]).reset_index(drop=True)
+    return out[EVENT_SCORE_LOG_COLUMNS]
+
+
+def _build_trade_trigger_queue(event_score_log: pd.DataFrame, live_event_feed: pd.DataFrame, dataset: pd.DataFrame, decision_signals: pd.DataFrame) -> pd.DataFrame:
+    if event_score_log is None or len(event_score_log) == 0:
+        return pd.DataFrame(columns=TRADE_TRIGGER_QUEUE_COLUMNS)
+
+    trigger_min = float(getattr(app_config, 'AI_SNIPER_TRIGGER_MIN_SCORE', 7.0))
+    queue_top_n = max(1, int(getattr(app_config, 'AI_SNIPER_QUEUE_TOP_N', 40)))
+
+    merged = event_score_log.merge(
+        live_event_feed[['event_id', 'source_name', 'primary_event_type', 'price_at_event', 'ts']],
+        on='event_id',
+        how='left',
+    )
+    merged = merged.merge(
+        dataset[[c for c in ['ticker', 'price', 'tv_vwap', 'tv_sqzmom_hist', 'rel_volume'] if c in dataset.columns]],
+        on='ticker',
+        how='left',
+    )
+
+    invalidation_map = {}
+    if decision_signals is not None and len(decision_signals) > 0:
+        invalidation_map = dict(zip(decision_signals['ticker'].astype(str).str.upper(), decision_signals.get('invalidation_rule', pd.Series('', index=decision_signals.index)).astype(str)))
+
+    def _num(value: object, default: float = 0.0) -> float:
+        parsed = pd.to_numeric(value, errors='coerce')
+        if pd.isna(parsed):
+            return float(default)
+        return float(parsed)
+
+    rows = []
+    for _, row in merged.iterrows():
+        trigger_score = _num(row.get('trigger_score'), 0.0)
+        if trigger_score < trigger_min:
+            continue
+
+        primary = _normalize_event_type(row.get('primary_event_type', ''))
+        if primary in {'offering', 'atm_program', 'warrant', 'reverse_split', 'convertible', 'shelf_registration', 'dilution_other'}:
+            continue
+
+        ticker = str(row.get('ticker', '')).strip().upper()
+        event_price = _num(row.get('price_at_event'), 0.0)
+        current_price = _num(row.get('price'), event_price)
+        if current_price <= 0:
+            continue
+
+        extension = 0.0
+        if event_price > 0:
+            extension = (current_price - event_price) / event_price * 100.0
+
+        relvol_1m = _num(row.get('rel_volume'), 0.0)
+        relvol_5m = relvol_1m
+        vwap_val = _num(row.get('tv_vwap'), 0.0)
+        vwap_dist = ((current_price - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
+        sqz = _num(row.get('tv_sqzmom_hist'), 0.0)
+
+        ready = (vwap_dist >= -0.3) and (sqz >= 0.0) and (relvol_1m >= 1.5) and (extension <= 6.0)
+        avoid_chase = extension >= 8.0
+        if avoid_chase:
+            status = 'avoid_chase'
+        elif ready:
+            status = 'ready'
+        else:
+            status = 'watch'
+
+        rows.append(
+            {
+                'event_id': str(row.get('event_id', '')),
+                'ticker': ticker,
+                'trigger_score': round(trigger_score, 2),
+                'decision_mode': 'sniper',
+                'trigger_source': str(row.get('source_name', '')).strip(),
+                'primary_event_type': primary,
+                'price_at_event': round(event_price, 4),
+                'current_price': round(current_price, 4),
+                'price_extension_pct': round(extension, 2),
+                'relvol_1m': round(relvol_1m, 2),
+                'relvol_5m': round(relvol_5m, 2),
+                'vwap_dist': round(vwap_dist, 2),
+                'sqzmom_1m': round(sqz, 4),
+                'sqzmom_5m': round(sqz, 4),
+                'entry_signal_status': status,
+                'execution_window': 'open_0_15m' if status == 'ready' else 'intraday',
+                'invalidate_if': invalidation_map.get(ticker, '回落且有效跌破 VWAP 或 SQZMOM 轉負'),
+                'queue_rank': 0,
+                'ts': str(row.get('ts', datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if len(out) == 0:
+        return pd.DataFrame(columns=TRADE_TRIGGER_QUEUE_COLUMNS)
+
+    status_order = {'ready': 0, 'watch': 1, 'avoid_chase': 2}
+    out['_status_order'] = out['entry_signal_status'].map(status_order).fillna(9)
+    out = out.sort_values(['_status_order', 'trigger_score', 'price_extension_pct'], ascending=[True, False, True]).head(queue_top_n).copy()
+    out['queue_rank'] = range(1, len(out) + 1)
+    out = out.drop(columns=['_status_order'])
+    return out[TRADE_TRIGGER_QUEUE_COLUMNS].reset_index(drop=True)
+
+
+def _build_bundle_contract_status(
+    scan_date: str,
+    decision_signals: pd.DataFrame,
+    ranking_signals: pd.DataFrame,
+    live_event_feed: pd.DataFrame,
+    event_score_log: pd.DataFrame,
+    trade_trigger_queue: pd.DataFrame,
+    ai_focus_available: bool,
+) -> pd.DataFrame:
+    sniper_required = bool(getattr(app_config, 'AI_BUNDLE_CONTRACT_REQUIRE_SNIPER', False))
+    sniper_enabled = bool(getattr(app_config, 'AI_SNIPER_LANE_ENABLED', True))
+
+    code = 'OK'
+    severity = 'info'
+    message = 'bundle_contract_ready'
+    status = 'ready'
+
+    core_missing = (decision_signals is None or 'ticker' not in decision_signals.columns) or (ranking_signals is None or 'ticker' not in ranking_signals.columns)
+    if core_missing:
+        code = 'ERROR_LOCAL_CORE_MISSING'
+        severity = 'error'
+        status = 'error'
+        message = 'decision_signals_daily or ranking_signals_daily missing'
+    else:
+        schema_issues = []
+        core_required = {
+            'decision_signals_daily': ['ticker', 'decision_tag_v1', 'decision_action', 'risk_level', 'invalidation_rule'],
+            'ranking_signals_daily': ['ticker', 'rank_engine_rank', 'rank_score_v2_adjusted'],
+        }
+        check_map = {
+            'decision_signals_daily': decision_signals,
+            'ranking_signals_daily': ranking_signals,
+            'live_event_feed': live_event_feed,
+            'event_score_log': event_score_log,
+            'trade_trigger_queue': trade_trigger_queue,
+        }
+        optional_required = {
+            'live_event_feed': LIVE_EVENT_FEED_COLUMNS,
+            'event_score_log': EVENT_SCORE_LOG_COLUMNS,
+            'trade_trigger_queue': TRADE_TRIGGER_QUEUE_COLUMNS,
+        }
+
+        for file_name, req_cols in core_required.items():
+            df = check_map[file_name]
+            missing_cols = [c for c in req_cols if c not in df.columns]
+            if missing_cols:
+                schema_issues.append(f"{file_name}:{'|'.join(missing_cols)}")
+        for file_name, req_cols in optional_required.items():
+            df = check_map[file_name]
+            if len(df) == 0:
+                continue
+            missing_cols = [c for c in req_cols if c not in df.columns]
+            if missing_cols:
+                schema_issues.append(f"{file_name}:{'|'.join(missing_cols)}")
+
+        if schema_issues:
+            code = 'ERROR_SCHEMA_MISMATCH'
+            severity = 'error'
+            status = 'error'
+            message = '; '.join(schema_issues)
+        elif sniper_required and sniper_enabled and (len(live_event_feed) == 0 or len(event_score_log) == 0 or len(trade_trigger_queue) == 0):
+            code = 'ERROR_SNIPER_PIPELINE_MISSING'
+            severity = 'error'
+            status = 'error'
+            message = 'sniper required but one of live_event_feed/event_score_log/trade_trigger_queue is empty'
+        elif len(live_event_feed) > 0:
+            conflict = (
+                live_event_feed.groupby('dedupe_key')['primary_event_type'].nunique(dropna=True).reset_index(name='n')
+                if 'dedupe_key' in live_event_feed.columns and 'primary_event_type' in live_event_feed.columns
+                else pd.DataFrame()
+            )
+            if len(conflict) > 0 and int((conflict['n'] > 1).sum()) > 0:
+                code = 'ERROR_CONFLICTING_SOURCE'
+                severity = 'error'
+                status = 'error'
+                message = 'same dedupe_key has conflicting primary_event_type'
+        if code == 'OK' and (not ai_focus_available):
+            code = 'WARN_AI_FOCUS_LIST_MISSING'
+            severity = 'warning'
+            status = 'warning'
+            message = 'ai_focus_list missing: warning only, not blocking'
+        if code == 'OK' and sniper_enabled and len(live_event_feed) == 0:
+            code = 'SNIPER_DISABLED_FALLBACK_TO_LOCAL'
+            severity = 'warning'
+            status = 'warning'
+            message = 'sniper lane has no live feed rows, fallback to continuation lane'
+
+    out = pd.DataFrame(
+        [
+            {
+                'scan_date': scan_date,
+                'status': status,
+                'severity': severity,
+                'error_code': code,
+                'message': message,
+                'sniper_required': sniper_required,
+                'sniper_enabled': sniper_enabled,
+                'core_ready': bool(code != 'ERROR_LOCAL_CORE_MISSING'),
+                'sniper_ready': bool(len(live_event_feed) > 0 and len(event_score_log) > 0 and len(trade_trigger_queue) > 0),
+                'ai_focus_available': bool(ai_focus_available),
+                'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            }
+        ]
+    )
+    return out
+
+
+def _build_ai_decision_contract_template() -> pd.DataFrame:
+    return pd.DataFrame(columns=AI_DECISION_CONTRACT_V2_COLUMNS)
 
 
 def _to_float_or_none(value: object) -> float | None:
@@ -620,6 +1311,12 @@ def _refresh_unified_ai_ready_bundle(
         (ai_trading_latest_dir, 'event_signals_daily.csv', 'event_signals_daily'),
         (ai_trading_latest_dir, 'ranking_signals_daily.csv', 'ranking_signals_daily'),
         (ai_trading_latest_dir, 'decision_signals_daily.csv', 'decision_signals_daily'),
+        (ai_trading_latest_dir, 'pre_event_watchlist.csv', 'pre_event_watchlist'),
+        (ai_trading_latest_dir, 'live_event_feed.csv', 'live_event_feed'),
+        (ai_trading_latest_dir, 'event_score_log.csv', 'event_score_log'),
+        (ai_trading_latest_dir, 'trade_trigger_queue.csv', 'trade_trigger_queue'),
+        (ai_trading_latest_dir, 'bundle_contract_status.csv', 'bundle_contract_status'),
+        (ai_trading_latest_dir, 'ai_decision_contract_v2_template.csv', 'ai_decision_contract_v2_template'),
         (ai_trading_latest_dir, 'decision_funnel_daily.csv', 'decision_funnel_daily'),
         (ai_trading_latest_dir, 'decision_outcome_audit_daily.csv', 'decision_outcome_audit_daily'),
         (ai_trading_latest_dir, 'attribution_summary_daily.csv', 'attribution_summary_daily'),
@@ -710,6 +1407,12 @@ def _refresh_unified_ai_ready_bundle(
             'theme_leaders_daily.csv',
             'xq_short_term_updated.csv',
             'overnight_catalyst_check.csv',
+            'pre_event_watchlist.csv',
+            'live_event_feed.csv',
+            'event_score_log.csv',
+            'trade_trigger_queue.csv',
+            'bundle_contract_status.csv',
+            'ai_decision_contract_v2_template.csv',
             'decision_funnel_daily.csv',
             'decision_outcome_audit_daily.csv',
             'attribution_summary_daily.csv',
@@ -723,7 +1426,7 @@ def _refresh_unified_ai_ready_bundle(
         ],
         'bundle_sheet_count': len(written_sheets),
         'bundle_sheets': written_sheets,
-        'notes': '統一 B 單一路徑：ai_ready_bundle.xlsx 已內含 ai_ready + ai_trading 核心訊號；ai_decision_latest 僅為 pipeline preview，非 final。',
+        'notes': '統一 B 單一路徑：bundle 內含 continuation + sniper lane 資料；ai_decision_latest 僅為 pipeline preview，官方 final ai_decision 仍由 Web AI 依 bundle+Protocol 產出。',
     }
     with open(ai_ready_latest_dir / 'README_ai_quick_pack.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -776,6 +1479,12 @@ def main() -> int:
     ranking_file = run_dir / 'ranking_signals_daily.csv'
     decision_file = run_dir / 'decision_signals_daily.csv'
     overnight_file = run_dir / 'overnight_catalyst_check.csv'
+    pre_event_watchlist_file = run_dir / 'pre_event_watchlist.csv'
+    live_event_feed_file = run_dir / 'live_event_feed.csv'
+    event_score_log_file = run_dir / 'event_score_log.csv'
+    trade_trigger_queue_file = run_dir / 'trade_trigger_queue.csv'
+    bundle_contract_status_file = run_dir / 'bundle_contract_status.csv'
+    ai_decision_contract_template_file = run_dir / 'ai_decision_contract_v2_template.csv'
 
     overnight_top_n = int(getattr(app_config, 'OVERNIGHT_CATALYST_TOP_N', 20))
     catalyst_timeout = min(float(getattr(app_config, 'CATALYST_HTTP_TIMEOUT_SEC', 15.0)), 8.0)
@@ -843,6 +1552,56 @@ def main() -> int:
     artifacts.ranking_signals.to_csv(ranking_file, index=False, encoding='utf-8-sig')
     artifacts.decision_signals.to_csv(decision_file, index=False, encoding='utf-8-sig')
 
+    sniper_enabled = bool(getattr(app_config, 'AI_SNIPER_LANE_ENABLED', True))
+    if sniper_enabled:
+        pre_event_watchlist_df = _build_pre_event_watchlist(
+            dataset=artifacts.dataset,
+            scan_date=scan_date,
+            top_n=max(1, int(getattr(app_config, 'AI_SNIPER_PRE_EVENT_TOP_N', 120))),
+        )
+        live_event_feed_df, sniper_feed_meta = _build_live_event_feed(
+            dataset=artifacts.dataset,
+            overnight_df=overnight_df,
+            event_signals=artifacts.event_signals,
+        )
+        event_score_log_df = _build_event_score_log(
+            live_event_feed=live_event_feed_df,
+            pre_event_watchlist=pre_event_watchlist_df,
+            dataset=artifacts.dataset,
+        )
+        trade_trigger_queue_df = _build_trade_trigger_queue(
+            event_score_log=event_score_log_df,
+            live_event_feed=live_event_feed_df,
+            dataset=artifacts.dataset,
+            decision_signals=artifacts.decision_signals,
+        )
+    else:
+        pre_event_watchlist_df = pd.DataFrame(columns=PRE_EVENT_WATCHLIST_COLUMNS)
+        live_event_feed_df = pd.DataFrame(columns=LIVE_EVENT_FEED_COLUMNS)
+        event_score_log_df = pd.DataFrame(columns=EVENT_SCORE_LOG_COLUMNS)
+        trade_trigger_queue_df = pd.DataFrame(columns=TRADE_TRIGGER_QUEUE_COLUMNS)
+        sniper_feed_meta = {'mode': 'disabled', 'rows': 0}
+
+    pre_event_watchlist_df.to_csv(pre_event_watchlist_file, index=False, encoding='utf-8-sig')
+    live_event_feed_df.to_csv(live_event_feed_file, index=False, encoding='utf-8-sig')
+    event_score_log_df.to_csv(event_score_log_file, index=False, encoding='utf-8-sig')
+    trade_trigger_queue_df.to_csv(trade_trigger_queue_file, index=False, encoding='utf-8-sig')
+
+    ai_focus_available = Path(paths.ai_focus_csv).exists()
+    bundle_contract_status_df = _build_bundle_contract_status(
+        scan_date=scan_date,
+        decision_signals=artifacts.decision_signals,
+        ranking_signals=artifacts.ranking_signals,
+        live_event_feed=live_event_feed_df,
+        event_score_log=event_score_log_df,
+        trade_trigger_queue=trade_trigger_queue_df,
+        ai_focus_available=ai_focus_available,
+    )
+    bundle_contract_status_df.to_csv(bundle_contract_status_file, index=False, encoding='utf-8-sig')
+
+    ai_decision_template_df = _build_ai_decision_contract_template()
+    ai_decision_template_df.to_csv(ai_decision_contract_template_file, index=False, encoding='utf-8-sig')
+
     artifacts.stats['rows'] = len(artifacts.dataset)
     artifacts.stats['ranking_rows'] = len(artifacts.ranking_signals)
     artifacts.stats['decision_rows'] = len(artifacts.decision_signals)
@@ -869,6 +1628,13 @@ def main() -> int:
     artifacts.stats['phase2_market_premarket_coverage'] = phase2_market_meta.get('premarket_coverage', 0)
     artifacts.stats['phase2_market_ohlc_coverage'] = phase2_market_meta.get('ohlc_coverage', 0)
     artifacts.stats['phase2_market_reason'] = phase2_market_meta.get('reason', 'n/a')
+    artifacts.stats['sniper_enabled'] = sniper_enabled
+    artifacts.stats['sniper_feed_mode'] = sniper_feed_meta.get('mode', 'none')
+    artifacts.stats['live_event_rows'] = int(len(live_event_feed_df))
+    artifacts.stats['event_score_rows'] = int(len(event_score_log_df))
+    artifacts.stats['trade_trigger_rows'] = int(len(trade_trigger_queue_df))
+    artifacts.stats['pre_event_rows'] = int(len(pre_event_watchlist_df))
+    artifacts.stats['bundle_contract_status'] = str(bundle_contract_status_df.iloc[0].get('error_code', 'UNKNOWN')) if len(bundle_contract_status_df) > 0 else 'UNKNOWN'
 
     funnel_cols = [
         'ticker',
@@ -978,6 +1744,12 @@ def main() -> int:
             'api_catalyst_brief.md',
             'api_catalyst_manifest.json',
             'decision_funnel_daily.csv',
+            'pre_event_watchlist.csv',
+            'live_event_feed.csv',
+            'event_score_log.csv',
+            'trade_trigger_queue.csv',
+            'bundle_contract_status.csv',
+            'ai_decision_contract_v2_template.csv',
         ],
         'stats': artifacts.stats,
         'bridge': bridge_meta,
@@ -1026,6 +1798,8 @@ def main() -> int:
     print('[AI_TRADING] api catalyst rows =', api_meta.get('rows', 0), '| enabled =', api_meta.get('enabled', False), '| reason =', api_meta.get('reason', 'n/a'))
     print('[AI_TRADING] api ai_decision rows =', api_decision_meta.get('rows', 0), '| enabled =', api_decision_meta.get('enabled', False), '| inbox =', api_decision_meta.get('inbox_path', 'n/a'))
     print('[AI_TRADING] bridge rows =', bridge_meta.get('candidate_rows', 0))
+    print('[AI_TRADING] sniper lane =', sniper_enabled, '| feed mode =', sniper_feed_meta.get('mode', 'none'), '| live events =', len(live_event_feed_df), '| trigger queue =', len(trade_trigger_queue_df))
+    print('[AI_TRADING] bundle contract code =', bundle_contract_status_df.iloc[0].get('error_code', 'UNKNOWN') if len(bundle_contract_status_df) > 0 else 'UNKNOWN')
     print('[AI_TRADING] unified B bundle =', bundle_meta.get('bundle_updated', False), '| sheets =', bundle_meta.get('bundle_sheet_count', 0), '| reason =', bundle_meta.get('reason', 'n/a'))
     print('[AI_TRADING] output =', run_dir)
     return 0

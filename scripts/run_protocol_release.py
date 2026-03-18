@@ -81,6 +81,52 @@ REQUIRED_OUTPUT_CONTRACT: Dict[str, list[str]] = {
         "multi_radar_score",
         "as_of_date",
     ],
+    "pre_event_watchlist.csv": [
+        "ticker",
+        "event_date",
+        "days_to_event",
+        "pre_event_score",
+        "source_ts",
+    ],
+    "live_event_feed.csv": [
+        "event_id",
+        "ts",
+        "ticker",
+        "source_name",
+        "primary_event_type",
+        "dedupe_key",
+    ],
+    "event_score_log.csv": [
+        "event_id",
+        "ticker",
+        "trigger_score",
+        "high_priority_flag",
+        "scoring_version",
+    ],
+    "trade_trigger_queue.csv": [
+        "event_id",
+        "ticker",
+        "trigger_score",
+        "entry_signal_status",
+        "queue_rank",
+    ],
+    "bundle_contract_status.csv": [
+        "scan_date",
+        "status",
+        "severity",
+        "error_code",
+        "message",
+    ],
+    "ai_decision_contract_v2_template.csv": [
+        "as_of_date",
+        "ticker",
+        "decision_mode",
+        "decision_status",
+        "decision_score",
+        "entry_plan",
+        "invalidation_rule",
+        "decision_ts",
+    ],
 }
 
 
@@ -270,11 +316,15 @@ def _validate_output_schema(scan_date: str) -> Dict[str, object]:
 
 
 def _cleanup_legacy_decision_files() -> None:
+    protected_names = {
+        "ai_decision_latest.csv",
+        "ai_decision_contract_v2_template.csv",
+    }
     for directory in [AI_TRADING_LATEST, AI_READY_LATEST, DAILY_REFRESH_LATEST]:
         if not directory.exists():
             continue
         for path in directory.glob("ai_decision_*.csv"):
-            if path.name == "ai_decision_latest.csv":
+            if path.name in protected_names:
                 continue
             try:
                 path.unlink()
@@ -481,6 +531,12 @@ def main() -> int:
             "protocol_release_preview_YYYY-MM-DD.csv",
             "ai_decision_latest.csv",
             "decision_funnel_daily.csv",
+            "pre_event_watchlist.csv",
+            "live_event_feed.csv",
+            "event_score_log.csv",
+            "trade_trigger_queue.csv",
+            "bundle_contract_status.csv",
+            "ai_decision_contract_v2_template.csv",
             "decision_outcome_audit_daily.csv",
             "attribution_summary_daily.csv",
             "baseline_v1_vs_variants_metrics.csv",

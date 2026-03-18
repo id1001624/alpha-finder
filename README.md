@@ -45,6 +45,11 @@ python .\scripts\record_ai_decision.py --auto-latest --replace-date
 
 做完這 4 步，接下來只要看 Discord。
 
+補充（資料層驗證）：
+
+- `repo_outputs/ai_trading/latest/bundle_contract_status.csv`：顯示 `ERROR_LOCAL_CORE_MISSING` / `ERROR_SNIPER_PIPELINE_MISSING` 等契約碼。
+- `repo_outputs/ai_trading/latest/pre_event_watchlist.csv`、`live_event_feed.csv`、`event_score_log.csv`、`trade_trigger_queue.csv`：sniper lane 的資料層輸出，提供 Web AI 最終判讀。
+
 如果有買槓桿請在config.py:474 的 LEVERAGED_ETF_MAP 加入對應映射。
 
 欄位契約延伸說明（final_impact / swing_strategy_recommendation / similar_past_trades）：

@@ -8,6 +8,11 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
+
+from .utils.yfinance_ssl import ensure_ascii_cert_bundle
+
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
+
 import yfinance as yf
 
 from turso_state import (

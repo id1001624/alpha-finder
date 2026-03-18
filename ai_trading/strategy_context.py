@@ -4,6 +4,11 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 import pandas as pd
+
+from .utils.yfinance_ssl import ensure_ascii_cert_bundle
+
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
+
 import yfinance as yf
 
 from config import (

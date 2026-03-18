@@ -20,7 +20,6 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
 
 RUNTIME_DATA_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError)
 
@@ -29,6 +28,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app_logging import install_builtin_print_logging
+from ai_trading.utils.yfinance_ssl import ensure_ascii_cert_bundle
+
+
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
+
+import yfinance as yf
 
 NY_TZ = ZoneInfo("America/New_York")
 

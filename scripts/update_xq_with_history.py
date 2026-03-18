@@ -16,9 +16,7 @@ XQ 選股清單更新腳本
     python scripts/update_xq_with_history.py --file 妖股來吧起來0206.csv
 """
 
-import os
 import sys
-import shutil
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -47,34 +45,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-def _fix_ssl_cert_path():
-    """修復 SSL 憑證路徑中文問題（與 main.py 相同）"""
-    try:
-        import certifi
-        original = certifi.where()
-        try:
-            original.encode('ascii')
-            return
-        except UnicodeEncodeError:
-            pass
-
-        safe_dir = os.path.join(os.path.expanduser('~'), '.alpha_finder_certs')
-        os.makedirs(safe_dir, exist_ok=True)
-        safe_cert = os.path.join(safe_dir, 'cacert.pem')
-
-        if not os.path.exists(safe_cert) or \
-           os.path.getmtime(original) > os.path.getmtime(safe_cert):
-            shutil.copy2(original, safe_cert)
-
-        os.environ['CURL_CA_BUNDLE'] = safe_cert
-        os.environ['SSL_CERT_FILE'] = safe_cert
-        os.environ['REQUESTS_CA_BUNDLE'] = safe_cert
-        os.environ['SSL_NO_VERIFY'] = '0'
-    except (ImportError, ModuleNotFoundError, OSError, PermissionError, shutil.Error):
-        pass
+from ai_trading.utils.yfinance_ssl import ensure_ascii_cert_bundle
 
 
-_fix_ssl_cert_path()
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
 
 import pandas as pd
 import yfinance as yf

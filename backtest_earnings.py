@@ -19,24 +19,20 @@ Alpha Finder 財報回測腳本
 """
 
 import os
-import sys
 import time
 import pandas as pd
 import requests
-import yfinance as yf
 
 from app_logging import install_builtin_print_logging
+from ai_trading.utils.yfinance_ssl import ensure_ascii_cert_bundle
+
+
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
+
+import yfinance as yf
 
 
 install_builtin_print_logging()
-
-# 載入 SSL 修復
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from main import _fix_ssl_cert_path
-    _fix_ssl_cert_path()
-except (ImportError, ModuleNotFoundError, OSError, PermissionError):
-    pass
 
 RUNTIME_DATA_ERRORS = (
     OSError,

@@ -27,6 +27,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from ai_trading.utils.yfinance_ssl import ensure_ascii_cert_bundle
+
+
+_YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
+
 import yfinance as yf
 
 DEFAULT_FOCUS_FILE = Path("repo_outputs/daily_refresh/latest/ai_focus_list.csv")
