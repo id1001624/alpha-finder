@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app_logging import install_builtin_print_logging
+from ai_trading.trade_command_contract import ACTION_NO_TRADE, build_user_visible_command_df, enrich_trade_command_fields
 
 from config import DISCORD_WEBHOOK_URL, SIGNAL_MAX_AGE_MINUTES, SIGNAL_REQUIRE_SAME_DAY, SIGNAL_STORE_PATH
 from signal_store import get_latest_signals
@@ -34,7 +35,10 @@ from turso_state import append_execution_log_rows, sync_execution_latest
 install_builtin_print_logging()
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
-AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"
+AI_TRADING_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest"
+AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
+DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
+AI_DECISION_CONTRACT_MATERIALIZED = AI_TRADING_LATEST_DIR / "ai_decision_contract_v2_materialized.csv"
 ALERT_DIR = BACKTEST_DIR / "alerts"
 STATE_FILE = ALERT_DIR / "tv_execution_state.json"
 ALERT_LOG = ALERT_DIR / "tv_execution_alert_log.csv"
@@ -71,26 +75,45 @@ EXECUTION_LOG_FIELDS = [
 
 
 def _load_decision_df() -> pd.DataFrame:
-    if not AI_DECISION_LATEST.exists():
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(AI_DECISION_LATEST, encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        df = pd.read_csv(AI_DECISION_LATEST)
+    candidates = [
+        AI_DECISION_CONTRACT_MATERIALIZED,
+        AI_READY_LATEST_DIR / "ai_decision_contract_v2_materialized.csv",
+        DAILY_REFRESH_LATEST_DIR / "ai_decision_contract_v2_materialized.csv",
+    ]
+    source_df = pd.DataFrame()
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            source_df = pd.read_csv(path, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            source_df = pd.read_csv(path)
+        break
 
-    if "ticker" not in df.columns:
+    if len(source_df) == 0:
         return pd.DataFrame()
 
-    out = df.copy()
+    required = {"as_of_date", "ticker", "final_priority", "decision_status"}
+    if not required.issubset(set(source_df.columns)):
+        return pd.DataFrame()
+
+    normalized = enrich_trade_command_fields(source_df)
+    visible = build_user_visible_command_df(normalized)
+    visible = visible[visible["execution_action"].astype(str).str.upper() != ACTION_NO_TRADE].copy()
+    visible = visible[visible["ticker"].astype(str).str.upper() != "NO_TRADE"].copy()
+    if len(visible) == 0:
+        return pd.DataFrame()
+
+    out = visible.copy()
+    out["decision_date"] = out.get("as_of_date", "")
+    out["rank"] = pd.to_numeric(out.get("final_priority"), errors="coerce").fillna(9999).astype(int)
+    out["decision_tag"] = out.get("decision_status", "watch").astype(str).str.strip().str.lower()
+    out["risk_level"] = out.get("risk_level", "")
+    out["tech_status"] = out.get("preferred_entry_type", "")
+    out["theme"] = ""
+    out["reason_summary"] = out.get("position_plan", "")
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
-    if "rank" in out.columns:
-        out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
-    else:
-        out["rank"] = range(1, len(out) + 1)
-    out = out[out["ticker"] != ""].copy()
-    out = out.dropna(subset=["rank"]).copy()
-    out["rank"] = out["rank"].astype(int)
-    out = out.sort_values(["rank", "ticker"], ascending=[True, True])
+    out = out.sort_values(["rank", "ticker"], ascending=[True, True]).reset_index(drop=True)
     return out
 
 
@@ -312,7 +335,7 @@ def main() -> int:
 
     decision_df = _load_decision_df()
     if len(decision_df) == 0:
-        print("No ai_decision_latest.csv rows available.")
+        print("No user-visible materialized contract rows available.")
         return 1
 
     signal_map = _load_signal_map()

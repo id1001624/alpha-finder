@@ -400,6 +400,10 @@ AI_DECISION_CONTRACT_V2_COLUMNS = [
     'protocol_version',
     'data_version',
     'decision_ts',
+    'execution_action',
+    'position_plan',
+    'exit_action',
+    'user_visibility',
 ]
 
 
@@ -1317,6 +1321,7 @@ def _refresh_unified_ai_ready_bundle(
         (ai_trading_latest_dir, 'trade_trigger_queue.csv', 'trade_trigger_queue'),
         (ai_trading_latest_dir, 'bundle_contract_status.csv', 'bundle_contract_status'),
         (ai_trading_latest_dir, 'ai_decision_contract_v2_template.csv', 'ai_decision_contract_v2_template'),
+        (ai_trading_latest_dir, 'ai_decision_contract_v2_materialized.csv', 'ai_decision_contract_v2_material'),
         (ai_trading_latest_dir, 'decision_funnel_daily.csv', 'decision_funnel_daily'),
         (ai_trading_latest_dir, 'decision_outcome_audit_daily.csv', 'decision_outcome_audit_daily'),
         (ai_trading_latest_dir, 'attribution_summary_daily.csv', 'attribution_summary_daily'),
@@ -1413,6 +1418,7 @@ def _refresh_unified_ai_ready_bundle(
             'trade_trigger_queue.csv',
             'bundle_contract_status.csv',
             'ai_decision_contract_v2_template.csv',
+            'ai_decision_contract_v2_materialized.csv',
             'decision_funnel_daily.csv',
             'decision_outcome_audit_daily.csv',
             'attribution_summary_daily.csv',
@@ -1750,6 +1756,7 @@ def main() -> int:
             'trade_trigger_queue.csv',
             'bundle_contract_status.csv',
             'ai_decision_contract_v2_template.csv',
+            'ai_decision_contract_v2_materialized.csv',
         ],
         'stats': artifacts.stats,
         'bridge': bridge_meta,

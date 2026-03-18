@@ -14,11 +14,17 @@ from scripts import push_tradingview_execution_alerts as execution_alerts
 
 def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
     backtest_dir = tmp_path / "repo_outputs" / "backtest"
+    ai_trading_latest_dir = tmp_path / "repo_outputs" / "ai_trading" / "latest"
+    ai_ready_latest_dir = tmp_path / "repo_outputs" / "ai_ready" / "latest"
+    daily_refresh_latest_dir = tmp_path / "repo_outputs" / "daily_refresh" / "latest"
     alert_dir = backtest_dir / "alerts"
     daily_dir = backtest_dir / "daily_execution_trades"
     signal_db = tmp_path / "signals.db"
 
     backtest_dir.mkdir(parents=True, exist_ok=True)
+    ai_trading_latest_dir.mkdir(parents=True, exist_ok=True)
+    ai_ready_latest_dir.mkdir(parents=True, exist_ok=True)
+    daily_refresh_latest_dir.mkdir(parents=True, exist_ok=True)
     alert_dir.mkdir(parents=True, exist_ok=True)
     init_signal_store(str(signal_db))
 
@@ -31,17 +37,19 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
     pd.DataFrame(
         [
             {
-                "decision_date": today_str,
-                "rank": 1,
+                "as_of_date": today_str,
                 "ticker": "AAPL",
-                "decision_tag": "keep",
+                "final_priority": 1,
+                "decision_status": "keep",
+                "avoid_chase_flag": False,
+                "execution_window": "next_open_session",
+                "preferred_entry_type": "tactical_entry",
+                "invalidation_rule": "跌破 VWAP 退場",
                 "risk_level": "medium",
-                "tech_status": "trend_ok",
-                "theme": "ai",
-                "reason_summary": "Breakout with confirmation",
+                "decision_reason": "Breakout with confirmation",
             }
         ]
-    ).to_csv(backtest_dir / "ai_decision_latest.csv", index=False, encoding="utf-8-sig")
+    ).to_csv(ai_trading_latest_dir / "ai_decision_contract_v2_materialized.csv", index=False, encoding="utf-8-sig")
 
     event = build_signal_event(
         {
@@ -62,7 +70,10 @@ def test_execution_alerts_write_trade_log_and_dedupe(tmp_path, monkeypatch):
     upsert_signal_event(str(signal_db), event)
 
     monkeypatch.setattr(execution_alerts, "BACKTEST_DIR", backtest_dir)
-    monkeypatch.setattr(execution_alerts, "AI_DECISION_LATEST", backtest_dir / "ai_decision_latest.csv")
+    monkeypatch.setattr(execution_alerts, "AI_TRADING_LATEST_DIR", ai_trading_latest_dir)
+    monkeypatch.setattr(execution_alerts, "AI_READY_LATEST_DIR", ai_ready_latest_dir)
+    monkeypatch.setattr(execution_alerts, "DAILY_REFRESH_LATEST_DIR", daily_refresh_latest_dir)
+    monkeypatch.setattr(execution_alerts, "AI_DECISION_CONTRACT_MATERIALIZED", ai_trading_latest_dir / "ai_decision_contract_v2_materialized.csv")
     monkeypatch.setattr(execution_alerts, "ALERT_DIR", alert_dir)
     monkeypatch.setattr(execution_alerts, "STATE_FILE", alert_dir / "tv_execution_state.json")
     monkeypatch.setattr(execution_alerts, "ALERT_LOG", alert_dir / "tv_execution_alert_log.csv")

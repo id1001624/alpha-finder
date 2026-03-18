@@ -16,11 +16,9 @@ _YFINANCE_CA_BUNDLE = ensure_ascii_cert_bundle()
 import yfinance as yf
 
 from turso_state import (
-    STATE_KEY_AI_DECISION_LATEST,
     STATE_KEY_INTRADAY_SNAPSHOT,
     append_execution_log_rows,
     load_recent_trade_ledger,
-    load_runtime_df_with_fallback,
     sync_runtime_df,
     sync_execution_latest as sync_execution_latest_to_turso,
 )
@@ -81,16 +79,33 @@ from .strategy_context import (
     STRATEGY_MONSTER_SWING,
     default_strategy_for_horizon,
     detect_regime_tag,
-    ensure_decision_strategy_columns,
     normalize_horizon_tag,
 )
 from .ticker_mapping import resolve_underlying_ticker
+from .trade_command_contract import (
+    ACTION_BUY_AGGRESSIVE,
+    ACTION_BUY_SCALE_IN,
+    USER_VISIBLE,
+    build_user_visible_command_df,
+    enrich_trade_command_fields,
+)
 from .trade_memory import get_trade_memory
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
+# Legacy export for modules that still import this constant; intraday seed source no longer reads it.
 AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"
+AI_TRADING_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest"
+AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
+DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
+MATERIALIZED_CONTRACT_CSV = "ai_decision_contract_v2_materialized.csv"
+MATERIALIZED_CONTRACT_SHEET_ALIASES = {
+    "ai_decision_contract_v2_material",
+    "ai_decision_contract_v2_materialized",
+    "aidecisioncontractv2material",
+    "aidecisioncontractv2materialized",
+}
 ALERT_DIR = BACKTEST_DIR / "alerts"
 INTRADAY_DIR = BACKTEST_DIR / "intraday"
 STATE_FILE = ALERT_DIR / "intraday_engine_state.json"
@@ -176,6 +191,106 @@ def _sanitize_webhook_url(value: str) -> str:
     return cleaned
 
 
+def _normalize_sheet_name(value: object) -> str:
+    return str(value or "").strip().lower().replace("_", "")
+
+
+def _materialized_to_intraday_df(df: pd.DataFrame) -> pd.DataFrame:
+    required = {"as_of_date", "ticker", "final_priority", "decision_status"}
+    if df is None or len(df) == 0 or not required.issubset(set(df.columns)):
+        return pd.DataFrame()
+
+    normalized = enrich_trade_command_fields(df)
+    visible = build_user_visible_command_df(normalized)
+    out = visible[
+        (visible["ticker"].astype(str).str.upper() != "NO_TRADE")
+        & (visible["user_visibility"].astype(str).str.lower() == USER_VISIBLE)
+        & (visible["execution_action"].astype(str).str.upper().isin({ACTION_BUY_SCALE_IN, ACTION_BUY_AGGRESSIVE}))
+        & (visible["decision_status"].astype(str).str.lower() == "keep")
+    ].copy()
+    if len(out) == 0:
+        return pd.DataFrame()
+
+    out["decision_date"] = out.get("as_of_date", "")
+    out["rank"] = pd.to_numeric(out.get("final_priority"), errors="coerce").fillna(9999).astype(int)
+    out["decision_tag"] = out.get("decision_status", "watch").astype(str).str.strip().str.lower()
+    out["risk_level"] = out.get("risk_level", "")
+    out["tech_status"] = out.get("preferred_entry_type", "")
+    out["theme"] = out.get("primary_event_type", "")
+    out["reason_summary"] = out.get("decision_reason", "")
+    out["confidence"] = pd.to_numeric(out.get("tomorrow_continuation_prob"), errors="coerce")
+    out["explosion_probability"] = pd.to_numeric(out.get("tomorrow_continuation_prob"), errors="coerce")
+    out["api_final_score"] = pd.to_numeric(out.get("trigger_score"), errors="coerce")
+    out["research_mode"] = out.get("protocol_version", "materialized_contract")
+    out["horizon_tag"] = HORIZON_INTRADAY_MONSTER
+    out["strategy_profile"] = STRATEGY_MONSTER_SWING
+    out["signal_type"] = out.get("preferred_entry_type", "pullback_entry")
+    out["regime_tag"] = ""
+
+    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    out = out[out["ticker"] != ""].copy()
+    out = out.sort_values(["rank", "ticker"], ascending=[True, True]).reset_index(drop=True)
+    return out
+
+
+def _read_materialized_csv(path: Path) -> pd.DataFrame:
+    try:
+        raw = pd.read_csv(path, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raw = pd.read_csv(path)
+    out = _materialized_to_intraday_df(raw)
+    if len(out) > 0:
+        out["source_contract"] = str(path)
+    return out
+
+
+def _load_materialized_from_bundle(bundle_path: Path) -> pd.DataFrame:
+    if not bundle_path.exists():
+        return pd.DataFrame()
+    try:
+        workbook = pd.ExcelFile(bundle_path)
+    except (OSError, ValueError, ImportError):
+        return pd.DataFrame()
+
+    normalized_targets = {_normalize_sheet_name(name) for name in MATERIALIZED_CONTRACT_SHEET_ALIASES}
+    chosen_sheet = ""
+    for sheet in workbook.sheet_names:
+        if _normalize_sheet_name(sheet) in normalized_targets:
+            chosen_sheet = sheet
+            break
+    if not chosen_sheet:
+        return pd.DataFrame()
+
+    try:
+        raw = pd.read_excel(workbook, sheet_name=chosen_sheet)
+    except (OSError, ValueError):
+        return pd.DataFrame()
+    out = _materialized_to_intraday_df(raw)
+    if len(out) > 0:
+        out["source_contract"] = f"{bundle_path}#sheet={chosen_sheet}"
+    return out
+
+
+def _find_latest_materialized_csv() -> Optional[Path]:
+    candidates = [
+        AI_TRADING_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+        AI_READY_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+        DAILY_REFRESH_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+    ]
+    found: List[tuple[float, Path]] = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            found.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    if not found:
+        return None
+    found.sort(key=lambda item: item[0], reverse=True)
+    return found[0][1]
+
+
 def _http_post_json(url: str, payload: dict) -> tuple[bool, str]:
     try:
         response = requests.post(
@@ -192,39 +307,18 @@ def _http_post_json(url: str, payload: dict) -> tuple[bool, str]:
 
 
 def _load_decision_df() -> pd.DataFrame:
-    df, _ = load_runtime_df_with_fallback(STATE_KEY_AI_DECISION_LATEST, [AI_DECISION_LATEST])
-    if len(df) == 0 or "ticker" not in df.columns:
-        return pd.DataFrame()
-    out = df.copy()
-    for col in [
-        "decision_date",
-        "rank",
-        "ticker",
-        "decision_tag",
-        "risk_level",
-        "tech_status",
-        "theme",
-        "reason_summary",
-        "confidence",
-        "explosion_probability",
-        "api_final_score",
-        "research_mode",
-        "horizon_tag",
-        "strategy_profile",
-        "signal_type",
-        "regime_tag",
-    ]:
-        if col not in out.columns:
-            out[col] = ""
-    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
-    out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
-    out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
-    out["explosion_probability"] = pd.to_numeric(out["explosion_probability"], errors="coerce")
-    out["api_final_score"] = pd.to_numeric(out["api_final_score"], errors="coerce")
-    out = out[out["ticker"] != ""].dropna(subset=["rank"]).copy()
-    out["rank"] = out["rank"].astype(int)
-    out = ensure_decision_strategy_columns(out)
-    return out.sort_values(["rank", "ticker"], ascending=[True, True]).reset_index(drop=True)
+    latest_csv = _find_latest_materialized_csv()
+    if latest_csv is not None:
+        out = _read_materialized_csv(latest_csv)
+        if len(out) > 0:
+            return out
+
+    bundle_path = AI_READY_LATEST_DIR / "ai_ready_bundle.xlsx"
+    out = _load_materialized_from_bundle(bundle_path)
+    if len(out) > 0:
+        return out
+
+    return pd.DataFrame()
 
 
 def _load_state() -> Dict[str, str]:
@@ -367,8 +461,21 @@ def _decision_allows_entry(meta: pd.Series) -> bool:
         return False
     if str(meta.get("decision_tag", "")).strip().lower() != "keep":
         return False
+
+    execution_action = str(meta.get("execution_action", "")).strip().upper()
+    user_visibility = str(meta.get("user_visibility", "")).strip().lower()
+
+    rank_gate = max(1, int(INTRADAY_ENTRY_MAX_RANK))
+    if execution_action:
+        if execution_action not in {ACTION_BUY_SCALE_IN, ACTION_BUY_AGGRESSIVE}:
+            return False
+        if user_visibility and user_visibility != USER_VISIBLE:
+            return False
+        # Command-layer rows must at least allow priority 1-2 to prevent rank=2 pullback plans from being silently blocked.
+        rank_gate = max(rank_gate, 2)
+
     rank_value = int(pd.to_numeric(meta.get("rank"), errors="coerce") or 9999)
-    if rank_value > max(1, int(INTRADAY_ENTRY_MAX_RANK)):
+    if rank_value > rank_gate:
         return False
     if str(meta.get("risk_level", "")).strip() == "高":
         return False
@@ -485,7 +592,8 @@ def _load_watchlist(top_n: int) -> pd.DataFrame:
             & (positions_df["strategy_profile"].astype(str).str.strip().str.lower() == STRATEGY_MONSTER_SWING)
         ].copy()
 
-    watch = decision_df.head(max(1, top_n)).copy() if len(decision_df) > 0 else pd.DataFrame(columns=["ticker"])
+    watch_seed_n = max(2, int(top_n))
+    watch = decision_df.head(watch_seed_n).copy() if len(decision_df) > 0 else pd.DataFrame(columns=["ticker"])
     if len(watch) > 0:
         watch["monitor_priority"] = "今天主監控"
         watch["shadow_age_days"] = 0
@@ -946,16 +1054,20 @@ def _classify_action(
     return "", 0.0, "", ""
 
 
-def _build_signature(ticker: str, action: str, signal_type: str, ts_value: object, close_val: object, avwap: object, hist: object) -> str:
-    return "|".join([ticker, action, signal_type, str(ts_value), str(close_val), str(avwap), str(hist)])
+def _build_signature(ticker: str, action: str, signal_type: str, ts_value: object, _close_val: object, _avwap: object, _hist: object) -> str:
+    parsed = _coerce_utc_timestamp(ts_value)
+    bucket = ""
+    if parsed is not None:
+        bucket = parsed.floor("min").strftime("%Y-%m-%dT%H:%MZ")
+    return "|".join([ticker, action, signal_type, bucket])
 
 
 def _format_user_line(row: dict) -> str:
     action_map = {
-        "entry": "適合買",
-        "add": "可加碼",
+        "entry": "現在買入",
+        "add": "現在加碼",
         "take_profit": "先減碼",
-        "stop_loss": "適合全出",
+        "stop_loss": "全賣退場",
     }
     qty_part = ""
     fraction = pd.to_numeric(row.get("size_fraction"), errors="coerce")
@@ -976,6 +1088,26 @@ def _send_discord(message: str) -> tuple[bool, str]:
     if not webhook_url:
         return False, "DISCORD_WEBHOOK_URL missing"
     return _http_post_json(webhook_url, {"content": message[:1900]})
+
+
+def _state_key(ticker: str, channel: str) -> str:
+    return f"{str(ticker or '').strip().upper()}::{channel}"
+
+
+def _build_wait_signature(ticker: str, signal_ts: object) -> str:
+    parsed = _coerce_utc_timestamp(signal_ts)
+    bucket = ""
+    if parsed is not None:
+        bucket = parsed.floor("min").strftime("%Y-%m-%dT%H:%MZ")
+    return f"WAIT_PULLBACK|{str(ticker or '').strip().upper()}|{bucket}"
+
+
+def _format_wait_line(row: dict) -> str:
+    ticker = str(row.get("ticker", "")).strip().upper()
+    rank = int(pd.to_numeric(row.get("rank"), errors="coerce") or 0)
+    signal_type = str(row.get("signal_type", "pullback_entry")).strip() or "pullback_entry"
+    reason = str(row.get("reason_summary", "")).strip() or "尚未回踩到位，暫不買入。"
+    return f"- {ticker} | 待命觀察 | rank={rank} | {signal_type} | {reason}"
 
 
 def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = False) -> dict:
@@ -1012,6 +1144,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
 
     snapshot_rows: List[dict] = []
     action_rows: List[dict] = []
+    wait_rows: List[dict] = []
     execution_rows: List[dict] = []
     state_updates: Dict[str, str] = {}
 
@@ -1070,6 +1203,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             "sqz_release": bool(latest.get("sqz_release", False)),
             "signal_ts": str(latest.get("Datetime", "")),
             "similar_past_trades": similar_past_trades,
+            "source_contract": str(meta.get("source_contract", "")),
+            "contract_rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") or 0),
+            "contract_execution_action": str(meta.get("execution_action", "")),
+            "contract_user_visibility": str(meta.get("user_visibility", "")),
+            "contract_preferred_entry_type": str(meta.get("preferred_entry_type", "")),
+            "contract_execution_window": str(meta.get("execution_window", "")),
         }
 
         snapshot_rows.append(
@@ -1100,10 +1239,42 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                 "size_fraction": size_fraction,
                 "reason_summary": reason,
                 "signal_ts": str(latest.get("Datetime", "")),
+                "source_contract": str(meta.get("source_contract", "")),
+                "execution_action": str(meta.get("execution_action", "")),
+                "user_visibility": str(meta.get("user_visibility", "")),
+                "preferred_entry_type": str(meta.get("preferred_entry_type", "")),
+                "execution_window": str(meta.get("execution_window", "")),
             }
         )
 
         if not action:
+            has_position = bool(position is not None and float(position.get("quantity", 0.0)) > 0)
+            preferred_entry_type = str(meta.get("preferred_entry_type", "")).strip().lower()
+            execution_action = str(meta.get("execution_action", "")).strip().upper()
+            user_visibility = str(meta.get("user_visibility", "")).strip().lower()
+            signal_ts = latest.get("Datetime", "")
+            if (
+                not has_position
+                and preferred_entry_type == "pullback_entry"
+                and execution_action in {ACTION_BUY_SCALE_IN, ACTION_BUY_AGGRESSIVE}
+                and user_visibility in {"", USER_VISIBLE}
+                and _is_within_entry_window(_coerce_utc_timestamp(signal_ts), session_context)
+            ):
+                wait_signature = _build_wait_signature(ticker, signal_ts)
+                wait_key = _state_key(ticker, "wait")
+                if state.get(wait_key) != wait_signature:
+                    wait_rows.append(
+                        {
+                            "alert_ts": now_ts,
+                            "ticker": ticker,
+                            "rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") or 0),
+                            "signal_type": preferred_entry_type,
+                            "reason_summary": "回踩條件尚未成立，先待命，暫不買入。",
+                            "signal_ts": str(signal_ts),
+                            "source_contract": str(meta.get("source_contract", "")),
+                        }
+                    )
+                    state_updates[wait_key] = wait_signature
             continue
 
         signature = _build_signature(
@@ -1115,7 +1286,8 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             latest.get("dynamic_avwap", ""),
             latest.get("sqzmom_hist", ""),
         )
-        if state.get(ticker) == signature:
+        action_state_key = _state_key(ticker, "action")
+        if state.get(action_state_key) == signature or state.get(ticker) == signature:
             continue
 
         signal_ts = str(latest.get("Datetime", ""))
@@ -1137,6 +1309,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             "reason_summary": reason,
         }
         action_rows.append(action_row)
+        state_updates[action_state_key] = signature
         state_updates[ticker] = signature
         if action == "entry":
             planned_entry_count += 1
@@ -1218,31 +1391,77 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         _write_execution_outputs(execution_rows)
         if execution_rows:
             trade_memory.sync_completed_trades(pd.DataFrame(execution_rows))
+
+    if (action_rows or wait_rows) and not dry_run:
         state.update(state_updates)
         _save_state(state)
 
     message = ""
-    discord_ok = None
-    discord_detail = ""
+    wait_discord_ok = None
+    wait_discord_detail = ""
+    entry_discord_ok = None
+    entry_discord_detail = ""
+    exit_discord_ok = None
+    exit_discord_detail = ""
+
+    if wait_rows:
+        wait_lines = [f"[Alpha Finder] ⏳ Pullback 待命 {now_ts}", ""]
+        wait_lines.extend(_format_wait_line(row) for row in wait_rows)
+        wait_lines.extend(["", "提醒: 這是待命訊號，尚未觸發買入。"])
+        wait_message = "\n".join(wait_lines)
+    else:
+        wait_message = ""
+
     if action_rows:
         lines = [f"[Alpha Finder] Repo Intraday Engine {now_ts}", ""]
         lines.extend(_format_user_line(row) for row in action_rows)
         lines.extend(["", "提醒: 這是系統計算出的執行建議，不是自動下單。實際成交請用 Discord Bot 回報。"])
         message = "\n".join(lines)
-        # 兩層通知：只有風控出場訊號立即推 Discord；進場/加碼僅記錄，由 recap 整合推送
+        entry_rows = [r for r in action_rows if str(r.get("action", "")) in {"entry", "add"}]
         exit_rows = [r for r in action_rows if str(r.get("action", "")) in {"stop_loss", "take_profit"}]
-        if exit_rows and not dry_run:
-            exit_lines = [f"[Alpha Finder] ⚡ 風控提醒 {now_ts}", ""]
+
+        if entry_rows:
+            entry_lines = [f"[Alpha Finder] ⚡ 即時進場指令 {now_ts}", ""]
+            entry_lines.extend(_format_user_line(r) for r in entry_rows)
+            entry_lines.extend(["", "提醒: 進場條件已成立，請依規劃比例執行。"])
+            entry_message = "\n".join(entry_lines)
+        else:
+            entry_message = ""
+
+        if exit_rows:
+            exit_lines = [f"[Alpha Finder] ⚠️ 即時風控指令 {now_ts}", ""]
             exit_lines.extend(_format_user_line(r) for r in exit_rows)
-            discord_ok, discord_detail = _send_discord("\n".join(exit_lines))
+            exit_lines.extend(["", "提醒: 已觸發失效條件，優先執行風控。"])
+            exit_message = "\n".join(exit_lines)
+        else:
+            exit_message = ""
+    else:
+        entry_message = ""
+        exit_message = ""
+
+    if not dry_run:
+        if wait_message:
+            wait_discord_ok, wait_discord_detail = _send_discord(wait_message)
+        if entry_message:
+            entry_discord_ok, entry_discord_detail = _send_discord(entry_message)
+        if exit_message:
+            exit_discord_ok, exit_discord_detail = _send_discord(exit_message)
 
     return {
         "ok": True,
         "watch_count": len(watch_df),
         "snapshot_count": len(snapshot_rows),
+        "wait_count": len(wait_rows),
         "action_count": len(action_rows),
         "snapshot_file": str(SNAPSHOT_FILE),
         "message": message,
-        "discord_ok": discord_ok,
-        "discord_detail": discord_detail,
+        "wait_message": wait_message,
+        "entry_message": entry_message,
+        "exit_message": exit_message,
+        "wait_discord_ok": wait_discord_ok,
+        "wait_discord_detail": wait_discord_detail,
+        "entry_discord_ok": entry_discord_ok,
+        "entry_discord_detail": entry_discord_detail,
+        "exit_discord_ok": exit_discord_ok,
+        "exit_discord_detail": exit_discord_detail,
     }

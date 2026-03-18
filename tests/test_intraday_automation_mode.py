@@ -87,7 +87,7 @@ def test_morning_message_contains_required_sections_and_prior_link():
     }
 
     message = build_morning_message(df, {}, "2026-03-17", context)
-    assert "承接昨晚計畫:" in message
+    assert "承接昨晚:" in message
     assert "現在應該做什麼:" in message
     assert "失效條件:" in message
     assert "結論:" in message
@@ -108,8 +108,7 @@ def test_opening_message_contains_required_sections_and_prior_link():
     }
 
     message = build_opening_message(df, {}, "2026-03-17", context)
-    assert "承接早晨計畫:" in message
-    assert "開盤驗證結果:" in message
+    assert "承接早晨:" in message
     assert "現在應該做什麼:" in message
     assert "失效條件:" in message
     assert "結論:" in message
@@ -131,7 +130,7 @@ def test_bedtime_message_carries_prior_morning_plan():
     }
 
     message = build_bedtime_message(df, {}, "2026-03-17", context)
-    assert "承接早晨計畫:" in message
+    assert "承接早晨:" in message
     assert "現在應該做什麼:" in message
     assert "失效條件:" in message
 

@@ -55,10 +55,26 @@ def main() -> int:
 
         result = run_intraday_execution_engine(top_n=max(1, int(args.top_n)), dry_run=args.dry_run)
         print(result.get("message") or result)
-        if result.get("discord_ok") is not None:
-            print(f"[DISCORD] ok={result.get('discord_ok')} detail={result.get('discord_detail', '')}")
+
+        discord_checks = [
+            ("wait", result.get("wait_discord_ok"), result.get("wait_discord_detail", ""), result.get("wait_message", "")),
+            ("entry", result.get("entry_discord_ok"), result.get("entry_discord_detail", ""), result.get("entry_message", "")),
+            ("exit", result.get("exit_discord_ok"), result.get("exit_discord_detail", ""), result.get("exit_message", "")),
+        ]
+        discord_failed = False
+        for channel, ok, detail, message in discord_checks:
+            if not message:
+                continue
+            print(f"[DISCORD:{channel}] ok={ok} detail={detail}")
+            if ok is False:
+                discord_failed = True
+
         if not args.loop:
-            return 0 if result.get("ok") else 1
+            if not result.get("ok"):
+                return 1
+            if discord_failed:
+                return 2
+            return 0
         time.sleep(max(30, int(args.poll_seconds)))
 
 

@@ -46,6 +46,7 @@ from ai_trading.strategy_context import (
     default_strategy_for_horizon,
 )
 from ai_trading.ticker_mapping import format_ticker_with_underlying, resolve_underlying_ticker
+from ai_trading.trade_command_contract import build_user_visible_command_df, enrich_trade_command_fields, find_pollution_terms
 from ai_trading.watchlist_brief import load_all_saved_watchlist_tickers
 from config import (
     DISCORD_WEBHOOK_URL,
@@ -89,7 +90,7 @@ from config import (
     TAVILY_API_KEY,
 )
 from signal_store import get_latest_signals
-from turso_state import STATE_KEY_AI_DECISION_LATEST, STATE_KEY_INTRADAY_SNAPSHOT, load_recent_execution_log, load_runtime_df, load_runtime_df_with_fallback, sync_runtime_df
+from turso_state import STATE_KEY_INTRADAY_SNAPSHOT, load_recent_execution_log, load_runtime_df, sync_runtime_df
 
 logger = get_logger(__name__)
 
@@ -159,10 +160,96 @@ ACTION_DIRECTION = {
     "stop_loss": "sell",
 }
 
+MATERIALIZED_CONTRACT_CSV = "ai_decision_contract_v2_materialized.csv"
+MATERIALIZED_CONTRACT_SHEET_ALIASES = {
+    "ai_decision_contract_v2_material",
+    "ai_decision_contract_v2_materialized",
+    "aidecisioncontractv2material",
+    "aidecisioncontractv2materialized",
+}
 
-def _find_latest_decision_csv() -> Optional[Path]:
+
+def _normalize_sheet_name(value: object) -> str:
+    return str(value or "").strip().lower().replace("_", "")
+
+
+def _materialized_to_recap_df(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = enrich_trade_command_fields(df)
+    out = normalized.copy()
+    defaults = {
+        "decision_date": out.get("as_of_date", ""),
+        "rank": out.get("final_priority", 9999),
+        "decision_tag": out.get("decision_status", "watch"),
+        "short_score_final": out.get("decision_score", 0.0),
+        "confidence": out.get("tomorrow_continuation_prob", 0.0),
+        "api_final_score": out.get("tomorrow_continuation_prob", 0.0),
+        "tech_status": out.get("preferred_entry_type", ""),
+        "reason_summary": out.get("decision_reason", ""),
+        "source_ref": out.get("source_sheet_trace", ""),
+        "risk_level": out.get("risk_level", ""),
+        "catalyst_summary": "",
+        "catalyst_type": out.get("primary_event_type", ""),
+        "catalyst_sentiment": "neutral",
+    }
+    for col, default in defaults.items():
+        if col not in out.columns:
+            out[col] = default
+
+    out["ticker"] = out.get("ticker", "").astype(str).str.strip().str.upper()
+    out["decision_tag"] = out.get("decision_tag", "watch").astype(str).str.strip().str.lower()
+    out["rank"] = pd.to_numeric(out.get("rank"), errors="coerce").fillna(9999).astype(int)
+    out["short_score_final"] = pd.to_numeric(out.get("short_score_final"), errors="coerce")
+    out["confidence"] = pd.to_numeric(out.get("confidence"), errors="coerce")
+    out["api_final_score"] = pd.to_numeric(out.get("api_final_score"), errors="coerce")
+    out = out[out["ticker"] != ""].copy()
+    out = out.sort_values(["rank", "ticker"], ascending=[True, True]).reset_index(drop=True)
+    return out
+
+
+def _read_materialized_csv(path: Path) -> pd.DataFrame:
+    try:
+        raw = pd.read_csv(path, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raw = pd.read_csv(path)
+    required = {"as_of_date", "ticker", "final_priority", "decision_status"}
+    if not required.issubset(set(raw.columns)):
+        return pd.DataFrame()
+    return _materialized_to_recap_df(raw)
+
+
+def _load_materialized_from_bundle(bundle_path: Path) -> pd.DataFrame:
+    if not bundle_path.exists():
+        return pd.DataFrame()
+    try:
+        workbook = pd.ExcelFile(bundle_path)
+    except (OSError, ValueError, ImportError):
+        return pd.DataFrame()
+
+    chosen_sheet = ""
+    for sheet in workbook.sheet_names:
+        if _normalize_sheet_name(sheet) in {_normalize_sheet_name(name) for name in MATERIALIZED_CONTRACT_SHEET_ALIASES}:
+            chosen_sheet = sheet
+            break
+    if not chosen_sheet:
+        return pd.DataFrame()
+
+    try:
+        raw = pd.read_excel(workbook, sheet_name=chosen_sheet)
+    except (OSError, ValueError):
+        return pd.DataFrame()
+    required = {"as_of_date", "ticker", "final_priority", "decision_status"}
+    if not required.issubset(set(raw.columns)):
+        return pd.DataFrame()
+    return _materialized_to_recap_df(raw)
+
+
+def _find_latest_materialized_csv() -> Optional[Path]:
     found: List[tuple[float, Path]] = []
-    static_candidates = [BACKTEST_DIR / "ai_decision_latest.csv"]
+    static_candidates = [
+        PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest" / MATERIALIZED_CONTRACT_CSV,
+        AI_READY_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+        DAILY_REFRESH_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+    ]
     for file in static_candidates:
         if not file.exists():
             continue
@@ -170,14 +257,6 @@ def _find_latest_decision_csv() -> Optional[Path]:
             found.append((file.stat().st_mtime, file))
         except OSError:
             continue
-    for folder in [INBOX_DIR, AI_READY_LATEST_DIR, DAILY_REFRESH_LATEST_DIR]:
-        if not folder.exists():
-            continue
-        for file in folder.glob("ai_decision_*.csv"):
-            try:
-                found.append((file.stat().st_mtime, file))
-            except OSError:
-                continue
     if not found:
         return None
     found.sort(key=lambda x: x[0], reverse=True)
@@ -185,41 +264,20 @@ def _find_latest_decision_csv() -> Optional[Path]:
 
 
 def _load_latest_decision_df() -> tuple[pd.DataFrame, str | None]:
-    df, source = load_runtime_df_with_fallback(
-        STATE_KEY_AI_DECISION_LATEST,
-        [BACKTEST_DIR / "ai_decision_latest.csv"],
-    )
-    if source is not None:
-        return df, source
+    latest_csv = _find_latest_materialized_csv()
+    if latest_csv is not None:
+        return _read_materialized_csv(latest_csv), str(latest_csv)
 
-    latest_csv = _find_latest_decision_csv()
-    if latest_csv is None:
-        return pd.DataFrame(), None
-    return _load_decision_df(latest_csv), str(latest_csv)
+    bundle_path = AI_READY_LATEST_DIR / "ai_ready_bundle.xlsx"
+    bundle_df = _load_materialized_from_bundle(bundle_path)
+    if len(bundle_df) > 0:
+        return bundle_df, f"{bundle_path}#sheet=ai_decision_contract_v2_material"
+
+    return pd.DataFrame(), None
 
 
 def _load_decision_df(csv_path: Path) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(csv_path, encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        df = pd.read_csv(csv_path)
-
-    for col in REQUIRED_COLS:
-        if col not in df.columns:
-            df[col] = ""
-
-    out = df.copy()
-    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
-    out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
-    out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
-    out["short_score_final"] = pd.to_numeric(out["short_score_final"], errors="coerce")
-    out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
-    out["api_final_score"] = pd.to_numeric(out["api_final_score"], errors="coerce")
-    out = out[out["ticker"] != ""].copy()
-    out = out.dropna(subset=["rank"]).copy()
-    out["rank"] = out["rank"].astype(int)
-    out = out.sort_values(["rank", "ticker"], ascending=[True, True])
-    return out
+    return _read_materialized_csv(csv_path)
 
 
 def _load_tv_map() -> Dict[str, object]:
@@ -2096,6 +2154,58 @@ def _build_message(df: pd.DataFrame, tv_map: Dict[str, object], top_n: int, tags
     return "\n".join(lines)
 
 
+def _build_trade_command_message(command_df: pd.DataFrame, title_date: str, mode: str, top_n: int) -> str:
+    mode_label = {
+        "bedtime": "Bedtime",
+        "morning": "Morning",
+        "opening": "Opening",
+        "full": "Trade",
+    }.get(str(mode or "").strip().lower(), "Trade")
+
+    selected = command_df.head(max(1, int(top_n))).copy()
+    selected = selected.sort_values(["final_priority", "ticker"], ascending=[True, True]).reset_index(drop=True)
+
+    action_lines: List[str] = []
+    risk_lines: List[str] = []
+    visible_rows = 0
+    for _, row in selected.iterrows():
+        action = str(row.get("execution_action", "")).strip().upper()
+        ticker = str(row.get("ticker", "")).strip().upper()
+        plan = str(row.get("position_plan", "")).strip()
+        invalidation = str(row.get("invalidation_rule", "")).strip()
+        exit_action = str(row.get("exit_action", "SELL_ALL_EXIT")).strip().upper() or "SELL_ALL_EXIT"
+        if action == "NO_TRADE":
+            action_lines = ["今日空手"]
+            risk_lines = ["若盤中觸發失效規則，警告全賣退場"]
+            visible_rows = 0
+            break
+        if not ticker:
+            continue
+        if action not in {"BUY_SCALE_IN", "BUY_AGGRESSIVE", "SELL_SCALE_OUT", "SELL_ALL_EXIT", "NO_TRADE"}:
+            continue
+        visible_rows += 1
+        action_text = plan or action
+        action_lines.append(f"{ticker} -> {action_text}")
+        if invalidation:
+            risk_lines.append(f"{ticker}: {invalidation} -> {exit_action}")
+
+    if not action_lines:
+        action_lines = ["今日空手"]
+    if not risk_lines:
+        risk_lines = ["若盤中觸發失效規則，警告全賣退場"]
+
+    summary = "今日空手" if visible_rows <= 0 else f"{visible_rows} 筆可執行動作"
+    lines = [f"[{mode_label} {title_date}]", ""]
+    lines.append("現在應該做什麼:")
+    for item in action_lines:
+        lines.append(f"- {item}")
+    lines.append("失效條件:")
+    for item in risk_lines:
+        lines.append(f"- {item}")
+    lines.append(f"結論: {summary}")
+    return "\n".join(lines)
+
+
 def _render_message(
     df: pd.DataFrame,
     tv_map: Dict[str, object],
@@ -2105,6 +2215,10 @@ def _render_message(
     mode: str,
     recap_context: Optional[dict] = None,
 ) -> str:
+    if "execution_action" in df.columns:
+        command_df = build_user_visible_command_df(df)
+        return _build_trade_command_message(command_df=command_df, title_date=title_date, mode=mode, top_n=top_n)
+
     selected = df[df["decision_tag"].isin(tags)].copy().sort_values(["rank", "ticker"], ascending=[True, True])
     if mode == "bedtime":
         return _build_bedtime_message(selected, tv_map, title_date, recap_context or {})
@@ -2127,9 +2241,9 @@ def build_recap_message_preview(
 
     df, source_id = _load_latest_decision_df()
     if source_id is None:
-        raise ValueError("No ai_decision latest state found in Turso / backtest latest / inbox / ai_ready/latest / daily_refresh/latest")
+        raise ValueError("No materialized contract found in ai_trading/latest, ai_ready/latest, daily_refresh/latest, or ai_ready_bundle.xlsx")
 
-    selected_tags = tags or {"keep", "watch"}
+    selected_tags = tags or {"keep"}
     decision_date = "unknown"
     if "decision_date" in df.columns and df["decision_date"].notna().any():
         decision_date = str(df["decision_date"].dropna().iloc[0])
@@ -2164,6 +2278,17 @@ def build_recap_message_preview(
         mode=normalized_mode,
         recap_context=recap_context,
     )
+
+    polluted_terms = find_pollution_terms(message)
+    if polluted_terms:
+        return {
+            "ok": False,
+            "skip_reason": "polluted_output",
+            "polluted_terms": polluted_terms,
+            "decision_date": decision_date,
+            "source_id": source_id,
+            "mode": normalized_mode,
+        }
 
     pipeline_debug = {
         "gemini_enabled": bool(RECAP_GEMINI_ENABLED and GEMINI_API_KEY),
@@ -2272,13 +2397,16 @@ def main() -> int:
     args = parser.parse_args()
 
     csv_path = Path(args.csv_file).resolve() if args.csv_file.strip() else None
-    tags = {x.strip().lower() for x in str(args.tags).split(",") if x.strip()} or {"keep", "watch"}
+    tags = {x.strip().lower() for x in str(args.tags).split(",") if x.strip()} or {"keep"}
 
     if csv_path is not None and not args.auto_latest:
         if not csv_path.exists():
             logger.error("CSV not found: %s", csv_path)
             return 2
         df = _load_decision_df(csv_path)
+        if len(df) == 0:
+            logger.error("CSV is not a valid materialized contract: %s", csv_path)
+            return 2
         source_id = str(csv_path)
         decision_date = "unknown"
         if "decision_date" in df.columns and df["decision_date"].notna().any():
@@ -2318,6 +2446,11 @@ def main() -> int:
         df, _ = _load_latest_decision_df()
 
     ALERT_DIR.mkdir(parents=True, exist_ok=True)
+    polluted_terms = find_pollution_terms(message)
+    if polluted_terms:
+        logger.error("output contamination detected: %s", ", ".join(polluted_terms))
+        return 5
+
     ALERT_MESSAGE_TXT.write_text(message, encoding="utf-8")
 
     logger.info("=== Alert Preview ===\n%s", message)
@@ -2360,7 +2493,7 @@ def main() -> int:
         elif str(args.mode) == "morning":
             _persist_morning_plan(decision_date, recap_context, message, source_id)
 
-    log_df = df[df["decision_tag"].isin(tags)].head(max(1, int(args.top_n))).copy()
+    log_df = build_user_visible_command_df(df).head(max(1, int(args.top_n))).copy()
     log_rows: List[dict] = []
     ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for _, row in log_df.iterrows():

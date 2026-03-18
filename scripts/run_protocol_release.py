@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config as app_config
+from ai_trading.trade_command_contract import enrich_trade_command_fields
 
 AI_TRADING_LATEST = PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest"
 AI_READY_LATEST = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
@@ -129,6 +130,43 @@ REQUIRED_OUTPUT_CONTRACT: Dict[str, list[str]] = {
     ],
 }
 
+AI_DECISION_CONTRACT_V2_COLUMNS = [
+    "as_of_date",
+    "ticker",
+    "company_name",
+    "decision_mode",
+    "final_priority",
+    "decision_status",
+    "decision_score",
+    "decision_reason",
+    "primary_event_type",
+    "trigger_source",
+    "trigger_score",
+    "continuation_rank",
+    "tomorrow_continuation_prob",
+    "confidence_tier",
+    "entry_plan",
+    "execution_window",
+    "avoid_chase_flag",
+    "preferred_entry_type",
+    "vwap_status",
+    "sqzmom_status",
+    "volume_status",
+    "invalidation_rule",
+    "risk_level",
+    "risk_note",
+    "dilution_flag",
+    "halt_risk_flag",
+    "source_sheet_trace",
+    "protocol_version",
+    "data_version",
+    "decision_ts",
+    "execution_action",
+    "position_plan",
+    "exit_action",
+    "user_visibility",
+]
+
 
 def _clean_text(value: object, default: str = "") -> str:
     text = str(value if value is not None else "").strip()
@@ -200,6 +238,170 @@ def _confidence_tier(status: str, followthrough: float, verif: float) -> str:
     if score >= 55:
         return "medium"
     return "low"
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    parsed = pd.to_numeric(value, errors="coerce")
+    if pd.isna(parsed):
+        return float(default)
+    return float(parsed)
+
+
+def _infer_preferred_entry_type(tech_status: str) -> str:
+    text = _clean_text(tech_status, "").lower().replace("_", "")
+    if not text:
+        return "unknown"
+    if text in {"avoidchase", "notrade"}:
+        return "no_trade"
+    if "pullback" in text:
+        return "pullback_entry"
+    if "breakout" in text or "reclaim" in text:
+        return "breakout_or_reclaim"
+    if "ready" in text or "entry" in text:
+        return "tactical_entry"
+    return "unknown"
+
+
+def _build_ai_decision_contract_materialized(scan_date: str) -> Dict[str, object]:
+    latest_path = AI_TRADING_LATEST / "ai_decision_latest.csv"
+    latest_df = _read_csv_fallback(latest_path)
+
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = []
+    for idx, (_, row) in enumerate(latest_df.iterrows(), 1):
+        ticker = _clean_text(row.get("ticker"), "").upper()
+        if not ticker:
+            continue
+
+        raw_mode = _clean_text(row.get("selection_mode"), "continuation")
+        decision_mode = {
+            "top1_top5": "continuation",
+            "top5_only": "continuation_fallback",
+        }.get(raw_mode, raw_mode)
+        decision_status = "keep" if _clean_text(row.get("decision_tag"), "watch").lower() == "keep" else "watch"
+
+        tech_status = _clean_text(row.get("tech_status", row.get("tomorrow_entry_readiness", "")), "")
+        gate_reason = _clean_text(row.get("protocol_gate_reason"), "")
+        invalidation_rule = _clean_text(row.get("invalidation_rule"), "")
+        risk_note_parts = []
+        if gate_reason:
+            risk_note_parts.append(f"gate={gate_reason}")
+        if invalidation_rule:
+            risk_note_parts.append(f"invalidate={invalidation_rule}")
+        risk_note = "; ".join(risk_note_parts)
+
+        rank_value = pd.to_numeric(row.get("rank"), errors="coerce")
+        final_priority = int(rank_value) if pd.notna(rank_value) else idx
+
+        rows.append(
+            {
+                "as_of_date": _clean_text(row.get("decision_date"), scan_date),
+                "ticker": ticker,
+                "company_name": "",
+                "decision_mode": decision_mode,
+                "final_priority": final_priority,
+                "decision_status": decision_status,
+                "decision_score": round(_to_float(row.get("short_score_final"), 0.0), 2),
+                "decision_reason": _clean_text(row.get("reason_summary"), ""),
+                "primary_event_type": _clean_text(row.get("catalyst_type"), "local_only"),
+                "trigger_source": _clean_text(row.get("catalyst_source"), "bundle"),
+                "trigger_score": round(_to_float(row.get("hype_score"), 0.0), 2),
+                "continuation_rank": final_priority,
+                "tomorrow_continuation_prob": round(_to_float(row.get("confidence"), 0.0), 2),
+                "confidence_tier": _clean_text(row.get("confidence_tier"), "medium").lower(),
+                "entry_plan": _clean_text(row.get("decision_action"), ""),
+                "execution_window": "next_open_session",
+                "avoid_chase_flag": tech_status.lower() in {"avoid_chase", "avoidchase"},
+                "preferred_entry_type": _infer_preferred_entry_type(tech_status),
+                "vwap_status": "unknown",
+                "sqzmom_status": "unknown",
+                "volume_status": "unknown",
+                "invalidation_rule": invalidation_rule,
+                "risk_level": _clean_text(row.get("risk_level"), ""),
+                "risk_note": risk_note,
+                "dilution_flag": False,
+                "halt_risk_flag": False,
+                "source_sheet_trace": _clean_text(row.get("source_ref"), "decision_signals_daily"),
+                "protocol_version": "alpha_sniper_protocol_web_single_prompt",
+                "data_version": scan_date,
+                "decision_ts": now_text,
+                "execution_action": "",
+                "position_plan": "",
+                "exit_action": "",
+                "user_visibility": "",
+            }
+        )
+
+    materialized_df = pd.DataFrame(rows, columns=AI_DECISION_CONTRACT_V2_COLUMNS)
+    materialized_df = enrich_trade_command_fields(materialized_df)
+    materialized_df = materialized_df.reindex(columns=AI_DECISION_CONTRACT_V2_COLUMNS)
+    materialized_path = AI_TRADING_LATEST / "ai_decision_contract_v2_materialized.csv"
+    materialized_df.to_csv(materialized_path, index=False, encoding="utf-8-sig")
+
+    AI_READY_LATEST.mkdir(parents=True, exist_ok=True)
+    DAILY_REFRESH_LATEST.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(materialized_path, AI_READY_LATEST / materialized_path.name)
+    shutil.copy2(materialized_path, DAILY_REFRESH_LATEST / materialized_path.name)
+
+    return {
+        "file": str(materialized_path),
+        "source_file": str(latest_path),
+        "row_count": int(len(materialized_df)),
+        "generated_at": now_text,
+    }
+
+
+def _validate_materialized_contract(scan_date: str) -> Dict[str, object]:
+    bundle_df = _read_csv_fallback(AI_TRADING_LATEST / "bundle_contract_status.csv")
+    status_value = _clean_text(bundle_df.iloc[0].get("status"), "").lower() if len(bundle_df) > 0 else ""
+    bundle_ready = status_value == "ready"
+
+    latest_df = _read_csv_fallback(AI_TRADING_LATEST / "ai_decision_latest.csv")
+    latest_rows = int(len(latest_df))
+
+    materialized_path = AI_TRADING_LATEST / "ai_decision_contract_v2_materialized.csv"
+    materialized_df = _read_csv_fallback(materialized_path)
+    materialized_rows = int(len(materialized_df))
+    materialized_cols = [str(c) for c in materialized_df.columns.tolist()]
+    missing_cols = [c for c in AI_DECISION_CONTRACT_V2_COLUMNS if c not in materialized_cols]
+
+    require_rows = bool(bundle_ready or latest_rows > 0)
+    validation_status = "ok"
+    message = "ok"
+    hard_fail = False
+
+    if missing_cols:
+        validation_status = "failed"
+        message = f"missing_columns={','.join(missing_cols)}"
+        hard_fail = True
+    elif require_rows and materialized_rows <= 0:
+        validation_status = "failed"
+        message = "row_count=0 while bundle_contract_status=ready or ai_decision_latest has rows"
+        hard_fail = True
+
+    report_row = {
+        "scan_date": scan_date,
+        "bundle_contract_status": status_value,
+        "bundle_ready": bundle_ready,
+        "ai_decision_latest_rows": latest_rows,
+        "materialized_rows": materialized_rows,
+        "require_non_empty": require_rows,
+        "missing_columns": "|".join(missing_cols),
+        "validation_status": validation_status,
+        "message": message,
+    }
+    report_path = AI_TRADING_LATEST / "materialized_contract_validation_report.csv"
+    pd.DataFrame([report_row]).to_csv(report_path, index=False, encoding="utf-8-sig")
+
+    if hard_fail:
+        raise RuntimeError(f"Materialized contract validation failed: {message}")
+
+    return {
+        "validation_report": str(report_path),
+        "materialized_rows": materialized_rows,
+        "required_non_empty": require_rows,
+        "validation_status": validation_status,
+    }
 
 
 def _build_decision_source() -> Tuple[pd.DataFrame, str]:
@@ -319,6 +521,7 @@ def _cleanup_legacy_decision_files() -> None:
     protected_names = {
         "ai_decision_latest.csv",
         "ai_decision_contract_v2_template.csv",
+        "ai_decision_contract_v2_materialized.csv",
     }
     for directory in [AI_TRADING_LATEST, AI_READY_LATEST, DAILY_REFRESH_LATEST]:
         if not directory.exists():
@@ -511,8 +714,12 @@ def main() -> int:
     schema_meta = _validate_output_schema(scan_date=scan_date)
     status, readiness_meta = _load_release_status()
     decision_path = _build_ai_decision_file(scan_date=scan_date, status=status, readiness_meta=readiness_meta)
+    materialized_meta = _build_ai_decision_contract_materialized(scan_date=scan_date)
+    materialized_validation_meta = _validate_materialized_contract(scan_date=scan_date)
 
     bundle_meta = _refresh_bundle(scan_date=scan_date)
+    bundle_meta = dict(bundle_meta or {})
+    bundle_meta["bundleupdated"] = bool(bundle_meta.get("bundle_updated", False))
 
     manifest = {
         "release_name": "Protocol Release Candidate v1",
@@ -525,11 +732,23 @@ def main() -> int:
         "decision_mode": "preview",
         "decision_author": "pipeline_preview",
         "schema": schema_meta,
+        "contract_template_schema": schema_meta,
+        "contract_materialized": materialized_meta,
+        "contract_materialized_validation": materialized_validation_meta,
+        "contractmaterialized": {
+            "rowcount": int(materialized_meta.get("row_count", 0)),
+            "sourcefile": str(materialized_meta.get("source_file", "")),
+        },
+        "contractmaterializedvalidation": {
+            "validationstatus": str(materialized_validation_meta.get("validation_status", "unknown")),
+            "requirednonempty": bool(materialized_validation_meta.get("required_non_empty", False)),
+        },
         "bundle": bundle_meta,
         "outputs": [
             "ai_decision_seed_latest.csv",
             "protocol_release_preview_YYYY-MM-DD.csv",
             "ai_decision_latest.csv",
+            "ai_decision_contract_v2_materialized.csv",
             "decision_funnel_daily.csv",
             "pre_event_watchlist.csv",
             "live_event_feed.csv",
@@ -537,6 +756,7 @@ def main() -> int:
             "trade_trigger_queue.csv",
             "bundle_contract_status.csv",
             "ai_decision_contract_v2_template.csv",
+            "materialized_contract_validation_report.csv",
             "decision_outcome_audit_daily.csv",
             "attribution_summary_daily.csv",
             "baseline_v1_vs_variants_metrics.csv",
@@ -555,6 +775,7 @@ def main() -> int:
     print("[RELEASE] decision_mode=preview")
     print(f"[RELEASE] ai_decision_preview_file={decision_path}")
     print(f"[RELEASE] schema_report={schema_meta.get('schema_report')}")
+    print(f"[RELEASE] materialized_rows={materialized_validation_meta.get('materialized_rows', 0)}")
     print(f"[RELEASE] bundle_updated={bundle_meta.get('bundle_updated', False)}")
     print(f"[RELEASE] bundle_sheets={bundle_meta.get('bundle_sheet_count', 0)}")
     return 0
