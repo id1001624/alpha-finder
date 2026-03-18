@@ -40,6 +40,7 @@ from prompt_safety import sanitize_prompt_payload
 
 from ai_trading.position_state import load_positions
 from ai_trading.quantmuse_bridge import generate_bedtime_swing_recommendation
+from ai_trading.canonical_event_log import load_canonical_action_events
 from ai_trading.strategy_context import (
     HORIZON_SWING_CORE,
     classify_watch_horizon,
@@ -90,7 +91,7 @@ from config import (
     TAVILY_API_KEY,
 )
 from signal_store import get_latest_signals
-from turso_state import STATE_KEY_INTRADAY_SNAPSHOT, load_recent_execution_log, load_runtime_df, sync_runtime_df
+from turso_state import STATE_KEY_INTRADAY_SNAPSHOT, load_runtime_df, sync_runtime_df
 
 logger = get_logger(__name__)
 
@@ -103,7 +104,6 @@ ALERT_LOG_CSV = ALERT_DIR / "alert_log.csv"
 ALERT_MESSAGE_TXT = ALERT_DIR / "latest_alert_message.txt"
 ALERT_MARKER_DIR = ALERT_DIR / "markers"
 AI_DECISION_LOG_CSV = BACKTEST_DIR / "ai_decision_log.csv"
-EXECUTION_LOG_CSV = BACKTEST_DIR / "execution_trade_log.csv"
 BEDTIME_PLAN_STATE_KEY = "recap_bedtime_plan_latest"
 BEDTIME_PLAN_FILE = ALERT_DIR / "bedtime_plan_latest.json"
 MORNING_PLAN_STATE_KEY = "recap_morning_plan_latest"
@@ -149,6 +149,8 @@ EXECUTION_COLS = [
 ACTION_LABELS = {
     "entry": "適合買",
     "add": "可加碼",
+    "reduce": "先減碼",
+    "exit": "先退場",
     "take_profit": "先減碼",
     "stop_loss": "先降風險",
 }
@@ -156,6 +158,8 @@ ACTION_LABELS = {
 ACTION_DIRECTION = {
     "entry": "buy",
     "add": "buy",
+    "reduce": "sell",
+    "exit": "sell",
     "take_profit": "sell",
     "stop_loss": "sell",
 }
@@ -595,38 +599,76 @@ def _normalize_ts(value: object) -> pd.Timestamp:
     return parsed
 
 
-def _load_execution_df(limit: int) -> pd.DataFrame:
-    out = load_recent_execution_log(limit=max(1, int(limit)))
-    if len(out) == 0 and EXECUTION_LOG_CSV.exists():
-        try:
-            out = pd.read_csv(EXECUTION_LOG_CSV, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            out = pd.read_csv(EXECUTION_LOG_CSV)
-        except (OSError, pd.errors.EmptyDataError):
-            out = pd.DataFrame()
-    if len(out) == 0:
-        return pd.DataFrame(columns=EXECUTION_COLS + ["recorded_at_ts"])
+def _position_effect_from_action(action: str) -> str:
+    action_norm = str(action or "").strip().lower()
+    if action_norm == "entry":
+        return "open"
+    if action_norm == "add":
+        return "increase"
+    if action_norm in {"reduce", "take_profit"}:
+        return "reduce"
+    if action_norm in {"exit", "stop_loss"}:
+        return "close"
+    return "update"
 
-    normalized = out.copy()
+
+def _timeframe_from_engine(engine: str) -> str:
+    return "1d" if str(engine or "").strip().lower() == "swing" else "1m"
+
+
+def _horizon_from_engine(engine: str) -> str:
+    return HORIZON_SWING_CORE if str(engine or "").strip().lower() == "swing" else "intraday_monster"
+
+
+def _load_execution_df(limit: int) -> pd.DataFrame:
+    canonical_df = load_canonical_action_events(limit=max(200, int(limit) * 8))
+    if len(canonical_df) == 0:
+        return pd.DataFrame(columns=EXECUTION_COLS + ["engine", "dispatch_mode", "dispatch_status", "source_event_id", "source_log_id", "recorded_at_ts"])
+
+    event_ts = pd.to_datetime(canonical_df["event_ts"], errors="coerce", utc=True).dt.tz_convert(None)
+    normalized = pd.DataFrame(
+        {
+            "recorded_at": canonical_df["event_ts"].astype(str),
+            "execution_date": canonical_df["trade_date"].astype(str),
+            "execution_time": event_ts.dt.strftime("%H:%M:%S").fillna(""),
+            "ticker": canonical_df["ticker"].astype(str).str.strip().str.upper(),
+            "underlying_ticker": canonical_df["ticker"].astype(str).str.strip().str.upper().apply(resolve_underlying_ticker),
+            "action": canonical_df["action_type"].astype(str).str.strip().str.lower(),
+            "position_effect": canonical_df["action_type"].astype(str).apply(_position_effect_from_action),
+            "rank": pd.to_numeric(canonical_df["priority"], errors="coerce").fillna(9999).astype(int),
+            "decision_tag": "",
+            "close": pd.to_numeric(canonical_df["price_ref"], errors="coerce"),
+            "vwap": pd.to_numeric(canonical_df["price_ref"], errors="coerce"),
+            "sqzmom_color": "",
+            "sqzmom_value": float("nan"),
+            "signal_source": canonical_df["engine"].astype(str).str.strip().str.lower() + "_engine",
+            "timeframe": canonical_df["engine"].astype(str).apply(_timeframe_from_engine),
+            "reason_summary": canonical_df["reason_text"].astype(str),
+            "signal_ts": canonical_df["event_ts"].astype(str),
+            "horizon_tag": canonical_df["engine"].astype(str).apply(_horizon_from_engine),
+            "strategy_profile": canonical_df["strategy_tag"].astype(str),
+            "engine": canonical_df["engine"].astype(str).str.strip().str.lower(),
+            "dispatch_mode": canonical_df["dispatch_mode"].astype(str),
+            "dispatch_status": canonical_df["dispatch_status"].astype(str),
+            "source_event_id": canonical_df["source_event_id"].astype(str),
+            "source_log_id": canonical_df["source_log_id"].astype(str),
+        }
+    )
     for col in EXECUTION_COLS:
         if col not in normalized.columns:
             normalized[col] = ""
-    normalized["ticker"] = normalized["ticker"].astype(str).str.strip().str.upper()
-    normalized["underlying_ticker"] = normalized["underlying_ticker"].astype(str).str.strip().str.upper()
-    normalized["action"] = normalized["action"].astype(str).str.strip().str.lower()
     normalized["decision_tag"] = normalized["decision_tag"].astype(str).str.strip().str.lower()
-    normalized["rank"] = pd.to_numeric(normalized["rank"], errors="coerce").fillna(9999).astype(int)
-    normalized["recorded_at_ts"] = normalized.apply(
-        lambda row: _normalize_ts(
-            row.get("recorded_at")
-            or f"{str(row.get('execution_date', '')).strip()} {str(row.get('execution_time', '')).strip()}".strip()
-            or row.get("signal_ts")
-        ),
-        axis=1,
+    normalized["recorded_at_ts"] = normalized["recorded_at"].apply(_normalize_ts)
+    normalized = normalized[
+        (normalized["ticker"] != "")
+        & (normalized["action"].isin({"entry", "add", "reduce", "take_profit", "stop_loss", "exit"}))
+    ].copy()
+    normalized = normalized.sort_values(
+        ["recorded_at_ts", "rank", "ticker", "engine"],
+        ascending=[True, True, True, True],
+        na_position="last",
     )
-    normalized = normalized[normalized["ticker"] != ""].copy()
-    normalized = normalized.sort_values(["recorded_at_ts", "rank", "ticker"], ascending=[True, True, True], na_position="last")
-    return normalized.reset_index(drop=True)
+    return normalized.tail(max(1, int(limit))).reset_index(drop=True)
 
 
 def _window_start(mode: str, end_dt: datetime) -> datetime:
@@ -649,7 +691,14 @@ def _filter_execution_window(df: pd.DataFrame, start_dt: datetime, end_dt: datet
 
 
 def _action_priority(action: str) -> int:
-    return {"stop_loss": 0, "take_profit": 1, "add": 2, "entry": 3}.get(str(action or ""), 9)
+    return {
+        "stop_loss": 0,
+        "exit": 1,
+        "take_profit": 2,
+        "reduce": 3,
+        "add": 4,
+        "entry": 5,
+    }.get(str(action or ""), 9)
 
 
 def _derive_status_and_guidance(latest_action: str, has_conflict: bool, reversal_count: int, has_position: bool) -> tuple[str, str]:
@@ -658,12 +707,12 @@ def _derive_status_and_guidance(latest_action: str, has_conflict: bool, reversal
             return "高噪音衝突", "同檔來回翻向，開盤先看風險，不急著加碼。"
         return "高噪音衝突", "同檔來回翻向，先等方向重新乾淨再處理。"
 
-    if latest_action == "stop_loss":
+    if latest_action in {"stop_loss", "exit"}:
         if has_position:
             return "風險翻空", "你目前有持倉，開盤先驗證是否需要降風險。"
         return "風險翻空", "最新訊號已轉弱，先不要追價。"
 
-    if latest_action == "take_profit":
+    if latest_action in {"take_profit", "reduce"}:
         if has_position:
             return "獲利保守", "若部位還在，先看是否延續轉弱。"
         return "獲利保守", "這檔偏向先收斂，不適合急追。"
@@ -705,8 +754,8 @@ def _summarize_execution_window(
     tracked_tickers = set(position_map.keys()) | set(decision_map.keys())
 
     out: List[dict] = []
-    grouped = execution_df.sort_values(["recorded_at_ts", "rank", "ticker"], ascending=[True, True, True]).groupby("ticker", sort=False)
-    for ticker, group in grouped:
+    grouped = execution_df.sort_values(["recorded_at_ts", "rank", "ticker", "engine"], ascending=[True, True, True, True]).groupby(["engine", "ticker"], sort=False)
+    for (engine, ticker), group in grouped:
         if not ticker:
             continue
         if not include_all_tickers and tracked_tickers and ticker not in tracked_tickers:
@@ -718,7 +767,7 @@ def _summarize_execution_window(
         directions = [ACTION_DIRECTION.get(action, "") for action in actions if ACTION_DIRECTION.get(action, "")]
         reversal_count = sum(1 for idx in range(1, len(directions)) if directions[idx] != directions[idx - 1])
         action_set = set(actions)
-        has_conflict = reversal_count >= 1 or (bool({"entry", "add"} & action_set) and bool({"take_profit", "stop_loss"} & action_set))
+        has_conflict = reversal_count >= 1 or (bool({"entry", "add"} & action_set) and bool({"take_profit", "stop_loss", "reduce", "exit"} & action_set))
         latest = ordered.iloc[-1]
         latest_action = str(latest.get("action", "")).strip().lower()
         latest_ts = latest.get("recorded_at_ts")
@@ -745,6 +794,7 @@ def _summarize_execution_window(
         out.append(
             {
                 "ticker": ticker,
+                "engine": str(engine or "").strip().lower() or "monster",
                 "underlying_ticker": underlying_ticker,
                 "ticker_display": _ticker_label(ticker, underlying_ticker),
                 "latest_action": latest_action,
@@ -778,6 +828,7 @@ def _summarize_execution_window(
             -int(bool(item.get("has_conflict"))),
             _action_priority(str(item.get("latest_action", ""))),
             int(item.get("rank", 9999)),
+            str(item.get("engine", "")),
             -(item.get("sort_ts").value if isinstance(item.get("sort_ts"), pd.Timestamp) and not pd.isna(item.get("sort_ts")) else 0),
         )
     )
@@ -796,11 +847,11 @@ def _morning_priority_bucket(item: dict) -> int:
     has_position = bool(item.get("has_position"))
     has_conflict = bool(item.get("has_conflict"))
 
-    if has_position and latest_action in {"stop_loss", "take_profit"}:
+    if has_position and latest_action in {"stop_loss", "take_profit", "reduce", "exit"}:
         return 0
     if has_position and has_conflict:
         return 1
-    if latest_action in {"stop_loss", "take_profit"}:
+    if latest_action in {"stop_loss", "take_profit", "reduce", "exit"}:
         return 2
     if has_conflict:
         return 3
@@ -1033,6 +1084,7 @@ def _summaries_to_payload(items: List[dict], limit: int = 6) -> List[dict]:
         out.append(
             {
                 "ticker": item.get("ticker", ""),
+                "engine": item.get("engine", ""),
                 "underlying_ticker": item.get("underlying_ticker", ""),
                 "ticker_display": item.get("ticker_display", ""),
                 "latest_action": item.get("latest_action", ""),
@@ -1114,12 +1166,16 @@ def _strategy_conclusion_for_summary(item: dict) -> str:
         color = str(item.get("sqzmom_color", "")).strip().lower()
         vwap_text = "VWAP 守住" if vwap_val > 0 and close_val >= vwap_val else "VWAP 跌破"
         sqz_text = "SQZMOM 發動中" if hist_val > 0 and color in {"green", "lime"} else "SQZMOM 轉弱"
-        hold_text = "先降風險" if latest_action in {"stop_loss", "take_profit"} else "繼續持有"
+        hold_text = "先降風險" if latest_action in {"stop_loss", "take_profit", "reduce", "exit"} else "繼續持有"
         return f"{ticker_label}: {vwap_text}，{sqz_text}，{hold_text}"
     if latest_action == "stop_loss" and has_position:
         return f"{ticker}{tag}: 直接全出，這不是雜訊等級，屬於硬風控。"
+    if latest_action == "exit" and has_position:
+        return f"{ticker}{tag}: 結構失效先退出，等待下一輪訊號。"
     if latest_action == "take_profit" and has_position:
         return f"{ticker}{tag}: 先減碼 {int(round(float(INTRADAY_REDUCE_SIZE_FRACTION) * 100))}% ，主倉保留。"
+    if latest_action == "reduce" and has_position:
+        return f"{ticker}{tag}: 動能轉弱先降部位，保留主倉等待確認。"
     if latest_action == "add" and has_position:
         return f"{ticker}{tag}: 續抱為主，若首輪仍強才允許再加碼 {int(round(float(INTRADAY_ADD_SIZE_FRACTION) * 100))}% 。"
     if has_position:
@@ -1777,11 +1833,22 @@ def _build_execution_lines(execution_summaries: List[dict]) -> List[str]:
     if not execution_summaries:
         return ["- 這個時間窗沒有新的 execution 訊號。"]
     lines: List[str] = []
-    for item in execution_summaries[:5]:
+    ordered = sorted(
+        execution_summaries,
+        key=lambda item: (
+            -_summary_sort_ts_value(item),
+            str(item.get("ticker", "")),
+            str(item.get("engine", "")),
+            str(item.get("latest_action", "")),
+        ),
+    )
+    for item in ordered[:5]:
         horizon = str(item.get("horizon_tag", "")).strip()
         tag = "[S]" if horizon == HORIZON_SWING_CORE else "[M]"
+        engine = str(item.get("engine", "")).strip().lower()
+        engine_tag = "SWING" if engine == "swing" else "MONSTER"
         base = (
-            f"- {item.get('ticker', 'NA')}{tag} | {item.get('status_label', '待確認')} | 最新={item.get('latest_label', 'NA')} {item.get('latest_time', 'NA')}"
+            f"- {item.get('ticker', 'NA')}{tag}/{engine_tag} | {item.get('status_label', '待確認')} | 最新={item.get('latest_label', 'NA')} {item.get('latest_time', 'NA')}"
         )
         if bool(item.get("has_position")):
             base += f" | 持倉={float(item.get('position_qty', 0.0)):g}@{float(item.get('avg_cost', 0.0)):.2f}"

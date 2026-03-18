@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -33,7 +33,6 @@ import yfinance as yf
 from turso_state import (
     append_execution_log_rows,
     load_all_saved_watchlist_states,
-    load_recent_trade_ledger,
     sync_runtime_df,
 )
 from config import (
@@ -46,7 +45,6 @@ from config import (
     SWING_ADD_MIN_PROFIT_PCT,
     SWING_ADD_MAX_COUNT,
     SWING_PULLBACK_AVWAP_PCT,
-    SWING_PULLBACK_EMA20_PCT,
     SWING_ENABLE_NEW_ENTRY_IN_RISK_OFF,
 )
 from .intraday_indicators import calc_sqzmom_lb, calc_dynamic_swing_avwap
@@ -62,6 +60,15 @@ from .strategy_context import (
     core_list_tickers,
     detect_regime_tag,
     normalize_horizon_tag,
+)
+from .canonical_event_log import (
+    append_canonical_action_events,
+    build_source_event_id,
+    default_event_ts_and_trade_date,
+    dispatch_outcome_payload,
+    normalize_action_type,
+    now_created_at_utc,
+    update_canonical_dispatch_outcomes,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -167,6 +174,55 @@ def _send_discord(message: str) -> tuple[bool, str]:
     if not webhook_url:
         return False, "DISCORD_WEBHOOK_URL missing"
     return _http_post_json(webhook_url, {"content": message[:1900]})
+
+
+def _canonical_priority(action: str) -> int:
+    return {
+        "swing_exit": 1,
+        "swing_reduce": 2,
+        "swing_add": 3,
+        "swing_entry": 4,
+    }.get(str(action or "").strip().lower(), 9)
+
+
+def _invalidation_rule_for_swing(signal_type: str, action: str) -> str:
+    action_norm = str(action or "").strip().lower()
+    signal_norm = str(signal_type or "").strip().lower()
+    if action_norm in {"swing_exit", "swing_reduce"}:
+        return "daily_close_below_dynamic_avwap_and_negative_sqzmom"
+    if signal_norm in {SIGNAL_SWING_ENTRY, SIGNAL_SWING_ADD}:
+        return "daily_close_below_dynamic_avwap_or_sqzmom_turn_negative"
+    return "signal_invalidated"
+
+
+def _position_state_snapshot(position: Optional[pd.Series]) -> dict:
+    if position is None:
+        return {"has_position": False, "quantity": 0.0, "avg_cost": 0.0}
+    quantity = float(pd.to_numeric(position.get("quantity"), errors="coerce") or 0.0)
+    avg_cost = float(pd.to_numeric(position.get("avg_cost"), errors="coerce") or 0.0)
+    return {
+        "has_position": bool(quantity > 0),
+        "quantity": quantity,
+        "avg_cost": avg_cost,
+    }
+
+
+def _position_state_after_action(before: dict, action: str) -> dict:
+    out = dict(before or {})
+    action_norm = str(action or "").strip().lower()
+    if action_norm in {"swing_entry", "swing_add"}:
+        out["has_position"] = True
+        out["quantity"] = "planned_increase"
+        return out
+    if action_norm == "swing_reduce":
+        out["has_position"] = bool(before.get("has_position", False))
+        out["quantity"] = "planned_reduce"
+        return out
+    if action_norm == "swing_exit":
+        out["has_position"] = False
+        out["quantity"] = 0.0
+        return out
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -302,7 +358,7 @@ def _classify_swing_action(
     latest: pd.Series,
     previous: pd.Series,
     position: Optional[pd.Series],
-    meta: pd.Series,
+    _meta: pd.Series,
     regime_tag: str,
 ) -> tuple[str, float, str, str]:
     """Classify swing action. Returns (action, size_fraction, reason, signal_type)."""
@@ -410,6 +466,7 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
 
     snapshot_rows: List[dict] = []
     action_rows: List[dict] = []
+    canonical_rows: List[dict] = []
     execution_rows: List[dict] = []
     state_updates: Dict[str, str] = {}
 
@@ -486,6 +543,38 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
             "sqzmom_color": str(latest.get("sqzmom_color", "")),
             "reason_summary": reason,
         })
+        event_ts, trade_date = default_event_ts_and_trade_date(now_ts)
+        action_type = normalize_action_type(action)
+        source_event_id = build_source_event_id("swing", ticker, action_type, event_ts, signature)
+        position_before = _position_state_snapshot(position)
+        position_after = _position_state_after_action(position_before, action)
+        action_rows[-1]["source_event_id"] = source_event_id
+
+        canonical_rows.append(
+            {
+                "event_ts": event_ts,
+                "trade_date": trade_date,
+                "engine": "swing",
+                "ticker": ticker,
+                "action_type": action_type,
+                "strategy_tag": STRATEGY_SWING_TREND,
+                "reason_code": signal_type,
+                "reason_text": reason,
+                "price_ref": close_val,
+                "size_ref": float(size_fraction),
+                "risk_unit": "fraction",
+                "priority": _canonical_priority(action),
+                "dispatch_mode": "realtime" if action in {"swing_exit", "swing_reduce"} else "recap",
+                "dispatch_status": "pending_realtime" if action in {"swing_exit", "swing_reduce"} else "pending_recap",
+                "source_event_id": source_event_id,
+                "source_log_id": signature,
+                "position_state_before": json.dumps(position_before, ensure_ascii=False),
+                "position_state_after": json.dumps(position_after, ensure_ascii=False),
+                "invalidation_rule": _invalidation_rule_for_swing(signal_type, action),
+                "created_at": now_created_at_utc(),
+                "dispatch_detail": "",
+            }
+        )
         state_updates[ticker] = signature
 
         # Build execution log row
@@ -566,11 +655,21 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
         snapshot_df.to_csv(SWING_SNAPSHOT_FILE, index=False, encoding="utf-8-sig")
         sync_runtime_df(STATE_KEY_SWING_SNAPSHOT, snapshot_df, source_name="swing_engine")
 
+    # ── Count actions by type ───────────────────────────────────────────────
+    entry_count = sum(1 for r in action_rows if r.get("action") == "swing_entry")
+    add_count = sum(1 for r in action_rows if r.get("action") == "swing_add")
+    reduce_count = sum(1 for r in action_rows if r.get("action") == "swing_reduce")
+    exit_count = sum(1 for r in action_rows if r.get("action") == "swing_exit")
+
     message = ""
     discord_ok: Optional[bool] = None
     discord_detail = ""
+    discord_attempt_count = 0
+    discord_success_count = 0
 
     if action_rows and not dry_run:
+        if canonical_rows:
+            append_canonical_action_events(canonical_rows)
         _append_action_log(action_rows)
         if execution_rows:
             try:
@@ -593,7 +692,9 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
         )
         lines.append("\n提醒: Swing 建議不是自動下單。成交請用 Discord /buy /sell profile=swing 回報。")
         message = "\n".join(lines)
-        # 兩層通知：只有減碼/出場訊號立即推 Discord；進場/加碼僅記錄，由早晨 recap 整合報告
+        
+        # ── Two-tier notification ───────────────────────────────────────────
+        # Immediate: exit/reduce
         exit_rows = [r for r in action_rows if r.get("action") in {"swing_exit", "swing_reduce"}]
         if exit_rows:
             exit_lines = [f"[Alpha Finder] ⚡ Swing 風控 {now_ts}", ""]
@@ -602,15 +703,38 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
                 for r in exit_rows
             )
             exit_lines.append("\n提醒: 成交請用 Discord /sell profile=swing 回報。")
+            discord_attempt_count += 1
             discord_ok, discord_detail = _send_discord("\n".join(exit_lines))
+            if discord_ok:
+                discord_success_count += 1
+            exit_event_ids = [
+                str(r.get("source_event_id", "")).strip()
+                for r in exit_rows
+                if str(r.get("source_event_id", "")).strip()
+            ]
+            if exit_event_ids:
+                update_canonical_dispatch_outcomes(
+                    dispatch_outcome_payload(
+                        exit_event_ids,
+                        "sent_realtime" if bool(discord_ok) else "failed_realtime",
+                        str(discord_detail or ""),
+                    )
+                )
 
     return {
         "ok": True,
         "universe_count": len(universe_df),
         "snapshot_count": len(snapshot_rows),
         "action_count": len(action_rows),
-        "message": message,
+        "canonical_action_count": len(canonical_rows),
+        "entry_count": entry_count,
+        "add_count": add_count,
+        "reduce_count": reduce_count,
+        "exit_count": exit_count,
+        "discord_attempt_count": discord_attempt_count,
+        "discord_success_count": discord_success_count,
         "discord_ok": discord_ok,
         "discord_detail": discord_detail,
+        "message": message,
         "regime_tag": regime_tag,
     }

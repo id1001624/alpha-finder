@@ -35,5 +35,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run swing engine
+        id: swing_run
         run: |
-          python scripts/run_swing_core_engine.py
+          python scripts/run_swing_core_engine.py 2>&1 | tee swing_run_output.log
+          # Capture the structured JSON log from ::group::
+          # Will be available as step output for downstream processing
+
+      - name: Parse and capture swing engine metrics
+        if: always()
+        run: |
+          if [ -f swing_run_output.log ]; then
+            echo "Swing Engine Execution Complete"
+            echo "--- Execution Log ---"
+            cat swing_run_output.log
+            echo "--- End Log ---"
+          fi
+

@@ -90,6 +90,15 @@ from .trade_command_contract import (
     enrich_trade_command_fields,
 )
 from .trade_memory import get_trade_memory
+from .canonical_event_log import (
+    append_canonical_action_events,
+    build_source_event_id,
+    default_event_ts_and_trade_date,
+    dispatch_outcome_payload,
+    normalize_action_type,
+    now_created_at_utc,
+    update_canonical_dispatch_outcomes,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1110,6 +1119,57 @@ def _format_wait_line(row: dict) -> str:
     return f"- {ticker} | 待命觀察 | rank={rank} | {signal_type} | {reason}"
 
 
+def _canonical_priority(action: str) -> int:
+    return {
+        "stop_loss": 1,
+        "take_profit": 2,
+        "add": 3,
+        "entry": 4,
+    }.get(str(action or "").strip().lower(), 9)
+
+
+def _invalidation_rule_for_intraday(signal_type: str, action: str) -> str:
+    action_norm = str(action or "").strip().lower()
+    signal_norm = str(signal_type or "").strip().lower()
+    if action_norm == "stop_loss":
+        return "hard_stop_loss_or_structure_break"
+    if action_norm == "take_profit":
+        return "sqzmom_rollover_or_break_dynamic_avwap"
+    if signal_norm in {SIGNAL_ENTRY_IGNITION, SIGNAL_ENTRY_PULLBACK, SIGNAL_ADD}:
+        return "close_below_dynamic_avwap_or_sqzmom_turn_negative"
+    return "signal_invalidated"
+
+
+def _position_state_snapshot(position: Optional[pd.Series]) -> dict:
+    if position is None:
+        return {"has_position": False, "quantity": 0.0, "avg_cost": 0.0}
+    quantity = float(pd.to_numeric(position.get("quantity"), errors="coerce") or 0.0)
+    avg_cost = float(pd.to_numeric(position.get("avg_cost"), errors="coerce") or 0.0)
+    return {
+        "has_position": bool(quantity > 0),
+        "quantity": quantity,
+        "avg_cost": avg_cost,
+    }
+
+
+def _position_state_after_action(before: dict, action: str) -> dict:
+    out = dict(before or {})
+    action_norm = str(action or "").strip().lower()
+    if action_norm in {"entry", "add"}:
+        out["has_position"] = True
+        out["quantity"] = "planned_increase"
+        return out
+    if action_norm == "take_profit":
+        out["has_position"] = bool(before.get("has_position", False))
+        out["quantity"] = "planned_reduce"
+        return out
+    if action_norm == "stop_loss":
+        out["has_position"] = False
+        out["quantity"] = 0.0
+        return out
+    return out
+
+
 def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = False) -> dict:
     if not INTRADAY_ENGINE_ENABLED:
         return {"ok": False, "reason": "engine_disabled"}
@@ -1144,6 +1204,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
 
     snapshot_rows: List[dict] = []
     action_rows: List[dict] = []
+    canonical_rows: List[dict] = []
     wait_rows: List[dict] = []
     execution_rows: List[dict] = []
     state_updates: Dict[str, str] = {}
@@ -1309,6 +1370,38 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             "reason_summary": reason,
         }
         action_rows.append(action_row)
+        event_ts, trade_date = default_event_ts_and_trade_date(signal_ts)
+        action_type = normalize_action_type(action)
+        source_event_id = build_source_event_id("monster", ticker, action_type, event_ts, signature)
+        position_before = _position_state_snapshot(position)
+        position_after = _position_state_after_action(position_before, action)
+        action_row["source_event_id"] = source_event_id
+
+        canonical_rows.append(
+            {
+                "event_ts": event_ts,
+                "trade_date": trade_date,
+                "engine": "monster",
+                "ticker": ticker,
+                "action_type": action_type,
+                "strategy_tag": STRATEGY_MONSTER_SWING,
+                "reason_code": signal_type,
+                "reason_text": reason,
+                "price_ref": float(pd.to_numeric(latest.get("Close"), errors="coerce") or 0.0),
+                "size_ref": float(size_fraction),
+                "risk_unit": "fraction",
+                "priority": _canonical_priority(action),
+                "dispatch_mode": "realtime",
+                "dispatch_status": "pending_realtime",
+                "source_event_id": source_event_id,
+                "source_log_id": signature,
+                "position_state_before": json.dumps(position_before, ensure_ascii=False),
+                "position_state_after": json.dumps(position_after, ensure_ascii=False),
+                "invalidation_rule": _invalidation_rule_for_intraday(signal_type, action),
+                "created_at": now_created_at_utc(),
+                "dispatch_detail": "",
+            }
+        )
         state_updates[action_state_key] = signature
         state_updates[ticker] = signature
         if action == "entry":
@@ -1387,6 +1480,8 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         sync_runtime_df(STATE_KEY_INTRADAY_SNAPSHOT, snapshot_df, source_name="intraday_snapshot")
 
     if action_rows and not dry_run:
+        if canonical_rows:
+            append_canonical_action_events(canonical_rows)
         _append_action_log(action_rows)
         _write_execution_outputs(execution_rows)
         if execution_rows:
@@ -1446,6 +1541,36 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             entry_discord_ok, entry_discord_detail = _send_discord(entry_message)
         if exit_message:
             exit_discord_ok, exit_discord_detail = _send_discord(exit_message)
+        if action_rows:
+            outcomes: Dict[str, Dict[str, str]] = {}
+            entry_event_ids = [
+                str(row.get("source_event_id", "")).strip()
+                for row in action_rows
+                if str(row.get("action", "")).strip().lower() in {"entry", "add"}
+            ]
+            exit_event_ids = [
+                str(row.get("source_event_id", "")).strip()
+                for row in action_rows
+                if str(row.get("action", "")).strip().lower() in {"take_profit", "stop_loss"}
+            ]
+            if entry_event_ids:
+                outcomes.update(
+                    dispatch_outcome_payload(
+                        entry_event_ids,
+                        "sent_realtime" if bool(entry_discord_ok) else "failed_realtime",
+                        str(entry_discord_detail or ""),
+                    )
+                )
+            if exit_event_ids:
+                outcomes.update(
+                    dispatch_outcome_payload(
+                        exit_event_ids,
+                        "sent_realtime" if bool(exit_discord_ok) else "failed_realtime",
+                        str(exit_discord_detail or ""),
+                    )
+                )
+            if outcomes:
+                update_canonical_dispatch_outcomes(outcomes)
 
     return {
         "ok": True,
@@ -1453,6 +1578,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
         "snapshot_count": len(snapshot_rows),
         "wait_count": len(wait_rows),
         "action_count": len(action_rows),
+        "canonical_action_count": len(canonical_rows),
         "snapshot_file": str(SNAPSHOT_FILE),
         "message": message,
         "wait_message": wait_message,
