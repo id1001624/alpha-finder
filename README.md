@@ -16,6 +16,8 @@ Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動
 .\run_daily.bat
 ```
 
+補充：主產線若產出 `ai_decision_seed_YYYY-MM-DD.csv` 或 `protocol_release_preview_YYYY-MM-DD.csv`，那是 preview/fallback，不是官方最終決策。
+
 ### 2. 把這 2 個檔案丟給網頁 AI
 
 - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
@@ -26,6 +28,8 @@ Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動
 把 ai_decision_YYYY-MM-DD.csv 放進：
 
 - repo_outputs/backtest/inbox/
+
+注意：只有你從 Web AI 產出的 `ai_decision_YYYY-MM-DD.csv` 才是 official final，pipeline 產生的 preview 不可直接當 final 歸檔。
 
 ### 4. 歸檔決策
 
@@ -86,11 +90,11 @@ python .\scripts\generate_backtest_metrics.py
 你如果只想問「為什麼 bot 這樣提醒」或「這筆為什麼停損」，通常前 3 個就夠了。
 
 ## QuantMuse 狀態確認
+
 如果 ai_decision_log.csv 裡 decision_tag 全部是 rule_based，
 代表 QuantMuse 掉回 fallback，執行以下指令確認：
 sudo systemctl status alpha-finder-discord-bot --no-pager
 tail -50 /var/log/alpha-finder/discord-bot.log | grep -i "has_langchain\|quantmuse"
-
 
 ## Discord 指令
 

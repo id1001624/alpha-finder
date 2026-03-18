@@ -87,9 +87,11 @@ REQUIRED_COLUMNS = BASE_COLUMNS + CATALYST_COLUMNS + STRATEGY_COLUMNS
 VALID_DECISION_TAGS = {"keep", "watch", "replace_candidate"}
 
 
-def _find_latest_decision_csv() -> Path | None:
+def _find_latest_decision_csv(include_preview_sources: bool = False) -> Path | None:
     candidates = []
-    search_dirs = [INBOX_DIR, AI_READY_LATEST_DIR, DAILY_REFRESH_LATEST_DIR]
+    search_dirs = [INBOX_DIR]
+    if include_preview_sources:
+        search_dirs.extend([AI_READY_LATEST_DIR, DAILY_REFRESH_LATEST_DIR])
     for directory in search_dirs:
         if not directory.exists():
             continue
@@ -276,6 +278,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="歸檔 AI 決策輸出（支援自動找最新 CSV）")
     parser.add_argument("--csv-file", default="", help="ai_decision_YYYY-MM-DD.csv 路徑")
     parser.add_argument("--auto-latest", action="store_true", help="自動搜尋最新 ai_decision_*.csv")
+    parser.add_argument(
+        "--include-preview-sources",
+        action="store_true",
+        help="auto-latest 時一併搜尋 ai_ready/latest 與 daily_refresh/latest（預設只搜 inbox 正式檔）",
+    )
     parser.add_argument("--date", default="", help="可選，強制指定 decision_date（YYYY-MM-DD）")
     parser.add_argument(
         "--replace-date",
@@ -287,9 +294,12 @@ def main() -> None:
 
     csv_file = Path(args.csv_file) if args.csv_file.strip() else None
     if csv_file is None or args.auto_latest:
-        found = _find_latest_decision_csv()
+        found = _find_latest_decision_csv(include_preview_sources=bool(args.include_preview_sources))
         if found is None:
-            print("找不到可歸檔的 ai_decision_*.csv（已搜尋 inbox / ai_ready/latest / daily_refresh/latest）")
+            if args.include_preview_sources:
+                print("找不到可歸檔的 ai_decision_*.csv（已搜尋 inbox / ai_ready/latest / daily_refresh/latest）")
+            else:
+                print("找不到可歸檔的 ai_decision_*.csv（預設只搜尋 repo_outputs/backtest/inbox）")
             return
         csv_file = found
 

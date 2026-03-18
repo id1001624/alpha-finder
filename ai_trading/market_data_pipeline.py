@@ -113,9 +113,13 @@ class MarketDataPipeline:
             return pd.DataFrame(columns=['ticker'])
 
         rename_map = {
+            'value': 'xq_last',
+            'change_pct': 'xq_change_pct',
             'chg_1d_pct': 'xq_chg_1d_pct',
             'chg_3d_pct': 'xq_chg_3d_pct',
             'chg_5d_pct': 'xq_chg_5d_pct',
+            'high_5d': 'xq_high_5d',
+            'low_5d': 'xq_low_5d',
             'vol_strength': 'xq_vol_strength',
             'dollar_volume_m': 'xq_dollar_volume_m',
             'short_trade_score': 'xq_short_trade_score',
