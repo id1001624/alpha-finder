@@ -1,0 +1,74 @@
+name: Daily Production Acceptance Chain
+
+on:
+  workflow_dispatch:
+    inputs:
+      strict_gate:
+        description: "Fail workflow when canonical gate is not green"
+        required: false
+        default: "false"
+      recap_mode:
+        description: "Recap mode to run"
+        required: false
+        default: "bedtime"
+  schedule:
+    # Weekdays after swing daily scan window; runs full non-dry chain once per day.
+    - cron: '35 21 * * 1-5'
+
+concurrency:
+  group: daily-production-acceptance
+  cancel-in-progress: true
+
+jobs:
+  production-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      TURSO_ENABLED: "true"
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run daily production acceptance chain
+        run: |
+          RECAP_MODE="${{ github.event.inputs.recap_mode }}"
+          if [ -z "$RECAP_MODE" ]; then
+            RECAP_MODE="bedtime"
+          fi
+          STRICT_GATE="${{ github.event.inputs.strict_gate }}"
+          if [ "$STRICT_GATE" = "true" ]; then
+            python scripts/run_daily_production_acceptance.py --recap-mode "$RECAP_MODE" --strict-gate
+          else
+            python scripts/run_daily_production_acceptance.py --recap-mode "$RECAP_MODE"
+          fi
+
+      - name: Upload canonical acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-acceptance-${{ github.run_id }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            repo_outputs/backtest/canonical/canonical_action_event_log.csv
+            repo_outputs/backtest/canonical/notification_reconciliation_latest.json
+            repo_outputs/backtest/canonical/acceptance_gate_latest.json
+            repo_outputs/backtest/canonical/production_chain_summary_latest.json
+            repo_outputs/backtest/canonical/daily/**

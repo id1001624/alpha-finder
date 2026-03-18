@@ -259,6 +259,56 @@ profile 要怎麼選：
 - 每個美股交易日收盤後掃一次
 - 台灣時間大約是隔天 05:15
 
+## 正式驗收收尾（5 日真實 artifact）
+
+這一段是正式驗收用，不是概念測試。
+
+每天固定跑一次正式 non-dry-run 全鏈路：
+
+```powershell
+python .\scripts\run_daily_production_acceptance.py --recap-mode bedtime
+```
+
+這個指令會依序執行：
+
+- Monster（non-dry-run）
+- Swing（non-dry-run）
+- Recap（預設 bedtime）
+- Notification reconciliation
+- Canonical acceptance gate
+
+每天都會保存 artifact 到：
+
+- `repo_outputs/backtest/canonical/canonical_action_event_log.csv`
+- `repo_outputs/backtest/canonical/notification_reconciliation_latest.json`
+- `repo_outputs/backtest/canonical/acceptance_gate_latest.json`
+- `repo_outputs/backtest/canonical/production_chain_summary_latest.json`
+- `repo_outputs/backtest/canonical/daily/`（每日快照）
+
+### 累積到第 5 個真實交易日後，怎麼跑 gate
+
+先看最近是否已經累積到 5 日：
+
+```powershell
+python .\scripts\verify_canonical_chain_last5.py
+```
+
+如果顯示可用交易日已達 5，再執行正式 gate：
+
+```powershell
+python .\scripts\run_canonical_acceptance_gate.py
+```
+
+或用嚴格模式一次跑完整日鏈路（gate 不綠會直接 non-zero）：
+
+```powershell
+python .\scripts\run_daily_production_acceptance.py --recap-mode bedtime --strict-gate
+```
+
+只有當 `run_canonical_acceptance_gate.py` 回傳 `ok=true`，且 5 日真實 artifact 齊全時，才可視為正式驗收完成。
+
+在 gate 轉綠前，不可標示為 completed，也不可當作正式 release 完成。
+
 ## 你只要記住這幾句
 
 - 系統不會自動下單，只會提醒你。
