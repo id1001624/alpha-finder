@@ -687,6 +687,7 @@ def main() -> int:
     parser.add_argument("--min-days", type=int, default=20)
     parser.add_argument("--backfill-run-stamp", type=str, default="000000_backfill_rc_v1")
     parser.add_argument("--skip-backfill", action="store_true")
+    parser.add_argument("--skip-canonical-acceptance", action="store_true")
     args = parser.parse_args()
 
     if not args.skip_backfill:
@@ -767,6 +768,31 @@ def main() -> int:
             "baseline_v1_config.csv",
         ],
     }
+
+    canonical_gate_ok = None
+    canonical_gate_report = ""
+    if not bool(args.skip_canonical_acceptance):
+        gate_cmd = [sys.executable, str(PROJECT_ROOT / "scripts" / "run_canonical_acceptance_gate.py")]
+        gate_proc = subprocess.run(gate_cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        canonical_gate_ok = bool(gate_proc.returncode == 0)
+        canonical_gate_report = str(gate_proc.stdout or "")[-6000:]
+        manifest["canonical_acceptance_gate"] = {
+            "enabled": True,
+            "ok": canonical_gate_ok,
+            "report_tail": canonical_gate_report,
+        }
+        if not canonical_gate_ok:
+            (AI_TRADING_LATEST / "protocol_release_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            print("[RELEASE] canonical_acceptance_gate=failed")
+            print(canonical_gate_report)
+            return 2
+    else:
+        manifest["canonical_acceptance_gate"] = {
+            "enabled": False,
+            "ok": None,
+            "report_tail": "skipped_by_flag",
+        }
+
     (AI_TRADING_LATEST / "protocol_release_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("[RELEASE] protocol=Protocol Release Candidate v1")
@@ -778,6 +804,7 @@ def main() -> int:
     print(f"[RELEASE] materialized_rows={materialized_validation_meta.get('materialized_rows', 0)}")
     print(f"[RELEASE] bundle_updated={bundle_meta.get('bundle_updated', False)}")
     print(f"[RELEASE] bundle_sheets={bundle_meta.get('bundle_sheet_count', 0)}")
+    print(f"[RELEASE] canonical_acceptance_gate={manifest.get('canonical_acceptance_gate', {}).get('ok')}")
     return 0
 
 

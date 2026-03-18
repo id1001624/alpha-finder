@@ -345,6 +345,12 @@ def _ensure_schema(conn) -> None:
         "ALTER TABLE execution_trade_log ADD COLUMN source_confidence REAL",
         "ALTER TABLE execution_trade_log ADD COLUMN source_api_final_score REAL",
         "ALTER TABLE execution_trade_log ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN close REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN vwap REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN sqzmom_color TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN sqzmom_value REAL",
+        "ALTER TABLE execution_trade_log ADD COLUMN signal_signature TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE execution_trade_log ADD COLUMN decision_date TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE saved_watchlists ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
     ]:
         try:
@@ -691,14 +697,14 @@ def append_execution_log_rows(rows: list[dict]) -> str | None:
                 sqzmom_color,
                 sqzmom_value,
                 signal_signature
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
         conn.commit()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         _safe_rollback(conn)
-        logger.warning("append_execution_log_rows failed for %s row(s)", len(values))
+        logger.warning("append_execution_log_rows failed for %s row(s): %s", len(values), exc)
         return None
     finally:
         _safe_close(conn)
