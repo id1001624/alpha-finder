@@ -41,7 +41,7 @@ jobs:
         run: |
           python scripts/run_intraday_execution_engine.py --respect-active-window
 
-        - name: Alert on workflow failure
+      - name: Alert on workflow failure
         if: failure()
         run: |
           python - <<'PY'
