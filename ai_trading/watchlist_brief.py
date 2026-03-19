@@ -349,12 +349,52 @@ def _load_decision_df() -> pd.DataFrame:
     if len(df) == 0 or "ticker" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
-    for col in ["decision_date", "rank", "ticker", "decision_tag", "risk_level", "tech_status", "theme", "reason_summary", "catalyst_summary"]:
+    for col in [
+        "decision_date",
+        "rank",
+        "local_rank",
+        "final_rank",
+        "final_priority",
+        "trade_eligibility",
+        "ticker",
+        "decision_tag",
+        "risk_level",
+        "tech_status",
+        "theme",
+        "reason_summary",
+        "catalyst_summary",
+        "web_override_flag",
+        "web_override_reason",
+        "web_delta_score",
+    ]:
         if col not in out.columns:
             out[col] = ""
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
     out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
-    out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
+
+    local_rank = pd.to_numeric(out.get("local_rank"), errors="coerce")
+    rank = pd.to_numeric(out.get("rank"), errors="coerce")
+    final_rank = pd.to_numeric(out.get("final_rank"), errors="coerce")
+    final_priority = pd.to_numeric(out.get("final_priority"), errors="coerce")
+    out["local_rank"] = local_rank.combine_first(rank)
+    out["final_rank"] = final_rank.combine_first(final_priority).combine_first(rank).combine_first(out["local_rank"])
+    out["rank"] = out["final_rank"]
+
+    out["trade_eligibility"] = out["trade_eligibility"].astype(str).str.strip().str.lower().replace("", pd.NA)
+    out["trade_eligibility"] = out["trade_eligibility"].replace(
+        {
+            "eligible": "tradable",
+            "review_only": "downgraded",
+            "no_trade": "blocked",
+        }
+    )
+    out["trade_eligibility"] = out["trade_eligibility"].fillna(
+        out["decision_tag"].map({"keep": "tradable"}).fillna("watch_only")
+    )
+
+    out["web_override_flag"] = out["web_override_flag"].astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y", "on"})
+    out["web_delta_score"] = pd.to_numeric(out.get("web_delta_score"), errors="coerce")
+
     out = out[out["ticker"] != ""].copy()
     out = out[out["decision_tag"].isin(["keep", "watch", "replace", "trim"]) | (out["decision_tag"] == "")]
     out = out.sort_values(["rank", "ticker"], ascending=[True, True], na_position="last").reset_index(drop=True)

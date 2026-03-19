@@ -21,7 +21,7 @@ Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動
 ### 2. 把這 2 個檔案丟給網頁 AI
 
 - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
-- Alpha-Sniper-Protocol.md
+- repo_outputs/ai_ready/latest/Alpha-Sniper-Protocol.md
 
 ### 3. 把 AI 回傳的決策檔放回 repo
 

@@ -35,7 +35,7 @@ run_daily.bat
 - AI_RESEARCH_MODE='web' 是預設
 - 日常提供給網頁 AI 的固定組合：
   - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
-  - Alpha-Sniper-Protocol.md
+  - repo_outputs/ai_ready/latest/Alpha-Sniper-Protocol.md
 - 網頁 AI 最終必須輸出 ai_decision_YYYY-MM-DD.csv
 - 使用者再執行 python .\scripts\record_ai_decision.py --auto-latest
 
@@ -80,6 +80,10 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 
 - 基礎決策欄位：decision_date, rank, ticker, short_score_final, swing_score, core_score, risk_level, tech_status, theme, decision_tag, reason_summary, source_ref
 - 催化欄位：research_mode, catalyst_type, catalyst_sentiment, explosion_probability, hype_score, confidence, api_final_score, catalyst_source, catalyst_summary
+- Final 治理欄位：local_rank, local_decision_tag, trade_eligibility, candidate_origin, web_override_flag, web_override_reason, web_delta_score, execution_action, position_plan, exit_action, user_visibility
+- `research_mode` Final 輸出只允許 `bundle_only` 或 `bundle_plus_web`；舊值 `web/api` 僅允許在 ingestion 階段映射。
+- `trade_eligibility` Final 輸出只允許 `tradable/downgraded/blocked/watch_only`。
+- `execution_action` Final 輸出只允許 `BUY_SCALE_IN/BUY_AGGRESSIVE/SELL_SCALE_OUT/SELL_ALL_EXIT/NO_TRADE`，不應再輸出 `BOT_ONLY`。
 - 若使用 `decision_signals_daily.csv` 與 `overnight_catalyst_check.csv` 輔助網頁 AI，必須遵守：`final_impact` 優先於 `impact`、`decision_tag_v1` 篩選欄位名稱不可混用成 `decision_tag`。
 - `tomorrow_continuation_prob_adjusted` 的數值語意為 0-99，不可改寫成 0-1 比例。
 
@@ -154,7 +158,7 @@ ai_decision_YYYY-MM-DD.csv 是穩定契約，核心欄位包括：
 - ai_trading/swing_core_engine.py: 日線訊號核心（Dynamic AVWAP + SQZMOM + 兩層通知）
 - ai_trading/position_state.py: 持倉與成交 ledger（支援 monster_swing / swing_trend profile）
 - turso_state.py: Turso 雲端 latest state / ledger / execution history 同步與查詢
-- Alpha-Sniper-Protocol.md: 提供給網頁 AI 的決策 prompt
+- repo_outputs/ai_ready/latest/Alpha-Sniper-Protocol.md: 提供給網頁 AI 的決策 prompt
 
 ---
 

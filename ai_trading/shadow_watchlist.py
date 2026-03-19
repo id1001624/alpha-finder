@@ -24,6 +24,10 @@ AI_DECISION_LOG_CSV = BACKTEST_DIR / "ai_decision_log.csv"
 DECISION_BASE_COLUMNS = [
     "decision_date",
     "rank",
+    "local_rank",
+    "final_rank",
+    "final_priority",
+    "trade_eligibility",
     "ticker",
     "short_score_final",
     "risk_level",
@@ -57,10 +61,34 @@ def normalize_decision_df(df: pd.DataFrame) -> pd.DataFrame:
     out["decision_date"] = out["decision_date"].astype(str).str.strip()
     out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
     out["decision_tag"] = out["decision_tag"].astype(str).str.strip().str.lower()
-    out["rank"] = pd.to_numeric(out["rank"], errors="coerce")
+
+    rank = pd.to_numeric(out.get("rank"), errors="coerce")
+    local_rank = pd.to_numeric(out.get("local_rank"), errors="coerce")
+    final_rank = pd.to_numeric(out.get("final_rank"), errors="coerce")
+    final_priority = pd.to_numeric(out.get("final_priority"), errors="coerce")
+
+    out["local_rank"] = local_rank.combine_first(rank)
+    out["final_rank"] = final_rank.combine_first(final_priority).combine_first(rank).combine_first(out["local_rank"])
+    out["rank"] = out["final_rank"]
+
+    out["trade_eligibility"] = out["trade_eligibility"].astype(str).str.strip().str.lower().replace("", pd.NA)
+    out["trade_eligibility"] = out["trade_eligibility"].replace(
+        {
+            "eligible": "tradable",
+            "review_only": "downgraded",
+            "no_trade": "blocked",
+        }
+    )
+    out["trade_eligibility"] = out["trade_eligibility"].fillna(
+        out["decision_tag"].map({"keep": "tradable"}).fillna("watch_only")
+    )
+
     out["short_score_final"] = pd.to_numeric(out["short_score_final"], errors="coerce")
     out = out[(out["ticker"] != "") & out["rank"].notna()].copy()
     out["rank"] = out["rank"].astype(int)
+    out["local_rank"] = pd.to_numeric(out["local_rank"], errors="coerce").fillna(out["rank"]).astype(int)
+    out["final_rank"] = pd.to_numeric(out["final_rank"], errors="coerce").fillna(out["rank"]).astype(int)
+    out["final_priority"] = pd.to_numeric(out["final_priority"], errors="coerce").fillna(out["final_rank"]).astype(int)
     out = ensure_decision_strategy_columns(out)
     return out.reset_index(drop=True)
 
