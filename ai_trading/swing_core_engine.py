@@ -46,6 +46,10 @@ from config import (
     SWING_ADD_MAX_COUNT,
     SWING_PULLBACK_AVWAP_PCT,
     SWING_ENABLE_NEW_ENTRY_IN_RISK_OFF,
+    SWING_VOLUME_GATE_PREV_DAY_WEAK,
+    SWING_VOLUME_GATE_PREV_DAY_STRONG,
+    SWING_VOLUME_GATE_REQUIRE_FOR_ENTRY,
+    SWING_VOLUME_GATE_REQUIRE_FOR_ADD,
 )
 from .intraday_indicators import calc_sqzmom_lb, calc_dynamic_swing_avwap
 from .position_state import get_position_by_profile, load_positions
@@ -359,6 +363,7 @@ def _classify_swing_action(
     previous: pd.Series,
     position: Optional[pd.Series],
     _meta: pd.Series,
+    volume_gate: Dict[str, object],
     regime_tag: str,
 ) -> tuple[str, float, str, str]:
     """Classify swing action. Returns (action, size_fraction, reason, signal_type)."""
@@ -389,6 +394,8 @@ def _classify_swing_action(
     # ── NEW ENTRY ───────────────────────────────────────────────────────────
     if not has_position:
         if regime_tag == REGIME_RISK_OFF and not bool(SWING_ENABLE_NEW_ENTRY_IN_RISK_OFF):
+            return "", 0.0, "", ""
+        if bool(SWING_VOLUME_GATE_REQUIRE_FOR_ENTRY) and str(volume_gate.get("volume_gate_status", "")).strip().lower() != "passed":
             return "", 0.0, "", ""
 
         # Breakout entry: clear break above AVWAP + rising momentum
@@ -424,10 +431,68 @@ def _classify_swing_action(
         and hist > prev_hist
         and close_val > avwap
         and color in {"lime", "green"}
+        and (
+            (not bool(SWING_VOLUME_GATE_REQUIRE_FOR_ADD))
+            or str(volume_gate.get("volume_gate_status", "")).strip().lower() == "passed"
+        )
     ):
         return "swing_add", float(SWING_ADD_SIZE_FRACTION), _build_reason(SIGNAL_SWING_ADD), SIGNAL_SWING_ADD
 
     return "", 0.0, "", ""
+
+
+def _build_swing_volume_gate(valid_history: pd.DataFrame, meta: pd.Series) -> Dict[str, object]:
+    out: Dict[str, object] = {
+        "prev_day_relvolume": float("nan"),
+        "prev_day_volume_vs_20d": float("nan"),
+        "open_5m_relvolume": float("nan"),
+        "open_15m_relvolume": float("nan"),
+        "volume_gate_status": "blocked_missing_volume_data",
+        "volume_gate_reason": "日線量能資料不足，先不發 swing entry/add。",
+    }
+    if len(valid_history) < 2 or "Volume" not in valid_history.columns:
+        return out
+
+    history = valid_history.copy().sort_values("Datetime") if "Datetime" in valid_history.columns else valid_history.copy()
+    volumes = pd.to_numeric(history.get("Volume"), errors="coerce")
+    if len(volumes) < 2:
+        return out
+
+    prev_day_volume = float(volumes.iloc[-2]) if pd.notna(volumes.iloc[-2]) else float("nan")
+    baseline = volumes.iloc[:-1].tail(20)
+    baseline = baseline[pd.notna(baseline)]
+    avg_20d_volume = float(baseline.mean()) if len(baseline) > 0 else float("nan")
+    prev_day_vs_20d = (prev_day_volume / avg_20d_volume) if avg_20d_volume > 0 else float("nan")
+
+    meta_prev_day_rel = pd.to_numeric(meta.get("prev_day_relvolume", float("nan")), errors="coerce")
+    if pd.isna(meta_prev_day_rel) or float(meta_prev_day_rel) <= 0:
+        meta_prev_day_rel = pd.to_numeric(meta.get("rel_volume", float("nan")), errors="coerce")
+    prev_day_relvolume = float(meta_prev_day_rel) if pd.notna(meta_prev_day_rel) and float(meta_prev_day_rel) > 0 else prev_day_vs_20d
+
+    status = "passed"
+    reason = "前日量能達標，允許 swing entry/add 條件判斷。"
+    if not pd.notna(prev_day_relvolume):
+        status = "blocked_prev_day_relvolume_missing"
+        reason = "昨日相對量缺失，先不發 swing entry/add。"
+    elif float(prev_day_relvolume) < float(SWING_VOLUME_GATE_PREV_DAY_WEAK):
+        status = "blocked_prev_day_relvolume_low"
+        reason = f"昨日相對量 {float(prev_day_relvolume):.2f}x < {float(SWING_VOLUME_GATE_PREV_DAY_WEAK):.2f}x。"
+    elif float(prev_day_relvolume) < float(SWING_VOLUME_GATE_PREV_DAY_STRONG):
+        status = "blocked_prev_day_relvolume_neutral"
+        reason = (
+            f"昨日相對量 {float(prev_day_relvolume):.2f}x 介於 {float(SWING_VOLUME_GATE_PREV_DAY_WEAK):.2f}-{float(SWING_VOLUME_GATE_PREV_DAY_STRONG):.2f}x，"
+            "僅觀察不直接發 swing entry/add。"
+        )
+
+    out.update(
+        {
+            "prev_day_relvolume": float(prev_day_relvolume) if pd.notna(prev_day_relvolume) else float("nan"),
+            "prev_day_volume_vs_20d": float(prev_day_vs_20d) if pd.notna(prev_day_vs_20d) else float("nan"),
+            "volume_gate_status": status,
+            "volume_gate_reason": reason,
+        }
+    )
+    return out
 
 
 def _format_action_line(ticker: str, action: str, size_fraction: float, signal_type: str, reason: str) -> str:
@@ -491,9 +556,10 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
             horizon_tag=HORIZON_SWING_CORE,
             strategy_profile=STRATEGY_SWING_TREND,
         )
+        volume_gate = _build_swing_volume_gate(valid, meta)
 
         action, size_fraction, reason, signal_type = _classify_swing_action(
-            latest, previous, position, meta, regime_tag,
+            latest, previous, position, meta, volume_gate, regime_tag,
         )
 
         close_val = _safe_float(latest.get("Close"))
@@ -522,6 +588,12 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
             "signal_type": signal_type,
             "size_fraction": size_fraction,
             "reason_summary": reason,
+            "prev_day_relvolume": pd.to_numeric(volume_gate.get("prev_day_relvolume"), errors="coerce"),
+            "prev_day_volume_vs_20d": pd.to_numeric(volume_gate.get("prev_day_volume_vs_20d"), errors="coerce"),
+            "open_5m_relvolume": pd.to_numeric(volume_gate.get("open_5m_relvolume"), errors="coerce"),
+            "open_15m_relvolume": pd.to_numeric(volume_gate.get("open_15m_relvolume"), errors="coerce"),
+            "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+            "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
         })
 
         if not action:
@@ -542,6 +614,12 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
             "sqzmom_hist": hist,
             "sqzmom_color": str(latest.get("sqzmom_color", "")),
             "reason_summary": reason,
+            "prev_day_relvolume": pd.to_numeric(volume_gate.get("prev_day_relvolume"), errors="coerce"),
+            "prev_day_volume_vs_20d": pd.to_numeric(volume_gate.get("prev_day_volume_vs_20d"), errors="coerce"),
+            "open_5m_relvolume": pd.to_numeric(volume_gate.get("open_5m_relvolume"), errors="coerce"),
+            "open_15m_relvolume": pd.to_numeric(volume_gate.get("open_15m_relvolume"), errors="coerce"),
+            "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+            "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
         })
         event_ts, trade_date = default_event_ts_and_trade_date(now_ts)
         action_type = normalize_action_type(action)
@@ -573,6 +651,12 @@ def run_swing_core_engine(dry_run: bool = False) -> dict:
                 "invalidation_rule": _invalidation_rule_for_swing(signal_type, action),
                 "created_at": now_created_at_utc(),
                 "dispatch_detail": "",
+                "prev_day_relvolume": float(pd.to_numeric(volume_gate.get("prev_day_relvolume"), errors="coerce")) if pd.notna(pd.to_numeric(volume_gate.get("prev_day_relvolume"), errors="coerce")) else float("nan"),
+                "prev_day_volume_vs_20d": float(pd.to_numeric(volume_gate.get("prev_day_volume_vs_20d"), errors="coerce")) if pd.notna(pd.to_numeric(volume_gate.get("prev_day_volume_vs_20d"), errors="coerce")) else float("nan"),
+                "open_5m_relvolume": float(pd.to_numeric(volume_gate.get("open_5m_relvolume"), errors="coerce")) if pd.notna(pd.to_numeric(volume_gate.get("open_5m_relvolume"), errors="coerce")) else float("nan"),
+                "open_15m_relvolume": float(pd.to_numeric(volume_gate.get("open_15m_relvolume"), errors="coerce")) if pd.notna(pd.to_numeric(volume_gate.get("open_15m_relvolume"), errors="coerce")) else float("nan"),
+                "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+                "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
             }
         )
         state_updates[ticker] = signature

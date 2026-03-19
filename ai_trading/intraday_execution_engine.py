@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,13 @@ from config import (
     INTRADAY_REDUCE_SIZE_FRACTION,
     INTRADAY_TAKE_PROFIT_PCT,
     INTRADAY_TOP_N,
+    INTRADAY_VOLUME_GATE_MIN_BASELINE_DAYS,
+    INTRADAY_VOLUME_GATE_OPEN_5M_MIN,
+    INTRADAY_VOLUME_GATE_OPEN_15M_MIN,
+    INTRADAY_VOLUME_GATE_PREV_DAY_STRONG,
+    INTRADAY_VOLUME_GATE_PREV_DAY_WEAK,
+    INTRADAY_VOLUME_GATE_REQUIRE_FOR_ADD,
+    INTRADAY_VOLUME_GATE_REQUIRE_FOR_ENTRY,
     PORTFOLIO_DAILY_MAX_STRATEGY_LOSS,
     PORTFOLIO_DAILY_MAX_TOTAL_LOSS,
     PORTFOLIO_MAX_NEW_ENTRIES_PER_STRATEGY,
@@ -957,11 +965,158 @@ def _is_pullback_entry(
     return bool(hist >= prev_hist or color in {"maroon", "green", "lime"})
 
 
+def _float_or_nan(value: object) -> float:
+    parsed = pd.to_numeric(value, errors="coerce")
+    return float(parsed) if pd.notna(parsed) else float("nan")
+
+
+def _estimate_bar_minutes(df: pd.DataFrame) -> float:
+    if len(df) < 2 or "Datetime" not in df.columns:
+        return 5.0
+    ordered = df.sort_values("Datetime").copy()
+    deltas = ordered["Datetime"].diff().dt.total_seconds().dropna()
+    deltas = deltas[deltas > 0]
+    if len(deltas) == 0:
+        return 5.0
+    minutes = float(deltas.median() / 60.0)
+    return minutes if minutes > 0 else 5.0
+
+
+def _sum_open_window_volume(day_df: pd.DataFrame, bars_count: int) -> float:
+    if len(day_df) == 0:
+        return float("nan")
+    volume = pd.to_numeric(day_df["Volume"], errors="coerce").fillna(0.0)
+    if len(volume) == 0:
+        return float("nan")
+    return float(volume.head(max(1, int(bars_count))).sum())
+
+
+def _build_intraday_volume_gate(valid_history: pd.DataFrame, meta: pd.Series) -> Dict[str, object]:
+    out: Dict[str, object] = {
+        "prev_day_relvolume": float("nan"),
+        "prev_day_volume_vs_20d": float("nan"),
+        "open_5m_relvolume": float("nan"),
+        "open_15m_relvolume": float("nan"),
+        "volume_gate_status": "blocked_missing_volume_data",
+        "volume_gate_reason": "分鐘量能資料不足，先不做突破買入。",
+    }
+
+    if len(valid_history) == 0 or "Datetime" not in valid_history.columns or "Volume" not in valid_history.columns:
+        return out
+
+    history = valid_history.copy()
+    history["Datetime"] = pd.to_datetime(history["Datetime"], errors="coerce", utc=True)
+    history = history.dropna(subset=["Datetime"]).copy()
+    if len(history) == 0:
+        return out
+
+    history["Volume"] = pd.to_numeric(history["Volume"], errors="coerce").fillna(0.0)
+    history["trade_date"] = history["Datetime"].dt.strftime("%Y-%m-%d")
+    current_trade_date = str(history.iloc[-1].get("trade_date", "")).strip()
+    if not current_trade_date:
+        return out
+
+    by_day = history.groupby("trade_date", dropna=False)["Volume"].sum()
+    previous_dates = sorted([str(d) for d in by_day.index if str(d) and str(d) != current_trade_date])
+    if previous_dates:
+        prev_day = previous_dates[-1]
+        prev_day_volume = float(by_day.get(prev_day, float("nan")))
+    else:
+        prev_day_volume = float("nan")
+
+    baseline_dates = previous_dates[-20:]
+    baseline_daily = by_day[by_day.index.isin(baseline_dates)] if baseline_dates else pd.Series(dtype=float)
+    avg_20d_volume = float(baseline_daily.mean()) if len(baseline_daily) > 0 else float("nan")
+    prev_day_vs_20d = (prev_day_volume / avg_20d_volume) if avg_20d_volume > 0 else float("nan")
+
+    meta_prev_day_rel = _float_or_nan(meta.get("prev_day_relvolume", float("nan")))
+    if not pd.notna(meta_prev_day_rel) or meta_prev_day_rel <= 0:
+        meta_prev_day_rel = _float_or_nan(meta.get("rel_volume", float("nan")))
+    prev_day_relvolume = meta_prev_day_rel if pd.notna(meta_prev_day_rel) and meta_prev_day_rel > 0 else prev_day_vs_20d
+
+    current_day_df = history[history["trade_date"] == current_trade_date].sort_values("Datetime").copy()
+    prev_days_df = history[history["trade_date"].isin(previous_dates)].copy()
+    bar_minutes = _estimate_bar_minutes(current_day_df if len(current_day_df) > 1 else history)
+    bars_5m = max(1, int(math.ceil(5.0 / max(bar_minutes, 0.5))))
+    bars_15m = max(1, int(math.ceil(15.0 / max(bar_minutes, 0.5))))
+
+    open_5m_volume = _sum_open_window_volume(current_day_df, bars_5m)
+    open_15m_volume = _sum_open_window_volume(current_day_df, bars_15m)
+
+    baseline_open_5m: List[float] = []
+    baseline_open_15m: List[float] = []
+    for trade_date in previous_dates:
+        day_df = prev_days_df[prev_days_df["trade_date"] == trade_date].sort_values("Datetime")
+        if len(day_df) == 0:
+            continue
+        v5 = _sum_open_window_volume(day_df, bars_5m)
+        v15 = _sum_open_window_volume(day_df, bars_15m)
+        if pd.notna(v5) and v5 > 0:
+            baseline_open_5m.append(float(v5))
+        if pd.notna(v15) and v15 > 0:
+            baseline_open_15m.append(float(v15))
+
+    base_open_5m = float(pd.Series(baseline_open_5m).mean()) if baseline_open_5m else float("nan")
+    base_open_15m = float(pd.Series(baseline_open_15m).mean()) if baseline_open_15m else float("nan")
+    open_5m_rel = (open_5m_volume / base_open_5m) if base_open_5m > 0 else float("nan")
+    open_15m_rel = (open_15m_volume / base_open_15m) if base_open_15m > 0 else float("nan")
+
+    status = "passed"
+    reason = "前日與開盤量能追認通過，可進一步驗證價量同步。"
+    if not pd.notna(prev_day_relvolume):
+        status = "blocked_prev_day_relvolume_missing"
+        reason = "昨日相對量缺失，先不發 entry/add。"
+    elif float(prev_day_relvolume) < float(INTRADAY_VOLUME_GATE_PREV_DAY_WEAK):
+        status = "blocked_prev_day_relvolume_low"
+        reason = f"昨日相對量 {float(prev_day_relvolume):.2f}x < {float(INTRADAY_VOLUME_GATE_PREV_DAY_WEAK):.2f}x。"
+    elif float(prev_day_relvolume) < float(INTRADAY_VOLUME_GATE_PREV_DAY_STRONG):
+        status = "blocked_prev_day_relvolume_neutral"
+        reason = (
+            f"昨日相對量 {float(prev_day_relvolume):.2f}x 介於 {float(INTRADAY_VOLUME_GATE_PREV_DAY_WEAK):.2f}-{float(INTRADAY_VOLUME_GATE_PREV_DAY_STRONG):.2f}x，"
+            "僅觀察不直接發 breakout 買點。"
+        )
+    elif len(previous_dates) < max(1, int(INTRADAY_VOLUME_GATE_MIN_BASELINE_DAYS)):
+        status = "blocked_opening_relvolume_baseline_insufficient"
+        reason = "開盤量能基準日不足，先不發 entry/add。"
+    elif not pd.notna(open_5m_rel) or not pd.notna(open_15m_rel):
+        status = "blocked_opening_relvolume_missing"
+        reason = "開盤 5m/15m 相對量不足，先不發 entry/add。"
+    elif float(open_5m_rel) < float(INTRADAY_VOLUME_GATE_OPEN_5M_MIN) or float(open_15m_rel) < float(INTRADAY_VOLUME_GATE_OPEN_15M_MIN):
+        status = "blocked_opening_relvolume_weak"
+        reason = (
+            f"開盤量追認不足（5m={float(open_5m_rel):.2f}x, 15m={float(open_15m_rel):.2f}x），"
+            "先維持 watch。"
+        )
+
+    out.update(
+        {
+            "prev_day_relvolume": float(prev_day_relvolume) if pd.notna(prev_day_relvolume) else float("nan"),
+            "prev_day_volume_vs_20d": float(prev_day_vs_20d) if pd.notna(prev_day_vs_20d) else float("nan"),
+            "open_5m_relvolume": float(open_5m_rel) if pd.notna(open_5m_rel) else float("nan"),
+            "open_15m_relvolume": float(open_15m_rel) if pd.notna(open_15m_rel) else float("nan"),
+            "volume_gate_status": status,
+            "volume_gate_reason": reason,
+        }
+    )
+    return out
+
+
+def _volume_gate_allows_action(volume_gate: Dict[str, object], action: str) -> bool:
+    status = str((volume_gate or {}).get("volume_gate_status", "")).strip().lower()
+    action_norm = str(action or "").strip().lower()
+    if action_norm == "entry" and bool(INTRADAY_VOLUME_GATE_REQUIRE_FOR_ENTRY):
+        return status == "passed"
+    if action_norm == "add" and bool(INTRADAY_VOLUME_GATE_REQUIRE_FOR_ADD):
+        return status == "passed"
+    return True
+
+
 def _classify_action(
     latest: pd.Series,
     previous: pd.Series,
     position: Optional[pd.Series],
     meta: pd.Series,
+    volume_gate: Dict[str, object],
     session_context: Dict[str, object],
     trade_df: pd.DataFrame,
     positions_df: pd.DataFrame,
@@ -1002,6 +1157,9 @@ def _classify_action(
         ):
             return "", 0.0, "", ""
         if _portfolio_blocks_new_entry(meta, trade_df, positions_df, regime_tag, planned_entry_count, new_entries_today):
+            return "", 0.0, "", ""
+
+        if not _volume_gate_allows_action(volume_gate, "entry"):
             return "", 0.0, "", ""
 
         if _is_ignition_entry(close_val, avwap, hist, prev_hist, sqz_release, color):
@@ -1057,6 +1215,7 @@ def _classify_action(
         and hist > 0
         and hist > prev_hist
         and color in {"lime", "green"}
+        and _volume_gate_allows_action(volume_gate, "add")
     ):
         return "add", INTRADAY_ADD_SIZE_FRACTION, _merge_reason_with_hint(_build_reason(SIGNAL_ADD), memory_hint), SIGNAL_ADD
 
@@ -1232,6 +1391,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             context=memory_context,
             top_k=3,
         )
+        volume_gate = _build_intraday_volume_gate(valid, meta)
         position_mark_price = float(pd.to_numeric(latest.get("Close"), errors="coerce") or 0.0)
         if underlying_ticker != ticker and position is not None and float(position.get("quantity", 0.0)) > 0:
             mapped_close = _latest_close_for_ticker(ticker, INTRADAY_PERIOD, INTRADAY_INTERVAL, INTRADAY_PREPOST)
@@ -1242,6 +1402,7 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             previous,
             position,
             meta,
+            volume_gate,
             session_context,
             session_trade_df,
             positions_df,
@@ -1270,6 +1431,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             "contract_user_visibility": str(meta.get("user_visibility", "")),
             "contract_preferred_entry_type": str(meta.get("preferred_entry_type", "")),
             "contract_execution_window": str(meta.get("execution_window", "")),
+            "prev_day_relvolume": _float_or_nan(volume_gate.get("prev_day_relvolume")),
+            "prev_day_volume_vs_20d": _float_or_nan(volume_gate.get("prev_day_volume_vs_20d")),
+            "open_5m_relvolume": _float_or_nan(volume_gate.get("open_5m_relvolume")),
+            "open_15m_relvolume": _float_or_nan(volume_gate.get("open_15m_relvolume")),
+            "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+            "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
         }
 
         snapshot_rows.append(
@@ -1305,6 +1472,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                 "user_visibility": str(meta.get("user_visibility", "")),
                 "preferred_entry_type": str(meta.get("preferred_entry_type", "")),
                 "execution_window": str(meta.get("execution_window", "")),
+                "prev_day_relvolume": _float_or_nan(volume_gate.get("prev_day_relvolume")),
+                "prev_day_volume_vs_20d": _float_or_nan(volume_gate.get("prev_day_volume_vs_20d")),
+                "open_5m_relvolume": _float_or_nan(volume_gate.get("open_5m_relvolume")),
+                "open_15m_relvolume": _float_or_nan(volume_gate.get("open_15m_relvolume")),
+                "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+                "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
             }
         )
 
@@ -1330,7 +1503,11 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                             "ticker": ticker,
                             "rank": int(pd.to_numeric(meta.get("rank"), errors="coerce") or 0),
                             "signal_type": preferred_entry_type,
-                            "reason_summary": "回踩條件尚未成立，先待命，暫不買入。",
+                            "reason_summary": (
+                                str(volume_gate.get("volume_gate_reason", "")).strip()
+                                if str(volume_gate.get("volume_gate_status", "")).strip().lower() != "passed"
+                                else "回踩條件尚未成立，先待命，暫不買入。"
+                            ),
                             "signal_ts": str(signal_ts),
                             "source_contract": str(meta.get("source_contract", "")),
                         }
@@ -1368,6 +1545,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
             "sqzmom_hist": pd.to_numeric(latest.get("sqzmom_hist"), errors="coerce"),
             "signal_ts": signal_ts,
             "reason_summary": reason,
+            "prev_day_relvolume": _float_or_nan(volume_gate.get("prev_day_relvolume")),
+            "prev_day_volume_vs_20d": _float_or_nan(volume_gate.get("prev_day_volume_vs_20d")),
+            "open_5m_relvolume": _float_or_nan(volume_gate.get("open_5m_relvolume")),
+            "open_15m_relvolume": _float_or_nan(volume_gate.get("open_15m_relvolume")),
+            "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+            "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
         }
         action_rows.append(action_row)
         event_ts, trade_date = default_event_ts_and_trade_date(signal_ts)
@@ -1400,6 +1583,12 @@ def run_intraday_execution_engine(top_n: int | None = None, dry_run: bool = Fals
                 "invalidation_rule": _invalidation_rule_for_intraday(signal_type, action),
                 "created_at": now_created_at_utc(),
                 "dispatch_detail": "",
+                "prev_day_relvolume": _float_or_nan(volume_gate.get("prev_day_relvolume")),
+                "prev_day_volume_vs_20d": _float_or_nan(volume_gate.get("prev_day_volume_vs_20d")),
+                "open_5m_relvolume": _float_or_nan(volume_gate.get("open_5m_relvolume")),
+                "open_15m_relvolume": _float_or_nan(volume_gate.get("open_15m_relvolume")),
+                "volume_gate_status": str(volume_gate.get("volume_gate_status", "")),
+                "volume_gate_reason": str(volume_gate.get("volume_gate_reason", "")),
             }
         )
         state_updates[action_state_key] = signature

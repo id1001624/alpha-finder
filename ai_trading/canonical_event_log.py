@@ -36,6 +36,12 @@ CANONICAL_ACTION_EVENT_COLUMNS = [
     "invalidation_rule",
     "created_at",
     "dispatch_detail",
+    "prev_day_relvolume",
+    "prev_day_volume_vs_20d",
+    "open_5m_relvolume",
+    "open_15m_relvolume",
+    "volume_gate_status",
+    "volume_gate_reason",
 ]
 
 
@@ -81,10 +87,39 @@ def ensure_canonical_schema(df: pd.DataFrame) -> pd.DataFrame:
     return out[CANONICAL_ACTION_EVENT_COLUMNS]
 
 
+def _read_canonical_csv_raw() -> pd.DataFrame:
+    try:
+        return pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE)
+    except pd.errors.ParserError:
+        return pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE, encoding="utf-8-sig", engine="python", on_bad_lines="skip")
+
+
+def ensure_canonical_storage_schema() -> bool:
+    """Migrate existing canonical file to the latest schema in-place when needed."""
+    if not CANONICAL_ACTION_EVENT_LOG_FILE.exists():
+        return False
+
+    try:
+        raw = _read_canonical_csv_raw()
+    except (OSError, ValueError, pd.errors.EmptyDataError):
+        return False
+
+    existing_cols = [str(c) for c in raw.columns.tolist()]
+    if existing_cols == CANONICAL_ACTION_EVENT_COLUMNS:
+        return False
+
+    migrated = ensure_canonical_schema(raw)
+    migrated.to_csv(CANONICAL_ACTION_EVENT_LOG_FILE, index=False, encoding="utf-8-sig")
+    return True
+
+
 def append_canonical_action_events(rows: List[dict]) -> None:
     if not rows:
         return
     CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_canonical_storage_schema()
     new_df = ensure_canonical_schema(pd.DataFrame(rows))
     exists = CANONICAL_ACTION_EVENT_LOG_FILE.exists()
     new_df.to_csv(
@@ -99,8 +134,9 @@ def append_canonical_action_events(rows: List[dict]) -> None:
 def load_canonical_action_events(limit: int | None = None) -> pd.DataFrame:
     if not CANONICAL_ACTION_EVENT_LOG_FILE.exists():
         return pd.DataFrame(columns=CANONICAL_ACTION_EVENT_COLUMNS)
+    ensure_canonical_storage_schema()
     try:
-        out = pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE, encoding="utf-8-sig")
+        out = _read_canonical_csv_raw()
     except UnicodeDecodeError:
         out = pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE)
     except (OSError, ValueError, pd.errors.EmptyDataError):
@@ -122,8 +158,9 @@ def load_canonical_action_events(limit: int | None = None) -> pd.DataFrame:
 def update_canonical_dispatch_outcomes(outcomes: Dict[str, Dict[str, str]]) -> int:
     if not outcomes or not CANONICAL_ACTION_EVENT_LOG_FILE.exists():
         return 0
+    ensure_canonical_storage_schema()
     try:
-        out = pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE, encoding="utf-8-sig")
+        out = _read_canonical_csv_raw()
     except UnicodeDecodeError:
         out = pd.read_csv(CANONICAL_ACTION_EVENT_LOG_FILE)
     except (OSError, ValueError, pd.errors.EmptyDataError):

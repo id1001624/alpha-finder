@@ -1446,6 +1446,77 @@ def _refresh_unified_ai_ready_bundle(
     }
 
 
+def _sync_volume_gate_columns_for_bundle(
+    dataset: pd.DataFrame,
+    decision_signals: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Keep bundle-facing core sheets schema-stable for volume gate verification."""
+    if dataset is None:
+        dataset = pd.DataFrame()
+    if decision_signals is None:
+        decision_signals = pd.DataFrame()
+
+    ds = dataset.copy()
+    if len(ds) > 0:
+        def _numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
+            if col in df.columns:
+                return pd.to_numeric(df[col], errors='coerce')
+            return pd.Series(float('nan'), index=df.index, dtype=float)
+
+        def _text_col(df: pd.DataFrame, col: str) -> pd.Series:
+            if col in df.columns:
+                return df[col].astype(str).str.strip()
+            return pd.Series('', index=df.index, dtype='object')
+
+        prev_day = _numeric_col(ds, 'prev_day_relvolume')
+        rel_volume = _numeric_col(ds, 'rel_volume')
+        prev_day = prev_day.combine_first(rel_volume)
+
+        open_5m = _numeric_col(ds, 'open_5m_relvolume')
+        open_15m = _numeric_col(ds, 'open_15m_relvolume')
+
+        weak = float(getattr(app_config, 'INTRADAY_VOLUME_GATE_PREV_DAY_WEAK', 1.2))
+        strong = float(getattr(app_config, 'INTRADAY_VOLUME_GATE_PREV_DAY_STRONG', 1.8))
+
+        derived_status = pd.Series('not_available', index=ds.index, dtype='object')
+        derived_status = derived_status.mask(prev_day.notna() & (prev_day < weak), 'blocked_prev_day_relvolume_low')
+        derived_status = derived_status.mask(prev_day.notna() & (prev_day >= weak) & (prev_day < strong), 'blocked_prev_day_relvolume_neutral')
+        derived_status = derived_status.mask(prev_day.notna() & (prev_day >= strong), 'passed_prev_day_pending_opening')
+
+        existing_status = _text_col(ds, 'volume_gate_status')
+        ds['prev_day_relvolume'] = prev_day
+        ds['open_5m_relvolume'] = open_5m
+        ds['open_15m_relvolume'] = open_15m
+        ds['volume_gate_status'] = existing_status.where(existing_status != '', derived_status)
+
+    decisions = decision_signals.copy()
+    if len(decisions) > 0 and len(ds) > 0 and 'ticker' in decisions.columns and 'ticker' in ds.columns:
+        gate_cols = ['ticker', 'prev_day_relvolume', 'open_5m_relvolume', 'open_15m_relvolume', 'volume_gate_status']
+        gate_map = ds[gate_cols].drop_duplicates(subset=['ticker'], keep='first').copy()
+
+        merged = decisions.merge(gate_map, on='ticker', how='left', suffixes=('', '_gate'))
+        for col in ['prev_day_relvolume', 'open_5m_relvolume', 'open_15m_relvolume', 'volume_gate_status']:
+            gate_col = f'{col}_gate'
+            if col in merged.columns:
+                if col == 'volume_gate_status':
+                    base = merged[col].astype(str).str.strip()
+                    incoming = merged[gate_col].astype(str).str.strip() if gate_col in merged.columns else pd.Series('', index=merged.index)
+                    merged[col] = base.where(base != '', incoming)
+                else:
+                    base = pd.to_numeric(merged[col], errors='coerce')
+                    incoming = pd.to_numeric(merged[gate_col], errors='coerce') if gate_col in merged.columns else pd.Series(float('nan'), index=merged.index)
+                    merged[col] = base.combine_first(incoming)
+            elif gate_col in merged.columns:
+                merged[col] = merged[gate_col]
+
+            if gate_col in merged.columns:
+                merged = merged.drop(columns=[gate_col])
+
+        decisions = merged
+
+    return ds, decisions
+
+
 def refresh_unified_ai_ready_bundle(
     scan_date: str,
     ai_ready_latest_dir: Path,
@@ -1537,6 +1608,10 @@ def main() -> int:
     )
     artifacts.dataset, artifacts.decision_signals, decision_meta = apply_decision_risk_layer(
         dataset=artifacts.dataset,
+    )
+    artifacts.dataset, artifacts.decision_signals = _sync_volume_gate_columns_for_bundle(
+        dataset=artifacts.dataset,
+        decision_signals=artifacts.decision_signals,
     )
 
     rank_sort_col = 'rank_score_v2_adjusted' if 'rank_score_v2_adjusted' in artifacts.dataset.columns else 'rank_score_v1'

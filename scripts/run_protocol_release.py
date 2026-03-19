@@ -262,9 +262,119 @@ def _infer_preferred_entry_type(tech_status: str) -> str:
     return "unknown"
 
 
+def _normalize_status_token(raw: object) -> str:
+    text = _clean_text(raw, "").lower().replace(" ", "_").replace("-", "_")
+    if text in {"", "nan", "none", "null", "na", "n/a", "unknown"}:
+        return ""
+    return text
+
+
+def _pick_text(*values: object, default: str = "") -> str:
+    for value in values:
+        text = _clean_text(value, "")
+        if text:
+            return text
+    return default
+
+
+def _pick_float(*values: object, default: float = float("nan")) -> float:
+    for value in values:
+        parsed = pd.to_numeric(value, errors="coerce")
+        if pd.notna(parsed):
+            return float(parsed)
+    return float(default)
+
+
+def _build_ticker_row_lookup(df: pd.DataFrame) -> Dict[str, pd.Series]:
+    if len(df) == 0 or "ticker" not in df.columns:
+        return {}
+
+    ranked = df.copy()
+    sort_cols = [c for c in ["decision_rank_after_gate", "rank_engine_rank", "rank"] if c in ranked.columns]
+    if sort_cols:
+        for col in sort_cols:
+            ranked[col] = pd.to_numeric(ranked.get(col), errors="coerce").fillna(9999)
+        ranked = ranked.sort_values(sort_cols, ascending=[True] * len(sort_cols))
+
+    lookup: Dict[str, pd.Series] = {}
+    for _, row in ranked.iterrows():
+        ticker = _clean_text(row.get("ticker"), "").upper()
+        if ticker and ticker not in lookup:
+            lookup[ticker] = row
+    return lookup
+
+
+def _derive_vwap_status(explicit_status: object, tech_status: str, gate_reason: str) -> str:
+    explicit = _normalize_status_token(explicit_status)
+    if explicit:
+        return explicit
+
+    gate = _clean_text(gate_reason, "").lower()
+    tech = _clean_text(tech_status, "").lower().replace("_", "")
+    if "avwap" in gate or "vwap" in gate:
+        return "misaligned"
+    if tech in {"ignitionready", "pullbackwatch"} or "pullback" in tech or "breakout" in tech or "ready" in tech:
+        return "aligned"
+    if tech in {"avoidchase", "notrade"}:
+        return "caution"
+    return "pending_confirmation"
+
+
+def _derive_sqzmom_status(explicit_status: object, tech_status: str, gate_reason: str) -> str:
+    explicit = _normalize_status_token(explicit_status)
+    if explicit:
+        return explicit
+
+    gate = _clean_text(gate_reason, "").lower()
+    tech = _clean_text(tech_status, "").lower().replace("_", "")
+    if "sqzmom" in gate or "momentum" in gate:
+        return "weakening"
+    if tech in {"ignitionready", "pullbackwatch"} or "pullback" in tech or "breakout" in tech or "ready" in tech:
+        return "aligned"
+    if tech in {"avoidchase", "notrade"}:
+        return "caution"
+    return "pending_confirmation"
+
+
+def _derive_volume_status(
+    explicit_status: object,
+    prev_day_relvolume: float,
+    open_5m_relvolume: float,
+    open_15m_relvolume: float,
+    gate_reason: str,
+) -> str:
+    explicit = _normalize_status_token(explicit_status)
+    if explicit:
+        return explicit
+
+    weak_threshold = float(getattr(app_config, "INTRADAY_VOLUME_GATE_PREV_DAY_WEAK", 1.2))
+    strong_threshold = float(getattr(app_config, "INTRADAY_VOLUME_GATE_PREV_DAY_STRONG", 1.8))
+    open_5m_threshold = float(getattr(app_config, "INTRADAY_VOLUME_GATE_OPEN_5M_MIN", 1.2))
+    open_15m_threshold = float(getattr(app_config, "INTRADAY_VOLUME_GATE_OPEN_15M_MIN", 1.2))
+
+    if pd.notna(prev_day_relvolume):
+        if float(prev_day_relvolume) < weak_threshold:
+            return "blocked_prev_day_relvolume_low"
+        if float(prev_day_relvolume) < strong_threshold:
+            return "blocked_prev_day_relvolume_neutral"
+        if pd.notna(open_5m_relvolume) and pd.notna(open_15m_relvolume):
+            if float(open_5m_relvolume) < open_5m_threshold or float(open_15m_relvolume) < open_15m_threshold:
+                return "blocked_opening_relvolume_weak"
+            return "passed"
+        return "passed_prev_day_pending_opening"
+
+    gate = _clean_text(gate_reason, "").lower()
+    if "volume" in gate or "relvol" in gate:
+        return "blocked_volume_signal"
+    return "not_available"
+
+
 def _build_ai_decision_contract_materialized(scan_date: str) -> Dict[str, object]:
     latest_path = AI_TRADING_LATEST / "ai_decision_latest.csv"
     latest_df = _read_csv_fallback(latest_path)
+    decision_lookup = _build_ticker_row_lookup(_read_csv_fallback(AI_TRADING_LATEST / "decision_signals_daily.csv"))
+    market_lookup = _build_ticker_row_lookup(_read_csv_fallback(AI_TRADING_LATEST / "market_dataset_daily.csv"))
+    feature_lookup = _build_ticker_row_lookup(_read_csv_fallback(AI_TRADING_LATEST / "feature_signals_daily.csv"))
 
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = []
@@ -272,6 +382,10 @@ def _build_ai_decision_contract_materialized(scan_date: str) -> Dict[str, object
         ticker = _clean_text(row.get("ticker"), "").upper()
         if not ticker:
             continue
+
+        decision_row = decision_lookup.get(ticker)
+        market_row = market_lookup.get(ticker)
+        feature_row = feature_lookup.get(ticker)
 
         raw_mode = _clean_text(row.get("selection_mode"), "continuation")
         decision_mode = {
@@ -281,11 +395,87 @@ def _build_ai_decision_contract_materialized(scan_date: str) -> Dict[str, object
         decision_status = "keep" if _clean_text(row.get("decision_tag"), "watch").lower() == "keep" else "watch"
 
         tech_status = _clean_text(row.get("tech_status", row.get("tomorrow_entry_readiness", "")), "")
-        gate_reason = _clean_text(row.get("protocol_gate_reason"), "")
-        invalidation_rule = _clean_text(row.get("invalidation_rule"), "")
+        gate_reason = _pick_text(
+            row.get("protocol_gate_reason"),
+            decision_row.get("protocol_gate_reason") if decision_row is not None else "",
+            default="",
+        )
+        invalidation_rule = _pick_text(
+            row.get("invalidation_rule"),
+            decision_row.get("invalidation_rule") if decision_row is not None else "",
+            default="",
+        )
+
+        prev_day_relvolume = _pick_float(
+            row.get("prev_day_relvolume"),
+            decision_row.get("prev_day_relvolume") if decision_row is not None else float("nan"),
+            market_row.get("prev_day_relvolume") if market_row is not None else float("nan"),
+            default=float("nan"),
+        )
+        fallback_relvolume = _pick_float(
+            row.get("rel_volume"),
+            decision_row.get("rel_volume") if decision_row is not None else float("nan"),
+            market_row.get("rel_volume") if market_row is not None else float("nan"),
+            feature_row.get("rel_volume") if feature_row is not None else float("nan"),
+            default=float("nan"),
+        )
+        if not pd.notna(prev_day_relvolume):
+            prev_day_relvolume = fallback_relvolume
+
+        open_5m_relvolume = _pick_float(
+            row.get("open_5m_relvolume"),
+            decision_row.get("open_5m_relvolume") if decision_row is not None else float("nan"),
+            market_row.get("open_5m_relvolume") if market_row is not None else float("nan"),
+            default=float("nan"),
+        )
+        open_15m_relvolume = _pick_float(
+            row.get("open_15m_relvolume"),
+            decision_row.get("open_15m_relvolume") if decision_row is not None else float("nan"),
+            market_row.get("open_15m_relvolume") if market_row is not None else float("nan"),
+            default=float("nan"),
+        )
+
+        vwap_status = _derive_vwap_status(
+            _pick_text(
+                row.get("vwap_status"),
+                decision_row.get("vwap_status") if decision_row is not None else "",
+                market_row.get("vwap_status") if market_row is not None else "",
+                default="",
+            ),
+            tech_status,
+            gate_reason,
+        )
+        sqzmom_status = _derive_sqzmom_status(
+            _pick_text(
+                row.get("sqzmom_status"),
+                decision_row.get("sqzmom_status") if decision_row is not None else "",
+                market_row.get("sqzmom_status") if market_row is not None else "",
+                default="",
+            ),
+            tech_status,
+            gate_reason,
+        )
+        volume_status = _derive_volume_status(
+            _pick_text(
+                row.get("volume_gate_status"),
+                row.get("volume_status"),
+                decision_row.get("volume_gate_status") if decision_row is not None else "",
+                decision_row.get("volume_status") if decision_row is not None else "",
+                market_row.get("volume_gate_status") if market_row is not None else "",
+                market_row.get("volume_status") if market_row is not None else "",
+                default="",
+            ),
+            prev_day_relvolume,
+            open_5m_relvolume,
+            open_15m_relvolume,
+            gate_reason,
+        )
+
         risk_note_parts = []
         if gate_reason:
             risk_note_parts.append(f"gate={gate_reason}")
+        if volume_status not in {"passed", "passed_prev_day_pending_opening"}:
+            risk_note_parts.append(f"volume={volume_status}")
         if invalidation_rule:
             risk_note_parts.append(f"invalidate={invalidation_rule}")
         risk_note = "; ".join(risk_note_parts)
@@ -313,9 +503,9 @@ def _build_ai_decision_contract_materialized(scan_date: str) -> Dict[str, object
                 "execution_window": "next_open_session",
                 "avoid_chase_flag": tech_status.lower() in {"avoid_chase", "avoidchase"},
                 "preferred_entry_type": _infer_preferred_entry_type(tech_status),
-                "vwap_status": "unknown",
-                "sqzmom_status": "unknown",
-                "volume_status": "unknown",
+                "vwap_status": vwap_status,
+                "sqzmom_status": sqzmom_status,
+                "volume_status": volume_status,
                 "invalidation_rule": invalidation_rule,
                 "risk_level": _clean_text(row.get("risk_level"), ""),
                 "risk_note": risk_note,

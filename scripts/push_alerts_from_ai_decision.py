@@ -652,6 +652,12 @@ def _load_execution_df(limit: int) -> pd.DataFrame:
             "dispatch_status": canonical_df["dispatch_status"].astype(str),
             "source_event_id": canonical_df["source_event_id"].astype(str),
             "source_log_id": canonical_df["source_log_id"].astype(str),
+            "prev_day_relvolume": pd.to_numeric(canonical_df.get("prev_day_relvolume"), errors="coerce"),
+            "prev_day_volume_vs_20d": pd.to_numeric(canonical_df.get("prev_day_volume_vs_20d"), errors="coerce"),
+            "open_5m_relvolume": pd.to_numeric(canonical_df.get("open_5m_relvolume"), errors="coerce"),
+            "open_15m_relvolume": pd.to_numeric(canonical_df.get("open_15m_relvolume"), errors="coerce"),
+            "volume_gate_status": canonical_df.get("volume_gate_status", "").astype(str),
+            "volume_gate_reason": canonical_df.get("volume_gate_reason", "").astype(str),
         }
     )
     for col in EXECUTION_COLS:
@@ -817,6 +823,12 @@ def _summarize_execution_window(
                 "vwap": _safe_float(latest.get("vwap"), 0.0),
                 "sqzmom_color": str(latest.get("sqzmom_color", "")).strip(),
                 "sqzmom_hist": _safe_float(latest.get("sqzmom_value", latest.get("sqzmom_hist")), 0.0),
+                "prev_day_relvolume": _safe_float(latest.get("prev_day_relvolume"), float("nan")),
+                "prev_day_volume_vs_20d": _safe_float(latest.get("prev_day_volume_vs_20d"), float("nan")),
+                "open_5m_relvolume": _safe_float(latest.get("open_5m_relvolume"), float("nan")),
+                "open_15m_relvolume": _safe_float(latest.get("open_15m_relvolume"), float("nan")),
+                "volume_gate_status": str(latest.get("volume_gate_status", "")).strip(),
+                "volume_gate_reason": _clip_text(latest.get("volume_gate_reason") or "", 120),
                 "reason_summary": _clip_text(latest.get("reason_summary") or "", 120),
                 "sort_ts": latest_ts,
             }
@@ -1097,6 +1109,12 @@ def _summaries_to_payload(items: List[dict], limit: int = 6) -> List[dict]:
                 "has_conflict": bool(item.get("has_conflict")),
                 "action_sequence": item.get("action_sequence", ""),
                 "guidance": item.get("guidance", ""),
+                "prev_day_relvolume": _safe_float(item.get("prev_day_relvolume"), float("nan")),
+                "prev_day_volume_vs_20d": _safe_float(item.get("prev_day_volume_vs_20d"), float("nan")),
+                "open_5m_relvolume": _safe_float(item.get("open_5m_relvolume"), float("nan")),
+                "open_15m_relvolume": _safe_float(item.get("open_15m_relvolume"), float("nan")),
+                "volume_gate_status": str(item.get("volume_gate_status", "")).strip(),
+                "volume_gate_reason": str(item.get("volume_gate_reason", "")).strip(),
             }
         )
     return out
@@ -1181,7 +1199,10 @@ def _strategy_conclusion_for_summary(item: dict) -> str:
     if has_position:
         return f"{ticker}{tag}: 預設續抱，不因第一段分鐘雜訊直接出場。"
     if latest_action in {"entry", "add"}:
-        return f"{ticker}{tag}: 僅在開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強才開 {int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 新倉。"
+        return (
+            f"{ticker}{tag}: 僅在開盤前 {int(INTRADAY_ENTRY_WINDOW_MINUTES)} 分鐘內確認續強才開 "
+            f"{int(round(float(INTRADAY_ENTRY_SIZE_FRACTION) * 100))}% 新倉（{_volume_gate_snapshot_text(item)}）。"
+        )
     return f"{ticker}{tag}: 先觀察，不主動追價。"
 
 
@@ -1859,6 +1880,7 @@ def _build_execution_lines(execution_summaries: List[dict]) -> List[str]:
         guidance = str(item.get("guidance", "")).strip()
         if guidance:
             base += f" | {guidance}"
+        base += f" | {_volume_gate_snapshot_text(item)}"
         lines.append(base)
     return lines
 
@@ -1927,6 +1949,20 @@ def _short_lines(items: List[object], limit: int = 3, clip: int = RECAP_MAX_LINE
     return out
 
 
+def _fmt_relvolume(value: object) -> str:
+    parsed = pd.to_numeric(value, errors="coerce")
+    if pd.isna(parsed):
+        return "NA"
+    return f"{float(parsed):.2f}x"
+
+
+def _volume_gate_snapshot_text(item: dict) -> str:
+    status = str(item.get("volume_gate_status", "")).strip() or "not_available"
+    prev_rel = _fmt_relvolume(item.get("prev_day_relvolume"))
+    open_5m_rel = _fmt_relvolume(item.get("open_5m_relvolume"))
+    return f"昨日量={prev_rel} 開盤5m={open_5m_rel} gate={status}"
+
+
 def _execution_focus_lines(execution_summaries: List[dict], limit: int = 3) -> List[str]:
     rows: List[str] = []
     for item in execution_summaries:
@@ -1941,15 +1977,15 @@ def _execution_focus_lines(execution_summaries: List[dict], limit: int = 3) -> L
             color = str(item.get("sqzmom_color", "")).strip().lower()
             vwap_text = "VWAP 守住" if vwap_val > 0 and close_val >= vwap_val else "VWAP 跌破"
             sqz_text = "SQZMOM 發動中" if hist_val > 0 and color in {"green", "lime"} else "SQZMOM 轉弱"
-            hold_text = "先降風險" if str(item.get("latest_action", "")).strip().lower() in {"stop_loss", "take_profit"} else "繼續持有"
-            rows.append(f"{_ticker_label(ticker, underlying_ticker)}：{vwap_text}，{sqz_text}，{hold_text}")
+            hold_text = "先降風險" if str(item.get("latest_action", "")).strip().lower() in {"stop_loss", "take_profit", "reduce", "exit"} else "繼續持有"
+            rows.append(f"{_ticker_label(ticker, underlying_ticker)}：{vwap_text}，{sqz_text}，{hold_text}（{_volume_gate_snapshot_text(item)}）")
             continue
         status = str(item.get("status_label", "待確認")).strip() or "待確認"
         guidance = _clip_text(item.get("guidance") or "", max(12, int(RECAP_MAX_LINE_CHARS) - 8))
         if guidance:
-            rows.append(f"{ticker}: {status} | {guidance}")
+            rows.append(f"{ticker}: {status} | {guidance} | {_volume_gate_snapshot_text(item)}")
         else:
-            rows.append(f"{ticker}: {status}")
+            rows.append(f"{ticker}: {status} | {_volume_gate_snapshot_text(item)}")
     return _short_lines(rows, limit=limit)
 
 
@@ -1964,7 +2000,7 @@ def _execution_risk_lines(execution_summaries: List[dict], limit: int = 3) -> Li
             rows.append(f"失效條件: {underlying_ticker} 跌破 VWAP 則 {ticker} 出場")
             continue
         latest_action = str(item.get("latest_action", "")).strip().lower()
-        if bool(item.get("has_conflict")) or latest_action in {"stop_loss", "take_profit"}:
+        if bool(item.get("has_conflict")) or latest_action in {"stop_loss", "take_profit", "reduce", "exit"}:
             status = str(item.get("status_label", "風險")).strip() or "風險"
             rows.append(f"{ticker}: {status}")
     return _short_lines(rows, limit=limit)
@@ -2221,7 +2257,13 @@ def _build_message(df: pd.DataFrame, tv_map: Dict[str, object], top_n: int, tags
     return "\n".join(lines)
 
 
-def _build_trade_command_message(command_df: pd.DataFrame, title_date: str, mode: str, top_n: int) -> str:
+def _build_trade_command_message(
+    command_df: pd.DataFrame,
+    title_date: str,
+    mode: str,
+    top_n: int,
+    recap_context: Optional[dict] = None,
+) -> str:
     mode_label = {
         "bedtime": "Bedtime",
         "morning": "Morning",
@@ -2269,6 +2311,14 @@ def _build_trade_command_message(command_df: pd.DataFrame, title_date: str, mode
     lines.append("失效條件:")
     for item in risk_lines:
         lines.append(f"- {item}")
+
+    execution_summaries = recap_context.get("execution_summaries_full", []) if isinstance(recap_context, dict) else []
+    execution_lines = _build_execution_lines(execution_summaries)
+    if execution_lines:
+        lines.append("盤中 Gate 追認:")
+        for item in execution_lines[:3]:
+            lines.append(f"- {item}")
+
     lines.append(f"結論: {summary}")
     return "\n".join(lines)
 
@@ -2284,7 +2334,13 @@ def _render_message(
 ) -> str:
     if "execution_action" in df.columns:
         command_df = build_user_visible_command_df(df)
-        return _build_trade_command_message(command_df=command_df, title_date=title_date, mode=mode, top_n=top_n)
+        return _build_trade_command_message(
+            command_df=command_df,
+            title_date=title_date,
+            mode=mode,
+            top_n=top_n,
+            recap_context=recap_context,
+        )
 
     selected = df[df["decision_tag"].isin(tags)].copy().sort_values(["rank", "ticker"], ascending=[True, True])
     if mode == "bedtime":
