@@ -6,7 +6,7 @@
 - repo_outputs/daily_refresh/latest/monster_radar_daily.csv
 - repo_outputs/daily_refresh/latest/fusion_top_daily.csv
 - repo_outputs/daily_refresh/latest/ai_focus_list.csv
-- repo_outputs/ai_ready/latest/xq_short_term_updated.csv
+- repo_outputs/daily_refresh/latest/xq_short_term_updated.csv（若不存在才 fallback 舊路徑 ai_ready/latest）
 
 輸出：
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/market_dataset_daily.csv
@@ -63,6 +63,11 @@ DAILY_REFRESH_LATEST = PROJECT_ROOT / 'repo_outputs' / 'daily_refresh' / 'latest
 AI_READY_LATEST = PROJECT_ROOT / 'repo_outputs' / 'ai_ready' / 'latest'
 AI_TRADING_OUTPUT_DIR = PROJECT_ROOT / 'repo_outputs' / 'ai_trading'
 BACKTEST_INBOX_DIR = PROJECT_ROOT / 'repo_outputs' / 'backtest' / 'inbox'
+AI_READY_LATEST_KEEP_FILES = {
+    'ai_ready_bundle.xlsx',
+    'Alpha-Sniper-Protocol.md',
+    'README_ai_quick_pack.json',
+}
 
 
 def _previous_trading_day_str(base_dt: datetime | None = None) -> str:
@@ -87,6 +92,55 @@ def _read_csv_fallback(csv_path: Path) -> pd.DataFrame:
         return pd.read_csv(csv_path, encoding='utf-8-sig')
     except UnicodeDecodeError:
         return pd.read_csv(csv_path)
+
+
+def _resolve_latest_xq_csv_path() -> Path:
+    primary = DAILY_REFRESH_LATEST / 'xq_short_term_updated.csv'
+    legacy = AI_READY_LATEST / 'xq_short_term_updated.csv'
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(legacy, primary)
+            return primary
+        except OSError:
+            return legacy
+    return primary
+
+
+def _sync_protocol_to_ai_ready_latest(ai_ready_latest_dir: Path) -> bool:
+    protocol_dst = ai_ready_latest_dir / 'Alpha-Sniper-Protocol.md'
+    if protocol_dst.exists():
+        return True
+
+    protocol_src = PROJECT_ROOT / 'Alpha-Sniper-Protocol.md'
+    if not protocol_src.exists():
+        return False
+    try:
+        shutil.copy2(protocol_src, protocol_dst)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_ai_ready_latest(ai_ready_latest_dir: Path, keep_files: set[str]) -> list[str]:
+    removed: list[str] = []
+    if not ai_ready_latest_dir.exists():
+        return removed
+
+    for child in ai_ready_latest_dir.iterdir():
+        if child.name in keep_files:
+            continue
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+            removed.append(child.name)
+        except OSError:
+            continue
+    return removed
 
 
 def _extract_json_dict(text: str) -> dict:
@@ -1302,13 +1356,13 @@ def _refresh_unified_ai_ready_bundle(
     ai_ready_latest_dir.mkdir(parents=True, exist_ok=True)
 
     sheet_map = [
-        (ai_ready_latest_dir, 'ai_focus_list.csv', 'ai_focus_list'),
-        (ai_ready_latest_dir, 'fusion_top_daily.csv', 'fusion_top_daily'),
-        (ai_ready_latest_dir, 'monster_radar_daily.csv', 'monster_radar_daily'),
-        (ai_ready_latest_dir, 'raw_market_daily.csv', 'raw_market_daily'),
-        (ai_ready_latest_dir, 'theme_heat_daily.csv', 'theme_heat_daily'),
-        (ai_ready_latest_dir, 'theme_leaders_daily.csv', 'theme_leaders_daily'),
-        (ai_ready_latest_dir, 'xq_short_term_updated.csv', 'xq_short_term_updated'),
+        (DAILY_REFRESH_LATEST, 'ai_focus_list.csv', 'ai_focus_list'),
+        (DAILY_REFRESH_LATEST, 'fusion_top_daily.csv', 'fusion_top_daily'),
+        (DAILY_REFRESH_LATEST, 'monster_radar_daily.csv', 'monster_radar_daily'),
+        (DAILY_REFRESH_LATEST, 'raw_market_daily.csv', 'raw_market_daily'),
+        (DAILY_REFRESH_LATEST, 'theme_heat_daily.csv', 'theme_heat_daily'),
+        (DAILY_REFRESH_LATEST, 'theme_leaders_daily.csv', 'theme_leaders_daily'),
+        (_resolve_latest_xq_csv_path().parent, 'xq_short_term_updated.csv', 'xq_short_term_updated'),
         (ai_trading_latest_dir, 'market_dataset_daily.csv', 'market_dataset_daily'),
         (ai_trading_latest_dir, 'feature_signals_daily.csv', 'feature_signals_daily'),
         (ai_trading_latest_dir, 'radar_signals_daily.csv', 'radar_signals_daily'),
@@ -1399,6 +1453,9 @@ def _refresh_unified_ai_ready_bundle(
             'reason': 'bundle_file_locked',
         }
 
+    protocol_synced = _sync_protocol_to_ai_ready_latest(ai_ready_latest_dir)
+    removed_files = _prune_ai_ready_latest(ai_ready_latest_dir, AI_READY_LATEST_KEEP_FILES)
+
     manifest = {
         'scan_date': scan_date,
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -1432,7 +1489,11 @@ def _refresh_unified_ai_ready_bundle(
         ],
         'bundle_sheet_count': len(written_sheets),
         'bundle_sheets': written_sheets,
-        'notes': '統一 B 單一路徑：bundle 內含 continuation + sniper lane 資料；ai_decision_latest 僅為 pipeline preview，官方 final ai_decision 仍由 Web AI 依 bundle+Protocol 產出。',
+        'delivery_files': ['ai_ready_bundle.xlsx', 'Alpha-Sniper-Protocol.md'],
+        'internal_files': ['README_ai_quick_pack.json'],
+        'protocol_synced': protocol_synced,
+        'pruned_files': sorted(removed_files),
+        'notes': '統一 B 單一路徑：bundle 內含 continuation + sniper lane 資料；ai_decision_latest 僅為 pipeline preview，官方 final ai_decision 仍由 Web AI 依 bundle+Protocol 產出。README_ai_quick_pack.json 為系統 manifest，不是 Web AI 必傳檔。',
     }
     with open(ai_ready_latest_dir / 'README_ai_quick_pack.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -1541,7 +1602,7 @@ def main() -> int:
     paths = DataPaths(
         raw_market_csv=str(DAILY_REFRESH_LATEST / 'raw_market_daily.csv'),
         monster_radar_csv=str(DAILY_REFRESH_LATEST / 'monster_radar_daily.csv'),
-        xq_updated_csv=str(AI_READY_LATEST / 'xq_short_term_updated.csv'),
+        xq_updated_csv=str(_resolve_latest_xq_csv_path()),
         ai_focus_csv=str(DAILY_REFRESH_LATEST / 'ai_focus_list.csv'),
         fusion_csv=str(DAILY_REFRESH_LATEST / 'fusion_top_daily.csv'),
     )

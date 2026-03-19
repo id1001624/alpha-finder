@@ -321,6 +321,7 @@ def _build_daily_files_for_date(
         )
 
     xq_out = pd.DataFrame(xq_rows)
+    xq_out.to_csv(refresh_dir / "xq_short_term_updated.csv", index=False, encoding="utf-8-sig")
     xq_out.to_csv(ready_dir / "xq_short_term_updated.csv", index=False, encoding="utf-8-sig")
 
     # Copy supporting files to daily_refresh run.
@@ -350,11 +351,14 @@ def _build_daily_files_for_date(
         "raw_market_daily.csv",
         "theme_heat_daily.csv",
         "theme_leaders_daily.csv",
-        "README_ai_quick_pack.json",
     ]:
-        src = latest_ready_dir / name
+        src = latest_daily_dir / name
         if src.exists():
             (ready_dir / name).write_bytes(src.read_bytes())
+
+    manifest_src = latest_ready_dir / "README_ai_quick_pack.json"
+    if manifest_src.exists():
+        (ready_dir / manifest_src.name).write_bytes(manifest_src.read_bytes())
 
     # Keep ai_ready raw market aligned with expanded daily refresh.
     (ready_dir / "raw_market_daily.csv").write_bytes((refresh_dir / "raw_market_daily.csv").read_bytes())
@@ -389,18 +393,15 @@ def main() -> int:
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    latest_daily_run = _latest_run_dir(DAILY_REFRESH_DIR / "latest")
-    latest_ready_run = _latest_run_dir(AI_READY_DIR / "latest")
-    if latest_daily_run is not None or latest_ready_run is not None:
-        pass
-
     latest_daily_dir = DAILY_REFRESH_DIR / "latest"
     latest_ready_dir = AI_READY_DIR / "latest"
 
     base_raw_path = latest_daily_dir / "raw_market_daily.csv"
-    base_xq_path = latest_ready_dir / "xq_short_term_updated.csv"
+    base_xq_path = latest_daily_dir / "xq_short_term_updated.csv"
+    if not base_xq_path.exists():
+        base_xq_path = latest_ready_dir / "xq_short_term_updated.csv"
     if not base_raw_path.exists() or not base_xq_path.exists():
-        raise FileNotFoundError("latest/raw_market_daily.csv or latest/xq_short_term_updated.csv missing")
+        raise FileNotFoundError("latest/raw_market_daily.csv or latest/xq_short_term_updated.csv missing in daily_refresh/ai_ready")
 
     base_raw = _read_csv_fallback(base_raw_path)
     base_xq = _read_csv_fallback(base_xq_path)

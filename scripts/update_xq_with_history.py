@@ -8,7 +8,7 @@ XQ 選股清單更新腳本
 - 新增欄位: chg_1d_pct, chg_3d_pct, chg_5d_pct, vol_strength, short_trade_score,
     swing_score, momentum_mix, continuation_grade, prob_next_day, prob_day2, decision_tag_hint, setup_type
 - 執行完畢後顯示各檔案短炒分數 Top 5
-- 不在 XQ_exports 產生 *_updated.csv，統一更新 `repo_outputs/ai_ready/latest/xq_short_term_updated.csv`
+- 不在 XQ_exports 產生 *_updated.csv，統一更新 `repo_outputs/daily_refresh/latest/xq_short_term_updated.csv`
 - 自動處理中文編碼問題
 
 使用方式:
@@ -109,10 +109,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from power_awake import keep_system_awake
 
 try:
-    from config import AI_READY_OUTPUT_ENABLED, AI_READY_OUTPUT_DIR
+    from config import AI_READY_OUTPUT_ENABLED, LOCAL_OUTPUT_DIR
 except (ImportError, ModuleNotFoundError, AttributeError, OSError, ValueError):
     AI_READY_OUTPUT_ENABLED = True
-    AI_READY_OUTPUT_DIR = "repo_outputs/ai_ready"
+    LOCAL_OUTPUT_DIR = "repo_outputs/daily_refresh"
 
 XQ_EXPORTS_DIR = find_xq_exports_dir()
 BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
@@ -428,9 +428,8 @@ def build_ai_query_hint(ticker):
 
 def _load_tv_signal_lookup() -> dict[str, dict[str, object]]:
     lookup: dict[str, dict[str, object]] = {}
-    try:
-        raw_market_path = _resolve_ai_ready_base_dir() / "latest" / "raw_market_daily.csv"
-    except NameError:
+    raw_market_path = _resolve_daily_refresh_base_dir() / "latest" / "raw_market_daily.csv"
+    if not raw_market_path.exists():
         raw_market_path = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest" / "raw_market_daily.csv"
 
     if not raw_market_path.exists():
@@ -746,8 +745,8 @@ def save_backtest_pick_log(snapshot_df):
     return PICK_LOG_FILE, daily_file
 
 
-def _resolve_ai_ready_base_dir() -> Path:
-    raw = Path(AI_READY_OUTPUT_DIR)
+def _resolve_daily_refresh_base_dir() -> Path:
+    raw = Path(LOCAL_OUTPUT_DIR)
     return raw if raw.is_absolute() else (PROJECT_ROOT / raw)
 
 
@@ -757,7 +756,7 @@ def export_ai_ready_xq_file(source_df: pd.DataFrame) -> Path | None:
     if source_df is None or len(source_df) == 0:
         return None
 
-    base_dir = _resolve_ai_ready_base_dir()
+    base_dir = _resolve_daily_refresh_base_dir()
     latest_dir = base_dir / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -910,7 +909,7 @@ def update_csv_with_history(file_path, ticker_column=None):
         print(f"\n{'='*60}")
         print(f"✅ 已處理: {file_path.name}")
         print(f"📊 成功更新: {success_count}/{total} 支股票")
-        print(f"🧭 輸出目標: repo_outputs/ai_ready/latest/{AI_XQ_TARGET_FILE}")
+        print(f"🧭 輸出目標: repo_outputs/daily_refresh/latest/{AI_XQ_TARGET_FILE}")
         print(f"{'='*60}\n")
         return df_out, ticker_column, file_path.name
     except (OSError, ValueError, TypeError) as e:
