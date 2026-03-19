@@ -98,7 +98,6 @@ logger = get_logger(__name__)
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 INBOX_DIR = BACKTEST_DIR / "inbox"
 AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
-DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
 ALERT_DIR = BACKTEST_DIR / "alerts"
 ALERT_LOG_CSV = ALERT_DIR / "alert_log.csv"
 ALERT_MESSAGE_TXT = ALERT_DIR / "latest_alert_message.txt"
@@ -167,8 +166,10 @@ ACTION_DIRECTION = {
 MATERIALIZED_CONTRACT_CSV = "ai_decision_contract_v2_materialized.csv"
 MATERIALIZED_CONTRACT_SHEET_ALIASES = {
     "ai_decision_contract_v2_material",
+    "ai_decision_contract_v2_materia",
     "ai_decision_contract_v2_materialized",
     "aidecisioncontractv2material",
+    "aidecisioncontractv2materia",
     "aidecisioncontractv2materialized",
 }
 
@@ -210,7 +211,7 @@ def _materialized_to_recap_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _read_materialized_csv(path: Path) -> pd.DataFrame:
+def _read_materialized_csv(path: Path, source_tag: str = "materialized_csv") -> pd.DataFrame:
     try:
         raw = pd.read_csv(path, encoding="utf-8-sig")
     except UnicodeDecodeError:
@@ -218,7 +219,10 @@ def _read_materialized_csv(path: Path) -> pd.DataFrame:
     required = {"as_of_date", "ticker", "final_priority", "decision_status"}
     if not required.issubset(set(raw.columns)):
         return pd.DataFrame()
-    return _materialized_to_recap_df(raw)
+    out = _materialized_to_recap_df(raw)
+    if len(out) > 0:
+        out["contract_source"] = str(source_tag)
+    return out
 
 
 def _load_materialized_from_bundle(bundle_path: Path) -> pd.DataFrame:
@@ -244,44 +248,36 @@ def _load_materialized_from_bundle(bundle_path: Path) -> pd.DataFrame:
     required = {"as_of_date", "ticker", "final_priority", "decision_status"}
     if not required.issubset(set(raw.columns)):
         return pd.DataFrame()
-    return _materialized_to_recap_df(raw)
+    out = _materialized_to_recap_df(raw)
+    if len(out) > 0:
+        out["contract_source"] = f"bundle_sheet:{chosen_sheet}"
+    return out
 
 
-def _find_latest_materialized_csv() -> Optional[Path]:
-    found: List[tuple[float, Path]] = []
-    static_candidates = [
-        PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest" / MATERIALIZED_CONTRACT_CSV,
-        AI_READY_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
-        DAILY_REFRESH_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+def _materialized_candidates_in_order() -> List[tuple[str, Path]]:
+    return [
+        ("ai_trading_latest", PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest" / MATERIALIZED_CONTRACT_CSV),
     ]
-    for file in static_candidates:
-        if not file.exists():
-            continue
-        try:
-            found.append((file.stat().st_mtime, file))
-        except OSError:
-            continue
-    if not found:
-        return None
-    found.sort(key=lambda x: x[0], reverse=True)
-    return found[0][1]
 
 
 def _load_latest_decision_df() -> tuple[pd.DataFrame, str | None]:
-    latest_csv = _find_latest_materialized_csv()
-    if latest_csv is not None:
-        return _read_materialized_csv(latest_csv), str(latest_csv)
+    for source_tag, csv_path in _materialized_candidates_in_order():
+        if not csv_path.exists():
+            continue
+        out = _read_materialized_csv(csv_path, source_tag=source_tag)
+        if len(out) > 0:
+            return out, f"{source_tag}:{csv_path}"
 
     bundle_path = AI_READY_LATEST_DIR / "ai_ready_bundle.xlsx"
     bundle_df = _load_materialized_from_bundle(bundle_path)
     if len(bundle_df) > 0:
-        return bundle_df, f"{bundle_path}#sheet=ai_decision_contract_v2_material"
+        return bundle_df, f"bundle_sheet:{bundle_path}#sheet=ai_decision_contract_v2_material"
 
     return pd.DataFrame(), None
 
 
 def _load_decision_df(csv_path: Path) -> pd.DataFrame:
-    return _read_materialized_csv(csv_path)
+    return _read_materialized_csv(csv_path, source_tag="manual_csv")
 
 
 def _load_tv_map() -> Dict[str, object]:

@@ -528,10 +528,14 @@ def _build_ai_decision_contract_materialized(scan_date: str) -> Dict[str, object
     materialized_path = AI_TRADING_LATEST / "ai_decision_contract_v2_materialized.csv"
     materialized_df.to_csv(materialized_path, index=False, encoding="utf-8-sig")
 
-    AI_READY_LATEST.mkdir(parents=True, exist_ok=True)
-    DAILY_REFRESH_LATEST.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(materialized_path, AI_READY_LATEST / materialized_path.name)
-    shutil.copy2(materialized_path, DAILY_REFRESH_LATEST / materialized_path.name)
+    for legacy_dir in [AI_READY_LATEST, DAILY_REFRESH_LATEST]:
+        legacy_path = legacy_dir / materialized_path.name
+        if not legacy_path.exists():
+            continue
+        try:
+            legacy_path.unlink()
+        except OSError:
+            continue
 
     return {
         "file": str(materialized_path),

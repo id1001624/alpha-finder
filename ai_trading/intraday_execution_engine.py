@@ -115,12 +115,13 @@ BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 AI_DECISION_LATEST = BACKTEST_DIR / "ai_decision_latest.csv"
 AI_TRADING_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest"
 AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
-DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
 MATERIALIZED_CONTRACT_CSV = "ai_decision_contract_v2_materialized.csv"
 MATERIALIZED_CONTRACT_SHEET_ALIASES = {
     "ai_decision_contract_v2_material",
+    "ai_decision_contract_v2_materia",
     "ai_decision_contract_v2_materialized",
     "aidecisioncontractv2material",
+    "aidecisioncontractv2materia",
     "aidecisioncontractv2materialized",
 }
 ALERT_DIR = BACKTEST_DIR / "alerts"
@@ -258,6 +259,7 @@ def _read_materialized_csv(path: Path) -> pd.DataFrame:
     out = _materialized_to_intraday_df(raw)
     if len(out) > 0:
         out["source_contract"] = str(path)
+        out["source_contract_kind"] = "materialized_csv"
     return out
 
 
@@ -285,27 +287,14 @@ def _load_materialized_from_bundle(bundle_path: Path) -> pd.DataFrame:
     out = _materialized_to_intraday_df(raw)
     if len(out) > 0:
         out["source_contract"] = f"{bundle_path}#sheet={chosen_sheet}"
+        out["source_contract_kind"] = f"bundle_sheet:{chosen_sheet}"
     return out
 
 
-def _find_latest_materialized_csv() -> Optional[Path]:
-    candidates = [
-        AI_TRADING_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
-        AI_READY_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
-        DAILY_REFRESH_LATEST_DIR / MATERIALIZED_CONTRACT_CSV,
+def _materialized_candidates_in_order() -> List[tuple[str, Path]]:
+    return [
+        ("ai_trading_latest", AI_TRADING_LATEST_DIR / MATERIALIZED_CONTRACT_CSV),
     ]
-    found: List[tuple[float, Path]] = []
-    for path in candidates:
-        if not path.exists():
-            continue
-        try:
-            found.append((path.stat().st_mtime, path))
-        except OSError:
-            continue
-    if not found:
-        return None
-    found.sort(key=lambda item: item[0], reverse=True)
-    return found[0][1]
 
 
 def _http_post_json(url: str, payload: dict) -> tuple[bool, str]:
@@ -324,10 +313,12 @@ def _http_post_json(url: str, payload: dict) -> tuple[bool, str]:
 
 
 def _load_decision_df() -> pd.DataFrame:
-    latest_csv = _find_latest_materialized_csv()
-    if latest_csv is not None:
-        out = _read_materialized_csv(latest_csv)
+    for source_tag, csv_path in _materialized_candidates_in_order():
+        if not csv_path.exists():
+            continue
+        out = _read_materialized_csv(csv_path)
         if len(out) > 0:
+            out["source_contract_kind"] = source_tag
             return out
 
     bundle_path = AI_READY_LATEST_DIR / "ai_ready_bundle.xlsx"

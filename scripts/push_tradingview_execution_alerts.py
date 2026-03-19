@@ -36,8 +36,6 @@ install_builtin_print_logging()
 
 BACKTEST_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 AI_TRADING_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest"
-AI_READY_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest"
-DAILY_REFRESH_LATEST_DIR = PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest"
 AI_DECISION_CONTRACT_MATERIALIZED = AI_TRADING_LATEST_DIR / "ai_decision_contract_v2_materialized.csv"
 ALERT_DIR = BACKTEST_DIR / "alerts"
 STATE_FILE = ALERT_DIR / "tv_execution_state.json"
@@ -77,8 +75,6 @@ EXECUTION_LOG_FIELDS = [
 def _load_decision_df() -> pd.DataFrame:
     candidates = [
         AI_DECISION_CONTRACT_MATERIALIZED,
-        AI_READY_LATEST_DIR / "ai_decision_contract_v2_materialized.csv",
-        DAILY_REFRESH_LATEST_DIR / "ai_decision_contract_v2_materialized.csv",
     ]
     source_df = pd.DataFrame()
     for path in candidates:
