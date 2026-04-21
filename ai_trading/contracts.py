@@ -15,6 +15,7 @@ class DataPaths:
     xq_updated_csv: str
     ai_focus_csv: str
     fusion_csv: Optional[str] = None
+    external_candidates_csv: Optional[str] = None
 
 
 def normalize_ticker(value) -> str:

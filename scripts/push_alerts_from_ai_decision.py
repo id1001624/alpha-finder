@@ -164,6 +164,7 @@ ACTION_DIRECTION = {
 }
 
 MATERIALIZED_CONTRACT_CSV = "ai_decision_contract_v2_materialized.csv"
+FINAL_DECISION_LATEST_CSV = "ai_decision_latest.csv"
 MATERIALIZED_CONTRACT_SHEET_ALIASES = {
     "ai_decision_contract_v2_material",
     "ai_decision_contract_v2_materia",
@@ -211,15 +212,92 @@ def _materialized_to_recap_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _read_materialized_csv(path: Path, source_tag: str = "materialized_csv") -> pd.DataFrame:
+def _final_to_recap_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    defaults = {
+        "decision_date": "",
+        "ticker": "",
+        "rank": 9999,
+        "decision_tag": "watch",
+        "short_score_final": 0.0,
+        "reason_summary": "",
+        "catalyst_type": "",
+        "source_ref": "",
+        "confidence": 0.0,
+        "invalidation_rule": "",
+        "risk_level": "",
+        "execution_action": "",
+        "position_plan": "",
+        "exit_action": "",
+        "user_visibility": "",
+        "tech_status": "",
+    }
+    for col, default in defaults.items():
+        if col not in out.columns:
+            out[col] = default
+
+    mapped = pd.DataFrame()
+    mapped["as_of_date"] = out.get("decision_date", "")
+    mapped["ticker"] = out.get("ticker", "")
+    mapped["final_priority"] = pd.to_numeric(out.get("rank"), errors="coerce").fillna(9999).astype(int)
+    mapped["decision_status"] = out.get("decision_tag", "watch")
+    mapped["decision_score"] = pd.to_numeric(out.get("short_score_final"), errors="coerce").fillna(0.0)
+    mapped["decision_reason"] = out.get("reason_summary", "")
+    mapped["primary_event_type"] = out.get("catalyst_type", "")
+    mapped["trigger_source"] = out.get("source_ref", "")
+    mapped["trigger_score"] = pd.to_numeric(out.get("api_final_score"), errors="coerce").fillna(0.0)
+    mapped["continuation_rank"] = mapped["final_priority"]
+    mapped["tomorrow_continuation_prob"] = pd.to_numeric(out.get("confidence"), errors="coerce").fillna(0.0)
+    mapped["confidence_tier"] = "medium"
+    mapped["entry_plan"] = out.get("position_plan", "")
+    mapped["execution_window"] = "next_open_session"
+    mapped["avoid_chase_flag"] = out.get("tech_status", "").astype(str).str.lower().str.contains("avoid_chase")
+    mapped["preferred_entry_type"] = out.get("tech_status", "")
+    mapped["vwap_status"] = out.get("vwap_status", "") if "vwap_status" in out.columns else ""
+    mapped["sqzmom_status"] = out.get("sqzmom_status", "") if "sqzmom_status" in out.columns else ""
+    mapped["volume_status"] = out.get("volume_status", "") if "volume_status" in out.columns else ""
+    mapped["invalidation_rule"] = out.get("invalidation_rule", "")
+    mapped["risk_level"] = out.get("risk_level", "")
+    mapped["risk_note"] = ""
+    mapped["dilution_flag"] = False
+    mapped["halt_risk_flag"] = False
+    mapped["source_sheet_trace"] = out.get("source_ref", "")
+    mapped["protocol_version"] = "final_contract_fallback"
+    mapped["data_version"] = out.get("decision_date", "")
+    mapped["decision_ts"] = ""
+    mapped["execution_action"] = out.get("execution_action", "")
+    mapped["position_plan"] = out.get("position_plan", "")
+    mapped["exit_action"] = out.get("exit_action", "")
+    mapped["user_visibility"] = out.get("user_visibility", "")
+
+    recap_df = _materialized_to_recap_df(mapped)
+    return recap_df
+
+
+def _read_csv_with_fallback_encoding(path: Path) -> pd.DataFrame:
     try:
-        raw = pd.read_csv(path, encoding="utf-8-sig")
+        return pd.read_csv(path, encoding="utf-8-sig")
     except UnicodeDecodeError:
-        raw = pd.read_csv(path)
+        return pd.read_csv(path)
+
+
+def _read_materialized_csv(path: Path, source_tag: str = "materialized_csv") -> pd.DataFrame:
+    raw = _read_csv_with_fallback_encoding(path)
     required = {"as_of_date", "ticker", "final_priority", "decision_status"}
     if not required.issubset(set(raw.columns)):
         return pd.DataFrame()
     out = _materialized_to_recap_df(raw)
+    if len(out) > 0:
+        out["contract_source"] = str(source_tag)
+    return out
+
+
+def _read_final_decision_csv(path: Path, source_tag: str = "final_csv") -> pd.DataFrame:
+    raw = _read_csv_with_fallback_encoding(path)
+    required = {"decision_date", "ticker", "rank"}
+    if not required.issubset(set(raw.columns)):
+        return pd.DataFrame()
+    out = _final_to_recap_df(raw)
     if len(out) > 0:
         out["contract_source"] = str(source_tag)
     return out
@@ -257,6 +335,16 @@ def _load_materialized_from_bundle(bundle_path: Path) -> pd.DataFrame:
 def _materialized_candidates_in_order() -> List[tuple[str, Path]]:
     return [
         ("ai_trading_latest", PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest" / MATERIALIZED_CONTRACT_CSV),
+        ("ai_ready_latest", PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest" / MATERIALIZED_CONTRACT_CSV),
+        ("daily_refresh_latest", PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest" / MATERIALIZED_CONTRACT_CSV),
+    ]
+
+
+def _final_candidates_in_order() -> List[tuple[str, Path]]:
+    return [
+        ("ai_trading_latest_final", PROJECT_ROOT / "repo_outputs" / "ai_trading" / "latest" / FINAL_DECISION_LATEST_CSV),
+        ("ai_ready_latest_final", PROJECT_ROOT / "repo_outputs" / "ai_ready" / "latest" / FINAL_DECISION_LATEST_CSV),
+        ("daily_refresh_latest_final", PROJECT_ROOT / "repo_outputs" / "daily_refresh" / "latest" / FINAL_DECISION_LATEST_CSV),
     ]
 
 
@@ -264,7 +352,10 @@ def _load_latest_decision_df() -> tuple[pd.DataFrame, str | None]:
     for source_tag, csv_path in _materialized_candidates_in_order():
         if not csv_path.exists():
             continue
-        out = _read_materialized_csv(csv_path, source_tag=source_tag)
+        try:
+            out = _read_materialized_csv(csv_path, source_tag=source_tag)
+        except (OSError, ValueError, pd.errors.ParserError):
+            out = pd.DataFrame()
         if len(out) > 0:
             return out, f"{source_tag}:{csv_path}"
 
@@ -273,11 +364,31 @@ def _load_latest_decision_df() -> tuple[pd.DataFrame, str | None]:
     if len(bundle_df) > 0:
         return bundle_df, f"bundle_sheet:{bundle_path}#sheet=ai_decision_contract_v2_material"
 
+    for source_tag, csv_path in _final_candidates_in_order():
+        if not csv_path.exists():
+            continue
+        try:
+            out = _read_final_decision_csv(csv_path, source_tag=source_tag)
+        except (OSError, ValueError, pd.errors.ParserError):
+            out = pd.DataFrame()
+        if len(out) > 0:
+            return out, f"{source_tag}:{csv_path}"
+
     return pd.DataFrame(), None
 
 
 def _load_decision_df(csv_path: Path) -> pd.DataFrame:
-    return _read_materialized_csv(csv_path, source_tag="manual_csv")
+    try:
+        out = _read_materialized_csv(csv_path, source_tag="manual_csv_materialized")
+    except (OSError, ValueError, pd.errors.ParserError):
+        out = pd.DataFrame()
+    if len(out) > 0:
+        return out
+
+    try:
+        return _read_final_decision_csv(csv_path, source_tag="manual_csv_final")
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame()
 
 
 def _load_tv_map() -> Dict[str, object]:
@@ -2360,7 +2471,7 @@ def build_recap_message_preview(
 
     df, source_id = _load_latest_decision_df()
     if source_id is None:
-        raise ValueError("No materialized contract found in ai_trading/latest, ai_ready/latest, daily_refresh/latest, or ai_ready_bundle.xlsx")
+        raise ValueError("No recap source found in ai_trading/latest, ai_ready/latest, daily_refresh/latest, or ai_ready_bundle.xlsx (materialized/final csv)")
 
     selected_tags = tags or {"keep"}
     decision_date = "unknown"
@@ -2524,7 +2635,7 @@ def main() -> int:
             return 2
         df = _load_decision_df(csv_path)
         if len(df) == 0:
-            logger.error("CSV is not a valid materialized contract: %s", csv_path)
+            logger.error("CSV is not a valid recap source (materialized/final schema): %s", csv_path)
             return 2
         source_id = str(csv_path)
         decision_date = "unknown"

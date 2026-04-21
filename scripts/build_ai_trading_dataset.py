@@ -6,13 +6,15 @@
 - repo_outputs/daily_refresh/latest/monster_radar_daily.csv
 - repo_outputs/daily_refresh/latest/fusion_top_daily.csv
 - repo_outputs/daily_refresh/latest/ai_focus_list.csv
-- repo_outputs/daily_refresh/latest/xq_short_term_updated.csv（若不存在才 fallback 舊路徑 ai_ready/latest）
+- repo_outputs/daily_refresh/latest/xq_short_term_updated.csv（Layer-1 雷達資料，僅供特徵融合）
+- repo_outputs/daily_refresh/latest/finviz_momentum_pool*.csv（Layer-1 雷達資料，匯入 external_candidates_input）
 
 輸出：
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/market_dataset_daily.csv
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/feature_signals_daily.csv
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/ranking_signals_daily.csv
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/decision_signals_daily.csv
+- repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/external_candidates_input.csv
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/event_signals_daily.csv
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/api_catalyst_analysis_daily.csv
 - repo_outputs/ai_trading/YYYY-MM-DD/HHMMSS/api_catalyst_brief.md
@@ -23,6 +25,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -107,6 +110,128 @@ def _resolve_latest_xq_csv_path() -> Path:
         except OSError:
             return legacy
     return primary
+
+
+def _parse_ticker_text(raw: str) -> list[str]:
+    text = str(raw or '').strip()
+    if not text:
+        return []
+    chunks = re.split(r'[\s,;|]+', text)
+    out = []
+    for chunk in chunks:
+        symbol = str(chunk or '').strip().upper().replace('.US', '')
+        if not symbol:
+            continue
+        out.append(symbol)
+    return sorted(set(out))
+
+
+def _find_latest_finviz_pool_path() -> Path | None:
+    latest_primary = DAILY_REFRESH_LATEST / 'finviz_momentum_pool.csv'
+    if latest_primary.exists():
+        return latest_primary
+
+    candidates = sorted(
+        DAILY_REFRESH_LATEST.glob('finviz_momentum_pool_*.csv'),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _build_external_candidates_input(scan_date: str, candidate_csv: str = '', tickers: str = '') -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    xq_path = _resolve_latest_xq_csv_path()
+    if xq_path.exists():
+        xq_df = _read_csv_fallback(xq_path)
+        if len(xq_df) > 0:
+            ticker_col = 'symbol' if 'symbol' in xq_df.columns else ('ticker' if 'ticker' in xq_df.columns else None)
+            if ticker_col is not None:
+                for _, row in xq_df.iterrows():
+                    ticker = str(row.get(ticker_col, '')).strip().upper().replace('.US', '')
+                    if not ticker:
+                        continue
+                    continuation_grade = str(row.get('continuation_grade', '')).strip().upper()
+                    decision_tag_hint = str(row.get('decision_tag_hint', '')).strip().lower()
+                    rows.append(
+                        {
+                            'ticker': ticker,
+                            'candidate_origin': 'xq',
+                            'theme_label': str(row.get('setup_type', '')).strip() or continuation_grade,
+                            'catalyst_flag': bool(continuation_grade in {'A', 'B'} or decision_tag_hint == 'keep'),
+                            'input_date': scan_date,
+                        }
+                    )
+
+    finviz_path = _find_latest_finviz_pool_path()
+    if finviz_path is not None and finviz_path.exists():
+        finviz_df = _read_csv_fallback(finviz_path)
+        if len(finviz_df) > 0:
+            ticker_col = 'ticker' if 'ticker' in finviz_df.columns else ('Ticker' if 'Ticker' in finviz_df.columns else None)
+            if ticker_col is not None:
+                for _, row in finviz_df.iterrows():
+                    ticker = str(row.get(ticker_col, '')).strip().upper().replace('.US', '')
+                    if not ticker:
+                        continue
+                    daily_change = pd.to_numeric(row.get('daily_change', row.get('Daily_Change', 0.0)), errors='coerce')
+                    perf_week = pd.to_numeric(row.get('perf_week', row.get('Perf_Week', 0.0)), errors='coerce')
+                    rel_volume = pd.to_numeric(row.get('rel_volume', row.get('Rel_Volume', 0.0)), errors='coerce')
+                    rows.append(
+                        {
+                            'ticker': ticker,
+                            'candidate_origin': 'finviz',
+                            'theme_label': str(row.get('sector', row.get('Sector', ''))).strip(),
+                            'catalyst_flag': bool((pd.notna(daily_change) and daily_change > 5.0) or (pd.notna(perf_week) and perf_week > 8.0) or (pd.notna(rel_volume) and rel_volume >= 1.8)),
+                            'input_date': scan_date,
+                        }
+                    )
+
+    if candidate_csv:
+        path = Path(candidate_csv)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        if path.exists():
+            ext_df = _read_csv_fallback(path)
+            if len(ext_df) > 0:
+                ticker_col = 'ticker' if 'ticker' in ext_df.columns else ('symbol' if 'symbol' in ext_df.columns else None)
+                if ticker_col is not None:
+                    for _, row in ext_df.iterrows():
+                        ticker = str(row.get(ticker_col, '')).strip().upper().replace('.US', '')
+                        if not ticker:
+                            continue
+                        rows.append(
+                            {
+                                'ticker': ticker,
+                                'candidate_origin': str(row.get('candidate_origin', 'manual')).strip() or 'manual',
+                                'theme_label': str(row.get('theme_label', '')).strip(),
+                                'catalyst_flag': str(row.get('catalyst_flag', 'false')).strip().lower() in {'1', 'true', 'yes', 'y'},
+                                'input_date': str(row.get('input_date', scan_date)).strip() or scan_date,
+                            }
+                        )
+
+    for ticker in _parse_ticker_text(tickers):
+        rows.append(
+            {
+                'ticker': ticker,
+                'candidate_origin': 'manual',
+                'theme_label': '',
+                'catalyst_flag': False,
+                'input_date': scan_date,
+            }
+        )
+
+    out = pd.DataFrame(rows, columns=['ticker', 'candidate_origin', 'theme_label', 'catalyst_flag', 'input_date'])
+    if len(out) == 0:
+        return out
+
+    out['ticker'] = out['ticker'].astype(str).str.strip().str.upper().str.replace('.US', '', regex=False)
+    out = out[out['ticker'] != ''].copy()
+    origin_priority = {'manual': 0, 'web_challenger': 1, 'finviz': 2, 'xq': 3}
+    out['_origin_priority'] = out['candidate_origin'].astype(str).str.strip().str.lower().map(origin_priority).fillna(9)
+    out = out.sort_values(['_origin_priority', 'ticker']).drop_duplicates(subset=['ticker'], keep='first')
+    out = out.drop(columns=['_origin_priority']).reset_index(drop=True)
+    return out
 
 
 def _sync_protocol_to_ai_ready_latest(ai_ready_latest_dir: Path) -> bool:
@@ -954,8 +1079,8 @@ def _build_bundle_contract_status(
     else:
         schema_issues = []
         core_required = {
-            'decision_signals_daily': ['ticker', 'decision_tag_v1', 'decision_action', 'risk_level', 'invalidation_rule'],
-            'ranking_signals_daily': ['ticker', 'rank_engine_rank', 'rank_score_v2_adjusted'],
+            'decision_signals_daily': ['ticker', 'decision_tag_v1', 'decision_action', 'risk_level', 'invalidation_rule', 'trend_stage'],
+            'ranking_signals_daily': ['ticker', 'rank_engine_rank', 'rank_score_v2_adjusted', 'playbook_type'],
         }
         check_map = {
             'decision_signals_daily': decision_signals,
@@ -1052,6 +1177,173 @@ def _coalesce_float(*values: object) -> float | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def _contains_dilution_terms(text: object) -> bool:
+    content = str(text or '').strip().lower()
+    if not content:
+        return False
+    keywords = [
+        'offering',
+        'atm',
+        'warrant',
+        'convertible',
+        'reverse_split',
+        'dilution',
+        'shelf',
+    ]
+    return any(k in content for k in keywords)
+
+
+def _classify_trend_stage(row: pd.Series) -> str:
+    monster_stage = str(row.get('monster_stage', '')).strip().lower()
+    daily_change = pd.to_numeric(row.get('daily_change_pct'), errors='coerce')
+    momentum_accel = pd.to_numeric(row.get('momentum_accel_1d3d'), errors='coerce')
+    exhaustion = pd.to_numeric(row.get('open_exhaustion_risk_score'), errors='coerce')
+    volume_gate = str(row.get('volume_gate_status', '')).strip().lower()
+    vwap_status = str(row.get('vwap_status', '')).strip().lower()
+    sqzmom_status = str(row.get('sqzmom_status', '')).strip().lower()
+    decision_tag = str(row.get('decision_tag_v1', '')).strip().lower()
+    readiness = str(row.get('tomorrow_entry_readiness', '')).strip().lower()
+    gate_reason = str(row.get('protocol_gate_reason', '')).strip().lower()
+
+    if (
+        (pd.notna(exhaustion) and float(exhaustion) >= 60.0)
+        or readiness == 'avoid_chase'
+        or volume_gate.startswith('blocked')
+        or ('exhaustion_hard_block' in gate_reason)
+        or ('premarket_too_hot' in gate_reason)
+    ):
+        return 'late_parabolic'
+
+    if (
+        pd.notna(exhaustion)
+        and 20.0 <= float(exhaustion) < 60.0
+        and vwap_status in {'aligned', 'above', 'supported'}
+        and 'pending_confirmation' not in sqzmom_status
+        and decision_tag == 'keep'
+    ):
+        return 'mid_trend'
+
+    if (
+        pd.notna(daily_change)
+        and float(daily_change) > 5.0
+        and (pd.isna(momentum_accel) or float(momentum_accel) > 0.0)
+        and (pd.isna(exhaustion) or float(exhaustion) < 40.0)
+        and not volume_gate.startswith('blocked')
+    ):
+        return 'early_trend'
+
+    if any(k in monster_stage for k in ['啟動', '启动', 'start', 'early']):
+        return 'early_trend'
+    if any(k in monster_stage for k in ['擴散', '扩散', 'mid', '續強', '延續']):
+        return 'mid_trend'
+
+    if pd.notna(exhaustion) and float(exhaustion) >= 50.0:
+        return 'late_parabolic'
+    if pd.notna(exhaustion) and float(exhaustion) >= 30.0:
+        return 'mid_trend'
+    return 'early_trend'
+
+
+def _classify_playbook_type(row: pd.Series) -> str:
+    market_cap = pd.to_numeric(row.get('market_cap_raw'), errors='coerce')
+    revenue_growth = pd.to_numeric(row.get('revenue_growth_yoy'), errors='coerce')
+    risk_level = str(row.get('risk_level', '')).strip().lower()
+    invalidation_rule = str(row.get('invalidation_rule', '')).strip().lower()
+    has_theme = bool(str(row.get('sector', '')).strip() or str(row.get('industry', '')).strip())
+    days_to_earnings = pd.to_numeric(row.get('days_to_earnings'), errors='coerce')
+
+    dilution_related = _contains_dilution_terms(invalidation_rule)
+
+    if (pd.notna(market_cap) and float(market_cap) < 200_000_000) or dilution_related:
+        return 'speculative_pump'
+
+    if (
+        pd.notna(market_cap)
+        and float(market_cap) > 2_000_000_000
+        and (pd.notna(revenue_growth) and float(revenue_growth) > 0.0)
+        and risk_level not in {'high', '高'}
+        and not dilution_related
+    ):
+        return 'core_trend'
+
+    swing_by_cap = pd.notna(market_cap) and 200_000_000 <= float(market_cap) <= 2_000_000_000
+    swing_by_theme = has_theme and pd.notna(days_to_earnings) and 1 <= float(days_to_earnings) <= 30
+    if (swing_by_cap or swing_by_theme) and not dilution_related:
+        return 'swing_trend'
+
+    return 'swing_trend'
+
+
+def _apply_v3_signal_columns(
+    dataset: pd.DataFrame,
+    ranking_signals: pd.DataFrame,
+    decision_signals: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if len(dataset) == 0:
+        return ranking_signals, decision_signals
+
+    context_cols = [
+        'ticker',
+        'daily_change_pct',
+        'momentum_accel_1d3d',
+        'open_exhaustion_risk_score',
+        'volume_gate_status',
+        'vwap_status',
+        'sqzmom_status',
+        'tomorrow_entry_readiness',
+        'protocol_gate_reason',
+        'monster_stage',
+        'market_cap_raw',
+        'risk_level',
+        'invalidation_rule',
+        'days_to_earnings',
+        'sector',
+        'industry',
+        'revenue_growth_yoy',
+    ]
+    context_cols = [c for c in context_cols if c in dataset.columns]
+    context_df = dataset[context_cols].copy() if context_cols else pd.DataFrame(columns=['ticker'])
+
+    decision_out = decision_signals.copy()
+    if len(decision_out) > 0 and 'ticker' in decision_out.columns:
+        decision_out = decision_out.merge(context_df, on='ticker', how='left', suffixes=('', '_dataset'))
+
+        for col in ['risk_level', 'invalidation_rule', 'volume_gate_status', 'vwap_status', 'sqzmom_status']:
+            dataset_col = f'{col}_dataset'
+            if col not in decision_out.columns and dataset_col in decision_out.columns:
+                decision_out[col] = decision_out[dataset_col]
+            elif col in decision_out.columns and dataset_col in decision_out.columns:
+                decision_out[col] = decision_out[col].where(decision_out[col].astype(str).str.strip() != '', decision_out[dataset_col])
+
+        decision_out['trend_stage'] = decision_out.apply(_classify_trend_stage, axis=1)
+
+        drop_cols = [c for c in decision_out.columns if c.endswith('_dataset')]
+        if drop_cols:
+            decision_out = decision_out.drop(columns=drop_cols)
+
+    ranking_out = ranking_signals.copy()
+    if len(ranking_out) > 0 and 'ticker' in ranking_out.columns:
+        ranking_context_cols = [c for c in context_cols if c != 'ticker']
+        ranking_context_df = context_df[['ticker'] + ranking_context_cols].copy() if len(context_df) > 0 else pd.DataFrame(columns=['ticker'])
+        ranking_out = ranking_out.merge(ranking_context_df, on='ticker', how='left', suffixes=('', '_dataset'))
+
+        decision_small = decision_out[['ticker', 'risk_level', 'invalidation_rule']].copy() if len(decision_out) > 0 else pd.DataFrame(columns=['ticker', 'risk_level', 'invalidation_rule'])
+        ranking_out = ranking_out.merge(decision_small, on='ticker', how='left', suffixes=('', '_decision'))
+
+        if 'risk_level' not in ranking_out.columns and 'risk_level_decision' in ranking_out.columns:
+            ranking_out['risk_level'] = ranking_out['risk_level_decision']
+        if 'invalidation_rule' not in ranking_out.columns and 'invalidation_rule_decision' in ranking_out.columns:
+            ranking_out['invalidation_rule'] = ranking_out['invalidation_rule_decision']
+
+        ranking_out['playbook_type'] = ranking_out.apply(_classify_playbook_type, axis=1)
+
+        drop_cols = [c for c in ranking_out.columns if c.endswith('_dataset') or c.endswith('_decision')]
+        if drop_cols:
+            ranking_out = ranking_out.drop(columns=drop_cols)
+
+    return ranking_out, decision_out
 
 
 def _compute_market_shape_metrics(
@@ -1357,36 +1649,17 @@ def _refresh_unified_ai_ready_bundle(
 
     sheet_map = [
         (DAILY_REFRESH_LATEST, 'ai_focus_list.csv', 'ai_focus_list'),
-        (DAILY_REFRESH_LATEST, 'fusion_top_daily.csv', 'fusion_top_daily'),
         (DAILY_REFRESH_LATEST, 'monster_radar_daily.csv', 'monster_radar_daily'),
         (DAILY_REFRESH_LATEST, 'raw_market_daily.csv', 'raw_market_daily'),
         (DAILY_REFRESH_LATEST, 'theme_heat_daily.csv', 'theme_heat_daily'),
         (DAILY_REFRESH_LATEST, 'theme_leaders_daily.csv', 'theme_leaders_daily'),
-        (_resolve_latest_xq_csv_path().parent, 'xq_short_term_updated.csv', 'xq_short_term_updated'),
         (ai_trading_latest_dir, 'market_dataset_daily.csv', 'market_dataset_daily'),
-        (ai_trading_latest_dir, 'feature_signals_daily.csv', 'feature_signals_daily'),
-        (ai_trading_latest_dir, 'radar_signals_daily.csv', 'radar_signals_daily'),
-        (ai_trading_latest_dir, 'event_signals_daily.csv', 'event_signals_daily'),
+        (ai_trading_latest_dir, 'external_candidates_input.csv', 'external_candidates_input'),
         (ai_trading_latest_dir, 'ranking_signals_daily.csv', 'ranking_signals_daily'),
         (ai_trading_latest_dir, 'decision_signals_daily.csv', 'decision_signals_daily'),
         (ai_trading_latest_dir, 'pre_event_watchlist.csv', 'pre_event_watchlist'),
-        (ai_trading_latest_dir, 'live_event_feed.csv', 'live_event_feed'),
-        (ai_trading_latest_dir, 'event_score_log.csv', 'event_score_log'),
-        (ai_trading_latest_dir, 'trade_trigger_queue.csv', 'trade_trigger_queue'),
         (ai_trading_latest_dir, 'bundle_contract_status.csv', 'bundle_contract_status'),
         (ai_trading_latest_dir, 'ai_decision_contract_v2_template.csv', 'ai_decision_contract_v2_template'),
-        (ai_trading_latest_dir, 'ai_decision_contract_v2_materialized.csv', 'ai_decision_contract_v2_material'),
-        (ai_trading_latest_dir, 'decision_funnel_daily.csv', 'decision_funnel_daily'),
-        (ai_trading_latest_dir, 'decision_outcome_audit_daily.csv', 'decision_outcome_audit_daily'),
-        (ai_trading_latest_dir, 'attribution_summary_daily.csv', 'attribution_summary_daily'),
-        (ai_trading_latest_dir, 'baseline_v1_vs_variants_metrics.csv', 'baseline_v1_vs_variants_metrics'),
-        (ai_trading_latest_dir, 'release_readiness_report.csv', 'release_readiness_report'),
-        (ai_trading_latest_dir, 'release_threshold_monitor_report.csv', 'release_threshold_monitor_report'),
-        (ai_trading_latest_dir, 'output_schema_stability_report.csv', 'output_schema_stability_report'),
-        (ai_trading_latest_dir, 'baseline_v1_config.csv', 'baseline_v1_config'),
-        (ai_trading_latest_dir, 'ai_decision_latest.csv', 'ai_decision_latest'),
-        (ai_trading_latest_dir, 'overnight_catalyst_check.csv', 'overnight_catalyst_check'),
-        (ai_trading_latest_dir, 'ai_research_candidates.csv', 'ai_research_candidates'),
     ]
 
     if include_api_catalyst:
@@ -1462,29 +1735,17 @@ def _refresh_unified_ai_ready_bundle(
         'mode': 'unified_b',
         'files': [
             'ai_focus_list.csv',
-            'fusion_top_daily.csv',
             'monster_radar_daily.csv',
             'raw_market_daily.csv',
             'theme_heat_daily.csv',
             'theme_leaders_daily.csv',
-            'xq_short_term_updated.csv',
-            'overnight_catalyst_check.csv',
+            'market_dataset_daily.csv',
+            'external_candidates_input.csv',
+            'ranking_signals_daily.csv',
+            'decision_signals_daily.csv',
             'pre_event_watchlist.csv',
-            'live_event_feed.csv',
-            'event_score_log.csv',
-            'trade_trigger_queue.csv',
             'bundle_contract_status.csv',
             'ai_decision_contract_v2_template.csv',
-            'ai_decision_contract_v2_materialized.csv',
-            'decision_funnel_daily.csv',
-            'decision_outcome_audit_daily.csv',
-            'attribution_summary_daily.csv',
-            'baseline_v1_vs_variants_metrics.csv',
-            'release_readiness_report.csv',
-            'release_threshold_monitor_report.csv',
-            'output_schema_stability_report.csv',
-            'baseline_v1_config.csv',
-            'ai_decision_latest.csv',
             'ai_ready_bundle.xlsx',
         ],
         'bundle_sheet_count': len(written_sheets),
@@ -1493,7 +1754,7 @@ def _refresh_unified_ai_ready_bundle(
         'internal_files': ['README_ai_quick_pack.json'],
         'protocol_synced': protocol_synced,
         'pruned_files': sorted(removed_files),
-        'notes': '統一 B 單一路徑：bundle 內含 continuation + sniper lane 資料；ai_decision_latest 僅為 pipeline preview，官方 final ai_decision 仍由 Web AI 依 bundle+Protocol 產出。README_ai_quick_pack.json 為系統 manifest，不是 Web AI 必傳檔。',
+        'notes': '統一 B 單一路徑：bundle 僅承擔 Layer-2 判讀，不含 Layer-1 雷達原始輸出（例如 xq_short_term_updated）。README_ai_quick_pack.json 為系統 manifest，不是 Web AI 必傳檔。',
     }
     with open(ai_ready_latest_dir / 'README_ai_quick_pack.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -1592,12 +1853,20 @@ def refresh_unified_ai_ready_bundle(
     )
 
 
-def main() -> int:
+def main(candidate_csv: str = '', tickers: str = '') -> int:
     scan_date = _previous_trading_day_str()
     run_stamp = str(os.getenv('AI_BUILD_RUN_STAMP', '')).strip() or datetime.now().strftime('%H%M%S')
 
     run_dir = AI_TRADING_OUTPUT_DIR / scan_date / run_stamp
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    external_candidates_df = _build_external_candidates_input(
+        scan_date=scan_date,
+        candidate_csv=candidate_csv,
+        tickers=tickers,
+    )
+    external_candidates_file = run_dir / 'external_candidates_input.csv'
+    external_candidates_df.to_csv(external_candidates_file, index=False, encoding='utf-8-sig')
 
     paths = DataPaths(
         raw_market_csv=str(DAILY_REFRESH_LATEST / 'raw_market_daily.csv'),
@@ -1605,6 +1874,7 @@ def main() -> int:
         xq_updated_csv=str(_resolve_latest_xq_csv_path()),
         ai_focus_csv=str(DAILY_REFRESH_LATEST / 'ai_focus_list.csv'),
         fusion_csv=str(DAILY_REFRESH_LATEST / 'fusion_top_daily.csv'),
+        external_candidates_csv=str(external_candidates_file),
     )
 
     pipeline = MarketDataPipeline(paths)
@@ -1672,6 +1942,11 @@ def main() -> int:
     )
     artifacts.dataset, artifacts.decision_signals = _sync_volume_gate_columns_for_bundle(
         dataset=artifacts.dataset,
+        decision_signals=artifacts.decision_signals,
+    )
+    artifacts.ranking_signals, artifacts.decision_signals = _apply_v3_signal_columns(
+        dataset=artifacts.dataset,
+        ranking_signals=artifacts.ranking_signals,
         decision_signals=artifacts.decision_signals,
     )
 
@@ -1777,6 +2052,7 @@ def main() -> int:
     artifacts.stats['trade_trigger_rows'] = int(len(trade_trigger_queue_df))
     artifacts.stats['pre_event_rows'] = int(len(pre_event_watchlist_df))
     artifacts.stats['bundle_contract_status'] = str(bundle_contract_status_df.iloc[0].get('error_code', 'UNKNOWN')) if len(bundle_contract_status_df) > 0 else 'UNKNOWN'
+    artifacts.stats['external_input_rows'] = int(len(external_candidates_df))
 
     funnel_cols = [
         'ticker',
@@ -1868,11 +2144,13 @@ def main() -> int:
             'raw_market_daily': paths.raw_market_csv,
             'monster_radar_daily': paths.monster_radar_csv,
             'xq_short_term_updated': paths.xq_updated_csv,
+            'external_candidates_input': str(external_candidates_file),
             'ai_focus_list': paths.ai_focus_csv,
             'fusion_top_daily': paths.fusion_csv,
         },
         'outputs': [
             'market_dataset_daily.csv',
+            'external_candidates_input.csv',
             'feature_signals_daily.csv',
             'radar_signals_daily.csv',
             'event_signals_daily.csv',
@@ -1941,6 +2219,7 @@ def main() -> int:
     print('[AI_TRADING] api catalyst rows =', api_meta.get('rows', 0), '| enabled =', api_meta.get('enabled', False), '| reason =', api_meta.get('reason', 'n/a'))
     print('[AI_TRADING] api ai_decision rows =', api_decision_meta.get('rows', 0), '| enabled =', api_decision_meta.get('enabled', False), '| inbox =', api_decision_meta.get('inbox_path', 'n/a'))
     print('[AI_TRADING] bridge rows =', bridge_meta.get('candidate_rows', 0))
+    print('[AI_TRADING] external input rows =', artifacts.stats.get('external_input_rows', 0))
     print('[AI_TRADING] sniper lane =', sniper_enabled, '| feed mode =', sniper_feed_meta.get('mode', 'none'), '| live events =', len(live_event_feed_df), '| trigger queue =', len(trade_trigger_queue_df))
     print('[AI_TRADING] bundle contract code =', bundle_contract_status_df.iloc[0].get('error_code', 'UNKNOWN') if len(bundle_contract_status_df) > 0 else 'UNKNOWN')
     print('[AI_TRADING] unified B bundle =', bundle_meta.get('bundle_updated', False), '| sheets =', bundle_meta.get('bundle_sheet_count', 0), '| reason =', bundle_meta.get('reason', 'n/a'))
@@ -1949,4 +2228,8 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description='Build AI trading dataset and bundle outputs')
+    parser.add_argument('--candidate-csv', default='', help='External candidate CSV path (must contain ticker/symbol column)')
+    parser.add_argument('--tickers', default='', help='Comma or whitespace separated external tickers')
+    args = parser.parse_args()
+    raise SystemExit(main(candidate_csv=str(args.candidate_csv or ''), tickers=str(args.tickers or '')))

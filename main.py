@@ -88,6 +88,7 @@ from signal_store import get_latest_signals
 from power_awake import keep_system_awake
 
 install_builtin_print_logging()
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Google Sheets 相關套件
 try:
@@ -1097,6 +1098,59 @@ def create_demo_data() -> pd.DataFrame:
     ]
 
     return pd.DataFrame(demo_stocks)
+
+
+def load_layer1_finviz_pool() -> pd.DataFrame:
+    """載入 Layer-1 Finviz 雷達輸出，不在 bundle 主流程內直接呼叫 Finviz。"""
+    base_dir = Path(LOCAL_OUTPUT_DIR)
+    if not base_dir.is_absolute():
+        base_dir = Path(__file__).resolve().parent / base_dir
+    latest_dir = base_dir / 'latest'
+
+    pool_file = latest_dir / 'finviz_momentum_pool.csv'
+    if not pool_file.exists():
+        print(f"  [!] 找不到 Layer-1 Finviz 輸出: {pool_file}")
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_csv(pool_file, encoding='utf-8-sig')
+    except UnicodeDecodeError:
+        df = pd.read_csv(pool_file)
+    except (OSError, ValueError, TypeError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+    if len(df) == 0:
+        return pd.DataFrame()
+
+    rename_map = {
+        'ticker': 'Ticker',
+        'company': 'Company',
+        'sector': 'Sector',
+        'industry': 'Industry',
+        'market_cap_raw': 'Market_Cap_Raw',
+        'market_cap': 'Market_Cap',
+        'price': 'Price',
+        'volume': 'Volume',
+        'rel_volume': 'Rel_Volume',
+        'daily_change': 'Daily_Change',
+        'perf_week': 'Perf_Week',
+    }
+    out = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}).copy()
+    for col in ['Ticker', 'Company', 'Sector', 'Industry', 'Market_Cap', 'Market_Cap_Raw', 'Price', 'Volume', 'Rel_Volume', 'Daily_Change', 'Perf_Week']:
+        if col not in out.columns:
+            out[col] = 0.0 if col in {'Market_Cap_Raw', 'Price', 'Volume', 'Rel_Volume', 'Daily_Change', 'Perf_Week'} else ''
+
+    out['Ticker'] = out['Ticker'].astype(str).str.strip().str.upper().str.replace('.US', '', regex=False)
+    out = out[out['Ticker'] != ''].copy()
+
+    if len(out) > 0:
+        out['_change_score'] = pd.to_numeric(out['Daily_Change'], errors='coerce').fillna(0).clip(lower=0)
+        out['_vol_score'] = (pd.to_numeric(out['Rel_Volume'], errors='coerce').fillna(0) - 1).clip(lower=0)
+        out['_signal_score'] = out['_change_score'] * 2 + out['_vol_score'] * 3
+        out = out.sort_values('_signal_score', ascending=False).reset_index(drop=True)
+        out = out.drop(columns=['_change_score', '_vol_score', '_signal_score'])
+
+    return out
 
 def fetch_upcoming_earnings_tickers() -> List[str]:
     """
@@ -2409,16 +2463,17 @@ def main():
         # 步驟 0: 大盤環境濾網（MVP，可關閉）
         apply_market_regime_filter()
 
-        # 步驟 1: 爬取 Finviz（或 DEMO 模式）
+        # 步驟 1: 載入 Layer-1 Finviz 雷達輸出（或 DEMO 模式）
         if DEMO_MODE:
             print("[步驟 1/4] DEMO_MODE 啟用：使用 create_demo_data()")
             df_finviz = create_demo_data()
         else:
-            df_finviz = scrape_finviz_screener()
+            print("[步驟 1/4] 讀取 Layer-1 Finviz 雷達輸出...")
+            df_finviz = load_layer1_finviz_pool()
 
         if len(df_finviz) == 0:
-            print("[X] 錯誤：未從 Finviz 取得任何數據")
-            sys.exit(1)
+            print("[!] 未取得 Layer-1 Finviz 輸出，降級使用示例數據")
+            df_finviz = create_demo_data()
 
         # 步驟 1.5: 合併未來財報股（Finnhub）
         if not DEMO_MODE:
@@ -2451,9 +2506,8 @@ def main():
         signals_available = len(signal_map) > 0
         df_enriched = merge_signals_into_candidates(df_enriched, signal_map, asof=datetime.now().astimezone())
 
-        # 步驟 2.5: 查詢分析師目標價變動（用於 Sheet 3 強化）
-        tickers_for_analyst = df_enriched['Ticker'].tolist()
-        target_changes = fetch_analyst_target_changes(tickers_for_analyst)
+        # 步驟 2.5: 分析師目標價變動改由 Layer-1 外部資料處理（主流程不直連 finviz API）
+        target_changes = {}
 
         # 步驟 3: 篩選多軌清單
         sheet1 = filter_sheet1_launch(df_enriched)

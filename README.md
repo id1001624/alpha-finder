@@ -10,20 +10,30 @@ Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動
 
 ## 每天怎麼操作
 
-### 1. 跑主產線
+### 1. 先跑 Layer-1 市場雷達（XQ + Finviz）
+
+```powershell
+.\run_market_radar.bat
+```
+
+這步只會更新外部候選來源，不會直接改變 bundle 主排序。
+
+### 2. 跑主產線（Layer-2 判讀）
 
 ```powershell
 .\run_daily.bat
 ```
 
+補充：主產線不再執行 XQ/Finviz 掃描，僅做候選判讀與 bundle 輸出。
+
 補充：主產線若產出 `ai_decision_seed_YYYY-MM-DD.csv` 或 `protocol_release_preview_YYYY-MM-DD.csv`，那是 preview/fallback，不是官方最終決策。
 
-### 2. 把這 2 個檔案丟給網頁 AI
+### 3. 把這 2 個檔案丟給網頁 AI
 
 - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx
 - repo_outputs/ai_ready/latest/Alpha-Sniper-Protocol.md
 
-### 3. 把 AI 回傳的決策檔放回 repo
+### 4. 把 AI 回傳的決策檔放回 repo
 
 把 ai_decision_YYYY-MM-DD.csv 放進：
 
@@ -31,7 +41,7 @@ Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動
 
 注意：只有你從 Web AI 產出的 `ai_decision_YYYY-MM-DD.csv` 才是 official final，pipeline 產生的 preview 不可直接當 final 歸檔。
 
-### 4. 歸檔決策
+### 5. 歸檔決策
 
 ```powershell
 python .\scripts\record_ai_decision.py --auto-latest

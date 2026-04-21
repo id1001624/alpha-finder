@@ -146,6 +146,24 @@ class MarketDataPipeline:
         cols = ['ticker'] + [c for c in ['source', 'priority_score', 'ai_query_hint'] if c in focus.columns]
         return focus[cols].copy()
 
+    def _load_external_candidates(self) -> pd.DataFrame:
+        ext = self._safe_read_csv(self.data_paths.external_candidates_csv or '')
+        ext = self._normalize_ticker_column(ext, 'ticker')
+        if len(ext) == 0:
+            return pd.DataFrame(columns=['ticker'])
+
+        keep_cols = [
+            'ticker',
+            'candidate_origin',
+            'theme_label',
+            'catalyst_flag',
+            'input_date',
+        ]
+        for col in keep_cols:
+            if col not in ext.columns:
+                ext[col] = ''
+        return ext[keep_cols].copy()
+
     def _load_fusion_tickers(self) -> List[str]:
         fusion = self._safe_read_csv(self.data_paths.fusion_csv or '')
         if len(fusion) == 0:
@@ -193,12 +211,13 @@ class MarketDataPipeline:
         monster_df = self._load_monster()
         xq_df = self._load_xq()
         focus_df = self._load_ai_focus()
+        external_df = self._load_external_candidates()
         fusion_tickers = set(self._load_fusion_tickers())
 
         ticker_union = set(raw_df.get('ticker', pd.Series(dtype=str)).tolist())
         ticker_union.update(monster_df.get('ticker', pd.Series(dtype=str)).tolist())
-        ticker_union.update(xq_df.get('ticker', pd.Series(dtype=str)).tolist())
         ticker_union.update(focus_df.get('ticker', pd.Series(dtype=str)).tolist())
+        ticker_union.update(external_df.get('ticker', pd.Series(dtype=str)).tolist())
         ticker_union = {t for t in ticker_union if t}
 
         if not ticker_union:
@@ -216,6 +235,7 @@ class MarketDataPipeline:
                     'monster_rows': len(monster_df),
                     'xq_rows': len(xq_df),
                     'ai_focus_rows': len(focus_df),
+                    'external_candidate_rows': len(external_df),
                 },
             )
 
@@ -223,6 +243,8 @@ class MarketDataPipeline:
         dataset = dataset.merge(raw_df, on='ticker', how='left')
         dataset = dataset.merge(monster_df, on='ticker', how='left')
         dataset = dataset.merge(xq_df, on='ticker', how='left')
+        if len(external_df) > 0:
+            dataset = dataset.merge(external_df, on='ticker', how='left', suffixes=('', '_external'))
 
         if len(focus_df) > 0:
             focus_keep_cols = ['ticker'] + [c for c in ['source', 'priority_score', 'ai_query_hint'] if c in focus_df.columns]
@@ -231,6 +253,7 @@ class MarketDataPipeline:
         dataset['is_in_monster_radar'] = dataset['ticker'].isin(set(monster_df.get('ticker', pd.Series(dtype=str)).tolist()))
         dataset['is_in_ai_focus'] = dataset['ticker'].isin(set(focus_df.get('ticker', pd.Series(dtype=str)).tolist()))
         dataset['is_in_xq'] = dataset['ticker'].isin(set(xq_df.get('ticker', pd.Series(dtype=str)).tolist()))
+        dataset['is_in_external_candidates'] = dataset['ticker'].isin(set(external_df.get('ticker', pd.Series(dtype=str)).tolist()))
         dataset['is_in_fusion'] = dataset['ticker'].isin(fusion_tickers)
 
         dataset['as_of_date'] = as_of_date
@@ -271,6 +294,7 @@ class MarketDataPipeline:
             'monster_rows': len(monster_df),
             'xq_rows': len(xq_df),
             'ai_focus_rows': len(focus_df),
+            'external_candidate_rows': len(external_df),
             'feature_rows': len(feature_signals),
             'radar_rows': len(radar_signals),
             'event_rows': len(event_signals),

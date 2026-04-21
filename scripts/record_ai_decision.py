@@ -108,6 +108,8 @@ FINAL_DECISION_COLUMNS = [
     "web_override_flag",
     "web_override_reason",
     "web_delta_score",
+    "trend_stage",
+    "playbook_type",
     "execution_action",
     "position_plan",
     "exit_action",

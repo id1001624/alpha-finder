@@ -109,9 +109,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from power_awake import keep_system_awake
 
 try:
-    from config import AI_READY_OUTPUT_ENABLED, LOCAL_OUTPUT_DIR
+    from config import LOCAL_OUTPUT_DIR
 except (ImportError, ModuleNotFoundError, AttributeError, OSError, ValueError):
-    AI_READY_OUTPUT_ENABLED = True
     LOCAL_OUTPUT_DIR = "repo_outputs/daily_refresh"
 
 XQ_EXPORTS_DIR = find_xq_exports_dir()
@@ -119,8 +118,8 @@ BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "repo_outputs" / "backtest"
 PICK_LOG_FILE = BACKTEST_OUTPUT_DIR / "xq_pick_log.csv"
 DAILY_PICKS_DIR = BACKTEST_OUTPUT_DIR / "daily_xq_picks"
 TOP_PICKS_PER_FILE = 10
-AI_XQ_TARGET_FILE = "xq_short_term_updated.csv"
-AI_XQ_MANIFEST_FILE = "xq_short_term_manifest.json"
+XQ_RADAR_TARGET_FILE = "xq_short_term_updated.csv"
+XQ_RADAR_MANIFEST_FILE = "xq_short_term_manifest.json"
 
 COLUMN_RENAME_MAP = {
     "序號": "index",
@@ -750,9 +749,7 @@ def _resolve_daily_refresh_base_dir() -> Path:
     return raw if raw.is_absolute() else (PROJECT_ROOT / raw)
 
 
-def export_ai_ready_xq_file(source_df: pd.DataFrame) -> Path | None:
-    if not AI_READY_OUTPUT_ENABLED:
-        return None
+def export_layer1_xq_file(source_df: pd.DataFrame) -> Path | None:
     if source_df is None or len(source_df) == 0:
         return None
 
@@ -760,17 +757,14 @@ def export_ai_ready_xq_file(source_df: pd.DataFrame) -> Path | None:
     latest_dir = base_dir / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
 
-    target = latest_dir / AI_XQ_TARGET_FILE
+    target = latest_dir / XQ_RADAR_TARGET_FILE
     source_df.to_csv(target, index=False, encoding='utf-8-sig')
     return target
 
 
-def write_ai_ready_xq_manifest(source_file: Path, exported_file: Path, row_count: int) -> Path | None:
-    if not AI_READY_OUTPUT_ENABLED:
-        return None
-
+def write_layer1_xq_manifest(source_file: Path, exported_file: Path, row_count: int) -> Path | None:
     latest_dir = exported_file.parent
-    manifest_path = latest_dir / AI_XQ_MANIFEST_FILE
+    manifest_path = latest_dir / XQ_RADAR_MANIFEST_FILE
     source_mtime = datetime.fromtimestamp(source_file.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
     manifest = {
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -901,7 +895,7 @@ def update_csv_with_history(file_path, ticker_column=None):
         time.sleep(0.5)
     
     try:
-        # 輸出前將欄位改為英文（僅供後續寫入 ai_ready）
+        # 輸出前將欄位改為英文（供 Layer-1 雷達與後續候選輸入使用）
         df_out, rename_map = rename_columns_to_english(df)
         if ticker_column in rename_map:
             ticker_column = rename_map[ticker_column]
@@ -909,7 +903,7 @@ def update_csv_with_history(file_path, ticker_column=None):
         print(f"\n{'='*60}")
         print(f"✅ 已處理: {file_path.name}")
         print(f"📊 成功更新: {success_count}/{total} 支股票")
-        print(f"🧭 輸出目標: repo_outputs/daily_refresh/latest/{AI_XQ_TARGET_FILE}")
+        print(f"🧭 輸出目標: repo_outputs/daily_refresh/latest/{XQ_RADAR_TARGET_FILE}")
         print(f"{'='*60}\n")
         return df_out, ticker_column, file_path.name
     except (OSError, ValueError, TypeError) as e:
@@ -1001,7 +995,7 @@ def main():
             if not args.allow_stale and not _is_file_modified_today(latest_file):
                 print(f"❌ 偵測到最新 XQ 匯出不是今天的檔案：{latest_file.name}")
                 print(f"   最後修改時間：{_describe_file_mtime(latest_file)}")
-                print("   為避免舊 XQ 資料被重新包進今日 ai_ready_bundle，已中止本次流程。")
+                print("   為避免舊 XQ 資料混入今日 Layer-1 雷達輸出，已中止本次流程。")
                 print("   若你確定要沿用舊檔，請手動執行：python .\\scripts\\update_xq_with_history.py --allow-stale")
                 return 3
             selected_files = [latest_file]
@@ -1044,13 +1038,13 @@ def main():
             print(f"主檔: {log_file}")
             print(f"每日檔: {daily_file}")
 
-        ai_target = export_ai_ready_xq_file(best_ai_xq_df)
-        if ai_target is not None:
+        xq_target = export_layer1_xq_file(best_ai_xq_df)
+        if xq_target is not None:
             manifest_path = None
             if best_source_path is not None and best_source_path.exists():
-                manifest_path = write_ai_ready_xq_manifest(best_source_path, ai_target, len(best_ai_xq_df))
-            print("\n===== AI 五檔快捷輸出已更新 =====")
-            print(f"XQ 檔案: {ai_target}")
+                manifest_path = write_layer1_xq_manifest(best_source_path, xq_target, len(best_ai_xq_df))
+            print("\n===== Layer-1 XQ 雷達輸出已更新 =====")
+            print(f"XQ 檔案: {xq_target}")
             if best_source_name:
                 print(f"來源 XQ: {best_source_name}")
             if manifest_path is not None:

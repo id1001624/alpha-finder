@@ -39,6 +39,14 @@ run_daily.bat
 - 網頁 AI 最終必須輸出 ai_decision_YYYY-MM-DD.csv
 - 使用者再執行 python .\scripts\record_ai_decision.py --auto-latest
 
+### 1.5 Layer-1 Radar Must Be Separated From Bundle
+
+- `xq_short_term_updated.csv` 與 `finviz_momentum_pool*.csv` 都是 Layer-1 候選雷達輸出。
+- 這兩類輸出不得直接作為 bundle 主排序輸入，也不得在 `ai_ready_bundle.xlsx` 內作為獨立候選生成 sheet。
+- Layer-1 候選必須先匯入 `external_candidates_input`，再由 Layer-2 做技術 gate 與風控判讀。
+- `scripts/update_xq_with_history.py` 與 `scripts/finviz_momentum_scanner.py` 應走獨立排程（例如 `run_market_radar.bat`），不綁定 `run_daily.bat` 主流程。
+- StockTitan 是外部網站資料來源，不屬於此 repo 內建爬取實作範圍。
+
 ### 2. API Mode Is Fallback
 
 - AI_RESEARCH_MODE='api' 時，系統走 Tavily + Gemini 備援
@@ -73,6 +81,9 @@ run_daily.bat
 
 - repo_outputs/ai_ready/latest/ai_ready_bundle.xlsx 是 web AI 的統一入口
 - 不要再回到舊的多檔分散輸入模式，除非使用者明確要求
+- bundle 僅承擔 Layer-2 判讀，不承擔 Layer-1 候選宇宙生成。
+- `external_candidates_input` 是外部候選進入 bundle 的唯一入口。
+- `xq_short_term_updated.csv` 應維持於 `repo_outputs/daily_refresh/latest/` 作為獨立雷達輸出，不直接住在 bundle。
 
 ### 2. Decision Contract Is Stable
 

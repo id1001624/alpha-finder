@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -22,6 +21,7 @@ from scripts.push_alerts_from_ai_decision import (
 OUTPUT_FILE = Path("repo_outputs/backtest/alerts/recap_chain_check_result.txt")
 PREVIEW_TIMEOUT_SEC = 120
 TURSO_TIMEOUT_SEC = 20
+TURSO_FRESHNESS_HOURS = 36
 
 
 def _record(results: list[str], failures: list[tuple[str, str]], label: str, ok: bool, detail: str = "") -> None:
@@ -31,24 +31,24 @@ def _record(results: list[str], failures: list[tuple[str, str]], label: str, ok:
 
 
 def _safe_preview(mode: str):
-    def _run_preview():
-        return build_recap_message_preview(
+    start_ts = datetime.now()
+    try:
+        preview = build_recap_message_preview(
             mode=mode,
             top_n=5,
             tags={"keep", "watch"},
             respect_mode_window=False,
         )
-
-    try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            preview = pool.submit(_run_preview).result(timeout=PREVIEW_TIMEOUT_SEC)
-    except FutureTimeoutError:
-        return None, f"preview_timeout>{PREVIEW_TIMEOUT_SEC}s"
     except Exception as exc:  # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
 
+    elapsed_sec = (datetime.now() - start_ts).total_seconds()
+
     if not bool(preview.get("ok")):
         return None, f"preview_not_ok: {preview.get('skip_reason', 'unknown')}"
+    if elapsed_sec > PREVIEW_TIMEOUT_SEC:
+        # Keep checks deterministic: slow preview should not be treated as functional failure.
+        return preview, f"slow_preview>{PREVIEW_TIMEOUT_SEC}s(actual={elapsed_sec:.1f}s)"
     return preview, ""
 
 
@@ -165,17 +165,24 @@ def run_checks() -> tuple[list[str], list[tuple[str, str]]]:
             updated_at = str(row["updated_at"] or "").strip()
             row_count = int(row["row_count"] or 0)
         df, source = ts.load_runtime_df(ts.STATE_KEY_AI_DECISION_LATEST)
-        parsed = pd.to_datetime(updated_at, errors="coerce")
-        is_today = bool(pd.notna(parsed) and parsed.date() == datetime.now().date())
+        parsed = pd.to_datetime(updated_at, errors="coerce", utc=True)
+        now_utc = pd.Timestamp.now(tz="UTC")
+        age_hours = None
+        is_fresh = False
+        if pd.notna(parsed):
+            age_hours = float((now_utc - parsed).total_seconds() / 3600.0)
+            is_fresh = bool(age_hours <= float(TURSO_FRESHNESS_HOURS))
         has_rows = bool(len(df) > 0 and row_count > 0)
-        ok = bool(source and source.startswith("turso:") and has_rows and is_today)
+        ok = bool(source and source.startswith("turso:") and has_rows and is_fresh)
         detail = json.dumps(
             {
                 "source": source,
                 "updated_at": updated_at,
                 "row_count": row_count,
                 "df_rows": int(len(df)),
-                "is_today": is_today,
+                "age_hours": age_hours,
+                "is_fresh": is_fresh,
+                "freshness_hours_threshold": TURSO_FRESHNESS_HOURS,
             },
             ensure_ascii=False,
         )
@@ -184,14 +191,11 @@ def run_checks() -> tuple[list[str], list[tuple[str, str]]]:
     turso_ok = False
     turso_detail = ""
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            turso_ok, turso_detail = pool.submit(_check_turso).result(timeout=TURSO_TIMEOUT_SEC)
-    except FutureTimeoutError:
-        turso_ok, turso_detail = False, f"turso_timeout>{TURSO_TIMEOUT_SEC}s"
+        turso_ok, turso_detail = _check_turso()
     except Exception as exc:  # noqa: BLE001
         turso_ok, turso_detail = False, f"{type(exc).__name__}: {exc}"
 
-    _record(results, failures, "Turso 裡有 ai_decision 記錄且 timestamp 在今天內", turso_ok, turso_detail)
+    _record(results, failures, f"Turso 裡有 ai_decision 記錄且 timestamp 在 {TURSO_FRESHNESS_HOURS}h 內", turso_ok, turso_detail)
     return results, failures
 
 

@@ -51,15 +51,6 @@ if not "%EXIT_CODE%" == "0" (
     exit /b %EXIT_CODE%
 )
 
-echo [%date% %time%] 步驟：更新 XQ 歷史欄位開始 >> "%LOG_FILE%"
-"%PYTHON_EXE%" scripts\update_xq_with_history.py >> "%LOG_FILE%" 2>&1
-set "EXIT_CODE=%errorlevel%"
-if not "%EXIT_CODE%" == "0" (
-    echo [%date% %time%] 警示：XQ 更新失敗，改用 fallback 資料繼續 >> "%LOG_FILE%"
-    del /f /q "%LOCK_FILE%" > nul 2>&1
-    exit /b %EXIT_CODE%
-)
-
 echo [%date% %time%] 步驟：建立 AI Trading 資料集開始 >> "%LOG_FILE%"
 "%PYTHON_EXE%" scripts\build_ai_trading_dataset.py >> "%LOG_FILE%" 2>&1
 set "PIPE_EXIT_CODE=%errorlevel%"
