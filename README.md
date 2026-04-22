@@ -8,6 +8,11 @@
 盤中監控、風控提醒、Swing 掃描都維持自動。
 Recap（睡前 / 早晨 / 開盤 / watchlist）改成你用 Discord 指令手動觸發，避免排程延遲。
 
+如果你現在只想先搞懂怎麼用，先看這兩份：
+
+- [docs/DAILY_SOP.md](docs/DAILY_SOP.md)
+- [docs/V3.1_SPEC.md](docs/V3.1_SPEC.md)
+
 ## 每天怎麼操作
 
 ### 1. 先跑 Layer-1 市場雷達（XQ + Finviz）
